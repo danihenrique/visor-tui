@@ -20,24 +20,7 @@ pub fn render_scrolled(
     modal: SettingsModal,
     selection: &mut TableSelection,
 ) {
-    let mut rows = Vec::new();
-    match api.me() {
-        Ok(me) => {
-            for (label, value) in [
-                ("Nome", Some(me.name)),
-                ("Email", Some(me.email)),
-                ("Locale", me.locale),
-                ("Moeda", me.display_currency_code),
-                ("Plano", me.plan),
-            ] {
-                rows.push(TableRow::new([
-                    label.to_string(),
-                    value.unwrap_or_else(|| "—".into()),
-                ]));
-            }
-        }
-        Err(error) => rows.push(TableRow::new(["Perfil".into(), format!("{error}")])),
-    }
+    let profile = api.me();
     let space = api.spaces().map_or_else(
         |error| error.to_string(),
         |spaces| {
@@ -47,41 +30,91 @@ pub fn render_scrolled(
                 .map_or_else(|| "Nenhum espaço ativo".into(), |space| space.name)
         },
     );
-    rows.push(TableRow::new(["Espaço".into(), space]));
     let credential = api.credential();
-    for (label, value) in [
-        ("Autenticação", credential.kind_label().to_string()),
-        ("Token", credential.redacted()),
-        ("Expiração", credential.expiry_display()),
-        ("Armazenamento", "~/.config/visor/credentials.json".into()),
-    ] {
-        rows.push(TableRow::new([label.to_string(), value]));
-    }
-    selection.set_row_count(rows.len());
-    let selected = selection.selected();
+    let authentication = credential.kind_label().to_string();
+    let expiry = credential.expiry_display();
+    let compact = ui.height() < 19;
+    selection.set_row_count(3);
+    let selected = selection.selected().unwrap_or(0);
+    let muted = ui.theme().muted;
+    let accent = ui.theme().accent;
+    let border = ui.theme().border;
     ui.column(Column::new().gap(1), move |col| {
-        col.row(Row::new().size(Size::Cells(1)).gap(1), move |row| {
-            row.button(ButtonOptions::new("Trocar espaço (s)"), "change_space");
-            row.button(
-                ButtonOptions::new("Sair da conta (l)").variant(ButtonVariant::Danger),
-                "logout",
+        if !compact || selected == 0 {
+            let title = profile.as_ref().map_or_else(
+                |_| "Perfil".into(),
+                |me| format!("Perfil · {}", me.plan.as_deref().unwrap_or("Visor")),
             );
-        });
-        col.table(
-            TableOptions {
-                columns: vec![
-                    TableColumn::new("Campo").width(Size::Cells(14)),
-                    TableColumn::new("Valor").width(Size::Fill),
-                ],
-                rows,
-                selected,
-                follow_selection: true,
-                zebra: true,
-                ..Default::default()
-            },
-            "settings:table",
-        );
-        col.text("j/k ou ↑/↓ Rolar todas as informações");
+            col.panel(
+                Panel {
+                    border_color: Some(if selected == 0 { accent } else { border }),
+                    ..Panel::new().title(title).size(Size::Cells(5))
+                },
+                move |panel| match profile {
+                    Ok(me) => {
+                        panel.styled_text(&me.name, TextStyle::new().bold());
+                        panel.styled_text(&me.email, TextStyle::new().fg(muted));
+                        panel.styled_text(
+                            &format!(
+                                "Idioma {}   ·   Moeda {}",
+                                me.locale.as_deref().unwrap_or("Não informado"),
+                                me.display_currency_code
+                                    .as_deref()
+                                    .unwrap_or("Não informada")
+                            ),
+                            TextStyle::new().fg(muted),
+                        );
+                    }
+                    Err(error) => {
+                        panel.text(&format!("Não foi possível carregar o perfil. {error}"));
+                    }
+                },
+            );
+        }
+        if !compact || selected == 1 {
+            col.panel(
+                Panel {
+                    border_color: Some(if selected == 1 { accent } else { border }),
+                    ..Panel::new().title("Espaço ativo").size(Size::Cells(4))
+                },
+                move |panel| {
+                    panel.styled_text(&space, TextStyle::new().fg(accent).bold());
+                    panel.button(
+                        ButtonOptions::new("s Trocar espaço").variant(ButtonVariant::Ghost),
+                        "change_space",
+                    );
+                },
+            );
+        }
+        if !compact || selected == 2 {
+            col.panel(
+                Panel {
+                    border_color: Some(if selected == 2 { accent } else { border }),
+                    ..Panel::new()
+                        .title("Acesso e segurança")
+                        .size(Size::Cells(7))
+                },
+                move |panel| {
+                    panel.styled_text(&authentication, TextStyle::new().bold());
+                    panel.styled_text(&format!("Validade {expiry}"), TextStyle::new().fg(muted));
+                    panel.label("Credencial protegida");
+                    panel.label("~/.config/visor/credentials.json");
+                    panel.button(
+                        ButtonOptions::new("l Sair da conta").variant(ButtonVariant::Ghost),
+                        "logout",
+                    );
+                },
+            );
+        }
+        if compact {
+            col.styled_text(
+                &format!(
+                    "Seção {}/3  ·  j/k Perfil, espaço e acesso  ·  s Trocar  l Sair",
+                    selected + 1
+                ),
+                TextStyle::new().fg(muted),
+            );
+        }
     });
     if modal == SettingsModal::LogoutConfirm {
         ui.modal(logout_dialog());
