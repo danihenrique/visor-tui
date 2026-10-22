@@ -183,6 +183,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
     errors = []
     transactions = {}
     transaction_delay = 0
+    fail_after_first_page = False
 
     @classmethod
     def reset(cls):
@@ -190,6 +191,7 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         cls.errors.clear()
         cls.transactions = {item["id"]: dict(item) for item in [TRANSACTION, *EXTRA_TRANSACTIONS]}
         cls.transaction_delay = 0
+        cls.fail_after_first_page = False
 
     def transaction_page(self, query):
         start = date.fromisoformat(query["from_date"][0])
@@ -281,6 +283,9 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             data = [item for item in NOTIFICATIONS if not unread or not item["read"]]
         elif path.endswith("/transactions"):
             time.sleep(self.transaction_delay)
+            if self.fail_after_first_page and "after" in query:
+                self.respond({"errors": [{"code": "FIXTURE_PAGE_FAILURE", "message": "Falha da segunda página"}]}, 503)
+                return
             self.respond(self.transaction_page(query))
             return
         elif "/transactions/" in path:
@@ -578,6 +583,22 @@ def check_periods(terminal, captures):
     terminal.send("k\r")
     terminal.send("2")
     terminal.expect("Outubro 2026")
+    Fixture.transaction_delay = 0.2
+    terminal.send("r")
+    terminal.wait_until(lambda: "Carregando" in terminal.text(), "Loading frame was not painted before fetching")
+    terminal.capture(captures, "period-loading")
+    assert "14 lançamentos" not in terminal.text(), "Loading showed stale completed totals"
+    terminal.wait_until(lambda: "14 lançamentos" in terminal.text(), "Delayed period fetch did not complete")
+    Fixture.transaction_delay = 0
+    Fixture.fail_after_first_page = True
+    terminal.send("r")
+    terminal.wait_until(lambda: "Totais indisponíveis" in terminal.text(), "Later-page failure published a partial period")
+    terminal.capture(captures, "period-error")
+    for stale in ("11.200,00", "14 lançamentos", "0 lançamentos", "3 lançamentos"):
+        assert stale not in terminal.text(), f"Failed period displayed a valid-looking value: {stale}"
+    Fixture.fail_after_first_page = False
+    terminal.send("r")
+    terminal.wait_until(lambda: "14 lançamentos" in terminal.text(), "Retry did not restore the complete period")
     assert not Fixture.errors, Fixture.errors
     assert all(request[0] == "GET" for request in Fixture.requests), "Period checks made a write"
 
