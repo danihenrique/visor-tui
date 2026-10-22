@@ -1,6 +1,6 @@
-use hqtui::prelude::*;
 use hqtui::color::Color;
-use hqtui::widgets::{ButtonOptions, ButtonVariant, DividerOptions, TextStyle};
+use hqtui::prelude::*;
+use hqtui::widgets::{ButtonOptions, ButtonVariant, TextStyle};
 
 use crate::api::ApiClient;
 use crate::auth;
@@ -99,11 +99,10 @@ fn check_login() -> CheckResult {
     match auth::load_credential() {
         Some(cred) => {
             let kind = cred.kind_label();
-            let redacted = cred.redacted();
             CheckResult {
                 name: "Login".to_string(),
                 outcome: Outcome::Ok,
-                message: format!("{kind} ({redacted})"),
+                message: format!("Sessão autenticada · {kind}"),
             }
         }
         None => CheckResult {
@@ -119,7 +118,11 @@ fn check_api(api: &ApiClient) -> CheckResult {
         Ok(me) => CheckResult {
             name: "Visor API".to_string(),
             outcome: Outcome::Ok,
-            message: format!("{} ({} plan)", me.email, me.plan.as_deref().unwrap_or("unknown")),
+            message: format!(
+                "{} ({} plan)",
+                me.email,
+                me.plan.as_deref().unwrap_or("unknown")
+            ),
         },
         Err(e) => {
             let first_line = e.to_string().lines().next().unwrap_or_default().to_string();
@@ -166,50 +169,66 @@ fn check_space(api: &ApiClient) -> CheckResult {
     }
 }
 
-/// Pre-computed display entry for a single check, owned so it can be moved into closures.
-#[derive(Debug, Clone)]
-struct CheckDisplay {
-    line: String,
-    color: Color,
-}
-
 pub fn render(ui: &mut Container<'_>, state: &DoctorState) {
-    // Pre-compute all display data before entering closures.
-    let displays: Vec<CheckDisplay> = state
+    use crate::presentation::{Metric, Tone, metric_strip};
+    let ok = state
         .checks
         .iter()
-        .map(|check| CheckDisplay {
-            line: format!(
-                "  {}  {:<13} {}",
-                check.outcome.indicator(),
-                check.name,
-                check.message
-            ),
-            color: check.outcome.color(),
-        })
-        .collect();
-    let is_empty = state.checks.is_empty();
-
+        .filter(|c| c.outcome == Outcome::Ok)
+        .count();
+    let warnings = state
+        .checks
+        .iter()
+        .filter(|c| c.outcome == Outcome::Warn)
+        .count();
+    let failures = state
+        .checks
+        .iter()
+        .filter(|c| c.outcome == Outcome::Fail)
+        .count();
+    let checks = state.checks.clone();
+    let show_metrics = ui.height() >= 15;
+    let muted = ui.theme().muted;
     ui.column(Column::new().gap(1), move |col| {
-        col.panel(Panel::new().title("Diagnostics"), move |p| {
-            p.text("Health checks for your Visor TUI environment.");
-            p.divider(DividerOptions::default());
-
-            for d in &displays {
-                p.styled_text(&d.line, TextStyle::new().fg(d.color));
+        if show_metrics {
+            metric_strip(
+                col,
+                vec![
+                    Metric::new("Verificações OK", ok.to_string(), Tone::Positive),
+                    Metric::new("Avisos", warnings.to_string(), Tone::Warning),
+                    Metric::new("Falhas", failures.to_string(), Tone::Negative),
+                ],
+            );
+        }
+        col.panel(Panel::new().title("Saúde do aplicativo"), move |panel| {
+            if checks.is_empty() {
+                panel.text("As verificações ainda não foram executadas.");
             }
-
-            if is_empty {
-                p.text("  No checks have been run yet.");
+            for check in checks {
+                let name = match check.name.as_str() {
+                    "Version" => "Versão instalada",
+                    "Login" => "Autenticação",
+                    "Space" => "Espaço ativo",
+                    other => other,
+                };
+                panel.styled_text(
+                    &format!("{}  {name}", check.outcome.indicator()),
+                    TextStyle::new().fg(check.outcome.color()).bold(),
+                );
+                for line in hqtui::unicode::wrap(&check.message, panel.width())
+                    .into_iter()
+                    .take(2)
+                {
+                    panel.styled_text(&line, TextStyle::new().fg(muted));
+                }
+                if show_metrics {
+                    panel.spacer(Size::Cells(1));
+                }
             }
-
-            p.divider(DividerOptions::default());
-            p.text("Press 'r' to re-run checks.");
         });
-
-        col.row(Row::new(), move |r| {
-            r.button(
-                ButtonOptions::new("Re-run checks").variant(ButtonVariant::Primary),
+        col.row(Row::new().size(Size::Cells(1)), move |row| {
+            row.button(
+                ButtonOptions::new("r Executar verificações").variant(ButtonVariant::Ghost),
                 "doctor_rerun",
             );
         });
