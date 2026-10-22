@@ -396,6 +396,17 @@ impl ApiClient {
         Self::from_credential(credential)
     }
 
+    pub fn with_space(credential: Credential, space_id: &str) -> Result<Self, ApiError> {
+        let mut client = Self::from_credential(credential)?;
+        client.space_id = Some(space_id.to_owned());
+        Ok(client)
+    }
+
+    #[must_use]
+    pub fn space_id(&self) -> Option<&str> {
+        self.space_id.as_deref()
+    }
+
     /// Return a reference to the current credential (for display purposes).
     #[must_use]
     pub fn credential(&self) -> &Credential {
