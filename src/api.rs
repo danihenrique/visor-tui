@@ -36,6 +36,15 @@ impl ApiClient {
     /// Create a new API client from stored/env credential and config.
     pub fn new() -> Result<Self, ApiError> {
         let credential = crate::auth::load_credential().ok_or(ApiError::NoCredential)?;
+        Self::from_credential(credential)
+    }
+
+    /// Create a new API client with an explicit credential (no env lookup).
+    pub fn with_credential(credential: crate::auth::Credential) -> Result<Self, ApiError> {
+        Self::from_credential(credential)
+    }
+
+    fn from_credential(credential: crate::auth::Credential) -> Result<Self, ApiError> {
         let space_id = config::active_space_id();
         let base_url = config::api_base_url();
 
