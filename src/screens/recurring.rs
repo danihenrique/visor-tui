@@ -4,6 +4,7 @@ use hqtui::widgets::{ButtonOptions, ButtonVariant, ModalButton, ModalOptions};
 
 use crate::api::ApiClient;
 use crate::models::RecurringExpense;
+use crate::presentation::{Metric, Tone, format_currency, metric_strip, money_total};
 
 const FREQUENCY_OPTIONS: &[&str] = &["monthly", "yearly", "weekly", "biweekly"];
 
@@ -622,32 +623,6 @@ impl Default for RecurringScreen {
     }
 }
 
-fn format_money(amount_str: &str) -> String {
-    let amount_str = amount_str.trim();
-    let clean_str = amount_str.replace(['.', ',', ' '], "");
-    if let Ok(amount) = clean_str.parse::<f64>() {
-        let formatted = format!("{amount:.2}");
-        let parts: Vec<&str> = formatted.split('.').collect();
-        if parts.len() == 2 {
-            let integer_part = parts[0];
-            let decimal_part = parts[1];
-            let mut result = String::new();
-            let chars: Vec<char> = integer_part.chars().collect();
-            for (i, c) in chars.iter().enumerate() {
-                if i > 0 && (chars.len() - i).is_multiple_of(3) {
-                    result.push('.');
-                }
-                result.push(*c);
-            }
-            format!("R$ {result},{decimal_part}")
-        } else {
-            format!("R$ {},00", parts[0])
-        }
-    } else {
-        format!("R$ {amount_str}")
-    }
-}
-
 fn format_frequency(freq: Option<&str>) -> String {
     match freq {
         Some("monthly") => "Mensal".to_string(),
@@ -655,14 +630,14 @@ fn format_frequency(freq: Option<&str>) -> String {
         Some("weekly") => "Semanal".to_string(),
         Some("biweekly") => "Quinzenal".to_string(),
         Some(f) => f.to_string(),
-        None => "N/A".to_string(),
+        None => "—".to_string(),
     }
 }
 
 fn format_date(date_str: Option<&str>) -> String {
     match date_str {
         Some(d) if !d.is_empty() => d.to_string(),
-        _ => "N/A".to_string(),
+        _ => "—".to_string(),
     }
 }
 
@@ -687,44 +662,82 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut RecurringScreen, a
     let form_error = screen.form_error.clone();
     let delete_target_name = screen.delete_target_name.clone();
 
-    let items: Vec<TableRow> = screen
-        .current_items()
+    let theme = ui.theme().clone();
+    let current_items = screen.current_items();
+    let active_count = current_items.iter().filter(|item| item.active).count();
+    let monthly_total = money_total(
+        current_items
+            .iter()
+            .filter(|item| item.active && item.frequency.as_deref() == Some("monthly"))
+            .map(|item| (item.amount.as_deref(), item.currency_code.as_deref())),
+    );
+    let next_due = current_items
+        .iter()
+        .filter(|item| item.active)
+        .filter_map(|item| item.next_due_date.as_deref())
+        .filter(|date| !date.is_empty())
+        .min()
+        .unwrap_or("—")
+        .to_string();
+    let metrics = vec![
+        Metric::new(
+            "Ativas",
+            format!("{active_count} / {}", current_items.len()),
+            Tone::Accent,
+        ),
+        Metric::new("Mensais ativas", monthly_total, Tone::Negative),
+        Metric::new("Próximo vencimento", next_due, Tone::Neutral),
+    ];
+    let items: Vec<TableRow> = current_items
         .iter()
         .map(|item| {
-            TableRow::new([
+            let mut row = TableRow::new([
                 item.name.clone(),
-                item.amount
-                    .as_deref()
-                    .map_or_else(|| "—".into(), format_money),
+                format_currency(item.amount.as_deref(), item.currency_code.as_deref()),
                 format_frequency(item.frequency.as_deref()),
                 format_date(item.next_due_date.as_deref()),
-            ])
+            ]);
+            row.cell_colors = vec![
+                Some(if item.active {
+                    theme.foreground
+                } else {
+                    theme.muted
+                }),
+                Some(if item.active {
+                    theme.danger
+                } else {
+                    theme.muted
+                }),
+                Some(theme.muted),
+                None,
+            ];
+            row
         })
         .collect();
     let detail = selected
-        .and_then(|index| screen.current_items().get(index))
+        .and_then(|index| current_items.get(index))
         .map(|item| {
             format!(
-                "{} | Último pgto {} | {}",
-                if item.active { "Ativo" } else { "Inativo" },
-                format_date(item.last_paid_date.as_deref()),
-                item.service_name.as_deref().unwrap_or("Sem serviço")
+                "{} · {} · Último pagamento {}",
+                if item.active { "Ativa" } else { "Inativa" },
+                item.service_name
+                    .as_deref()
+                    .unwrap_or("Sem serviço associado"),
+                format_date(item.last_paid_date.as_deref())
             )
         });
-
     let tab_label = match active_tab {
         Tab::Subscriptions => "Assinaturas",
-        Tab::FixedBills => "Contas Fixas",
+        Tab::FixedBills => "Contas fixas",
     };
     let create_label = match active_tab {
-        Tab::Subscriptions => "Nova Assinatura",
-        Tab::FixedBills => "Nova Conta Fixa",
+        Tab::Subscriptions => "Nova assinatura (n)",
+        Tab::FixedBills => "Nova conta (n)",
     };
-    let item_count = items.len();
-    let panel_title = format!("{tab_label} ({item_count})");
+    let panel_title = format!("{tab_label} · {} registros", items.len());
     let is_sub_tab = active_tab == Tab::Subscriptions;
-
     ui.column(Column::new().gap(1), move |col| {
+        metric_strip(col, metrics);
         col.row(Row::new().size(Size::Cells(1)).gap(1), move |row| {
             row.button(
                 ButtonOptions::new("Assinaturas ←").variant(if is_sub_tab {
@@ -743,43 +756,48 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut RecurringScreen, a
                 "tab_fixed_bills",
             );
             row.button(
-                ButtonOptions::new(create_label).variant(ButtonVariant::Primary),
+                ButtonOptions::new(create_label).variant(ButtonVariant::Ghost),
                 "recurring:new",
             );
         });
         col.panel(
             Panel::new()
                 .title(panel_title)
-                .footer("n Nova  e Editar  d Excluir  j/k Selecionar"),
+                .border(BorderStyle::Rounded)
+                .footer("←/→ Tipo  j/k Selecionar  n Nova  e Editar  d Excluir"),
             move |panel| {
                 if loading {
-                    panel.text("Carregando…");
+                    panel.label("Carregando seus compromissos…");
                 } else if let Some(error) = error_msg {
-                    panel.text(&error);
+                    panel.styled_text(&error, TextStyle::new().fg(theme.danger));
                 } else if items.is_empty() {
-                    panel.text("Nenhum item. Pressione n para criar.");
+                    panel.text("Nenhum compromisso recorrente.");
+                    panel.label("Pressione n para cadastrar o primeiro.");
                 } else {
-                    panel.table(
-                        TableOptions {
-                            columns: vec![
-                                TableColumn::new("Nome").width(Size::Fill),
-                                TableColumn::new("Valor")
-                                    .width(Size::Cells(16))
-                                    .align(Align::Right),
-                                TableColumn::new("Frequência").width(Size::Cells(12)),
-                                TableColumn::new("Próxima").width(Size::Cells(10)),
-                            ],
-                            rows: items,
-                            selected,
-                            zebra: true,
-                            follow_selection: true,
-                            ..Default::default()
-                        },
-                        "recurring:table",
-                    );
-                    if let Some(detail) = detail {
-                        panel.text(&detail);
-                    }
+                    panel.column(Column::new().gap(1), move |body| {
+                        body.table(
+                            TableOptions {
+                                columns: vec![
+                                    TableColumn::new("Nome").width(Size::Fill),
+                                    TableColumn::new("Valor")
+                                        .width(Size::Cells(16))
+                                        .align(Align::Right),
+                                    TableColumn::new("Frequência").width(Size::Cells(10)),
+                                    TableColumn::new("Próxima").width(Size::Cells(10)),
+                                ],
+                                rows: items,
+                                selected,
+                                follow_selection: true,
+                                scrollbar: true,
+                                header_color: Some(theme.muted),
+                                ..Default::default()
+                            },
+                            "recurring:table",
+                        );
+                        if let Some(detail) = detail {
+                            body.label(&detail);
+                        }
+                    });
                 }
             },
         );
@@ -891,4 +909,46 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut RecurringScreen, a
 pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
     let mut screen = RecurringScreen::new();
     render_with_state(ui, &mut screen, api);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hqtui::testing::render_to_text;
+
+    #[test]
+    fn monthly_summary_excludes_inactive_and_nonmonthly_expenses() {
+        let api = ApiClient::for_test(
+            "http://127.0.0.1:1",
+            crate::auth::Credential::PersonalToken {
+                token: "test-only".into(),
+            },
+            "space",
+        )
+        .unwrap();
+        let mut screen = RecurringScreen::new();
+        screen.loaded = true;
+        screen.subscriptions = serde_json::from_value(serde_json::json!([
+            {"id":"one", "name":"Monthly", "amount":"10.25", "frequency":"monthly", "active":true},
+            {"id":"two", "name":"Monthly two", "amount":"20.10", "frequency":"monthly", "active":true},
+            {"id":"year", "name":"Annual", "amount":"800", "frequency":"yearly", "active":true},
+            {"id":"off", "name":"Inactive", "amount":"900", "frequency":"monthly", "active":false}
+        ])).unwrap();
+        let text = render_to_text(80, 24, "dark", |ui| {
+            render_with_state(ui, &mut screen, &api);
+        });
+        assert!(text.contains("30,35 BRL"), "{text}");
+        assert!(text.contains("Mensais ativas"), "{text}");
+        screen.subscriptions[1].currency_code = Some("USD".into());
+        let mixed = render_to_text(80, 24, "dark", |ui| {
+            render_with_state(ui, &mut screen, &api);
+        });
+        assert!(mixed.contains("Várias moedas"), "{mixed}");
+        screen.subscriptions[1].currency_code = None;
+        screen.subscriptions[1].amount = None;
+        let missing = render_to_text(80, 24, "dark", |ui| {
+            render_with_state(ui, &mut screen, &api);
+        });
+        assert!(missing.contains("Indisponível"), "{missing}");
+    }
 }
