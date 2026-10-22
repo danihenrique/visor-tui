@@ -20,7 +20,7 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 | `visor whoami` | Sidebar/header: user name, email, active space | ✅ |
 | `visor me` | Profile screen: full user details (name, email, locale, plan, currency) | ✅ |
 | `visor doctor` | Diagnostics screen: 4 checks (version, login, API, space) with ok/warn/fail | ✅ |
-| `visor open <page>` | Keyboard shortcut or menu: open dashboard page in browser | ⬜ |
+| `visor open <page>` | Keyboard shortcut or menu: open dashboard page in browser | ✅ |
 | Keyboard navigation (1-9,0,-,=, arrows, Tab, mouse) | Sidebar nav with distinct keys per screen | ✅ |
 | Help overlay (? key) | Modal with navigation shortcuts | ✅ |
 
@@ -83,6 +83,9 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 |---|---|---|
 | `visor categories list` | Categorias screen: hierarchical tree view | ✅ |
 | `--include-hidden` | Show/hide hidden toggle | ✅ |
+| `visor categories create` | Categories screen: "Nova Categoria" button + 'n' key opens create modal (name, type, parent, kind) | ✅ |
+| `visor categories edit` | Categories screen: select + 'e' key opens edit modal (name, parent, hidden) | ✅ |
+| `visor categories delete` | Categories screen: select + 'd' key opens delete confirmation modal | ✅ |
 | `visor tags list` | Tags management screen: list with color indicators | ✅ |
 | `visor tags create` | Tags screen: "Nova Tag" button + create modal (name + color) | ✅ |
 | `visor tags edit` | Tags screen: select + 'e' key opens edit modal (name + color) | ✅ |
@@ -93,7 +96,13 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 | CLI Command | TUI Screen / Action | Status |
 |---|---|---|
 | `visor subscriptions list` | Recorrentes screen: subscriptions tab | ✅ |
+| `visor subscriptions create` | Recorrentes screen: "Nova Assinatura" button + create modal (name, amount, frequency, account, category, service) | ✅ |
+| `visor subscriptions edit` | Recorrentes screen: select + 'e' key opens edit modal with active toggle | ✅ |
+| `visor subscriptions delete` | Recorrentes screen: select + 'd' key opens delete confirmation modal | ✅ |
 | `visor fixed-bills list` | Recorrentes screen: fixed bills tab | ✅ |
+| `visor fixed-bills create` | Recorrentes screen: "Nova Conta Fixa" button + create modal (name, amount, frequency, account, category) | ✅ |
+| `visor fixed-bills edit` | Recorrentes screen: select + 'e' key opens edit modal with active toggle | ✅ |
+| `visor fixed-bills delete` | Recorrentes screen: select + 'd' key opens delete confirmation modal | ✅ |
 | `visor installments list` | Contas a pagar screen: installment plans | ✅ |
 | `--status` (active\|completed) | Status filter tabs/toggle | ✅ |
 
@@ -103,6 +112,9 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 |---|---|---|
 | `visor goals list` | Metas screen: goals list with progress bars | ✅ |
 | `--status` (active\|archived\|completed) | Status filter | ⬜ |
+| `visor goals create` | Metas screen: "Nova Meta" button + 'n' key opens create modal (name, target amount, kind, target date) | ✅ |
+| `visor goals edit` | Metas screen: select + 'e' key opens edit modal (name, target amount, status, target date) | ✅ |
+| `visor goals delete` | Metas screen: select + 'd' key opens delete confirmation modal with goal name and progress | ✅ |
 | `visor investments list` | Patrimônio screen: investments table + summary footer | ✅ |
 
 ### Overview & Projections

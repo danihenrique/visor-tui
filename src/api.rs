@@ -569,6 +569,286 @@ impl ApiClient {
         self.delete(&format!("{prefix}/tags/{id}"))
     }
 
+    // ── Category Mutations ──
+
+    pub fn create_category(
+        &self,
+        name: &str,
+        category_type: &str,
+        parent_id: Option<&str>,
+        kind: Option<&str>,
+    ) -> Result<Category, ApiError> {
+        let prefix = self.space_prefix()?;
+        let idempotency_key = Uuid::new_v4().to_string();
+
+        let mut body = serde_json::Map::new();
+        body.insert("name".into(), serde_json::Value::String(name.to_string()));
+        body.insert("type".into(), serde_json::Value::String(category_type.to_string()));
+        if let Some(pid) = parent_id {
+            body.insert("parent_id".into(), serde_json::Value::String(pid.to_string()));
+        }
+        if let Some(k) = kind {
+            body.insert("kind".into(), serde_json::Value::String(k.to_string()));
+        }
+
+        let resp = self.post(
+            &format!("{prefix}/categories"),
+            &serde_json::Value::Object(body),
+            Some(&idempotency_key),
+        )?;
+        let data = resp.get("data").cloned().unwrap_or(resp);
+        Ok(serde_json::from_value(data)?)
+    }
+
+    pub fn update_category(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        parent_id: Option<&str>,
+        hidden: Option<bool>,
+    ) -> Result<Category, ApiError> {
+        let prefix = self.space_prefix()?;
+        let mut body = serde_json::Map::new();
+
+        if let Some(n) = name {
+            body.insert("name".into(), serde_json::Value::String(n.to_string()));
+        }
+        if let Some(pid) = parent_id {
+            body.insert("parent_id".into(), serde_json::Value::String(pid.to_string()));
+        }
+        if let Some(h) = hidden {
+            body.insert("hidden".into(), serde_json::Value::Bool(h));
+        }
+
+        let resp = self.patch(
+            &format!("{prefix}/categories/{id}"),
+            &serde_json::Value::Object(body),
+        )?;
+        let data = resp.get("data").cloned().unwrap_or(resp);
+        Ok(serde_json::from_value(data)?)
+    }
+
+    pub fn delete_category(&self, id: &str) -> Result<(), ApiError> {
+        let prefix = self.space_prefix()?;
+        self.delete(&format!("{prefix}/categories/{id}"))
+    }
+
+    // ── Goal Mutations ──
+
+    pub fn create_goal(
+        &self,
+        name: &str,
+        target_amount: &str,
+        kind: Option<&str>,
+        target_date: Option<&str>,
+        currency_code: Option<&str>,
+    ) -> Result<Goal, ApiError> {
+        let prefix = self.space_prefix()?;
+        let idempotency_key = Uuid::new_v4().to_string();
+
+        let mut body = serde_json::Map::new();
+        body.insert("name".into(), serde_json::Value::String(name.to_string()));
+        body.insert("target_amount".into(), serde_json::Value::String(target_amount.to_string()));
+        if let Some(k) = kind {
+            body.insert("kind".into(), serde_json::Value::String(k.to_string()));
+        }
+        if let Some(d) = target_date {
+            body.insert("target_date".into(), serde_json::Value::String(d.to_string()));
+        }
+        if let Some(c) = currency_code {
+            body.insert("currency_code".into(), serde_json::Value::String(c.to_string()));
+        }
+
+        let resp = self.post(
+            &format!("{prefix}/goals"),
+            &serde_json::Value::Object(body),
+            Some(&idempotency_key),
+        )?;
+        let data = resp.get("data").cloned().unwrap_or(resp);
+        Ok(serde_json::from_value(data)?)
+    }
+
+    pub fn update_goal(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        target_amount: Option<&str>,
+        status: Option<&str>,
+        target_date: Option<&str>,
+    ) -> Result<Goal, ApiError> {
+        let prefix = self.space_prefix()?;
+        let mut body = serde_json::Map::new();
+
+        if let Some(n) = name {
+            body.insert("name".into(), serde_json::Value::String(n.to_string()));
+        }
+        if let Some(t) = target_amount {
+            body.insert("target_amount".into(), serde_json::Value::String(t.to_string()));
+        }
+        if let Some(s) = status {
+            body.insert("status".into(), serde_json::Value::String(s.to_string()));
+        }
+        if let Some(d) = target_date {
+            body.insert("target_date".into(), serde_json::Value::String(d.to_string()));
+        }
+
+        let resp = self.patch(
+            &format!("{prefix}/goals/{id}"),
+            &serde_json::Value::Object(body),
+        )?;
+        let data = resp.get("data").cloned().unwrap_or(resp);
+        Ok(serde_json::from_value(data)?)
+    }
+
+    pub fn delete_goal(&self, id: &str) -> Result<(), ApiError> {
+        let prefix = self.space_prefix()?;
+        self.delete(&format!("{prefix}/goals/{id}"))
+    }
+
+    // ── Subscription Mutations ──
+
+    pub fn create_subscription(
+        &self,
+        name: &str,
+        amount: &str,
+        frequency: &str,
+        account_id: Option<&str>,
+        category_id: Option<&str>,
+        service_name: Option<&str>,
+    ) -> Result<RecurringExpense, ApiError> {
+        let prefix = self.space_prefix()?;
+        let idempotency_key = Uuid::new_v4().to_string();
+
+        let mut body = serde_json::Map::new();
+        body.insert("name".into(), serde_json::Value::String(name.to_string()));
+        body.insert("amount".into(), serde_json::Value::String(amount.to_string()));
+        body.insert("frequency".into(), serde_json::Value::String(frequency.to_string()));
+        if let Some(a) = account_id {
+            body.insert("account_id".into(), serde_json::Value::String(a.to_string()));
+        }
+        if let Some(c) = category_id {
+            body.insert("category_id".into(), serde_json::Value::String(c.to_string()));
+        }
+        if let Some(s) = service_name {
+            body.insert("service_name".into(), serde_json::Value::String(s.to_string()));
+        }
+
+        let resp = self.post(
+            &format!("{prefix}/subscriptions"),
+            &serde_json::Value::Object(body),
+            Some(&idempotency_key),
+        )?;
+        let data = resp.get("data").cloned().unwrap_or(resp);
+        Ok(serde_json::from_value(data)?)
+    }
+
+    pub fn update_subscription(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        amount: Option<&str>,
+        frequency: Option<&str>,
+        active: Option<bool>,
+    ) -> Result<RecurringExpense, ApiError> {
+        let prefix = self.space_prefix()?;
+        let mut body = serde_json::Map::new();
+
+        if let Some(v) = name {
+            body.insert("name".into(), serde_json::Value::String(v.to_string()));
+        }
+        if let Some(v) = amount {
+            body.insert("amount".into(), serde_json::Value::String(v.to_string()));
+        }
+        if let Some(v) = frequency {
+            body.insert("frequency".into(), serde_json::Value::String(v.to_string()));
+        }
+        if let Some(v) = active {
+            body.insert("active".into(), serde_json::Value::Bool(v));
+        }
+
+        let resp = self.patch(
+            &format!("{prefix}/subscriptions/{id}"),
+            &serde_json::Value::Object(body),
+        )?;
+        let data = resp.get("data").cloned().unwrap_or(resp);
+        Ok(serde_json::from_value(data)?)
+    }
+
+    pub fn delete_subscription(&self, id: &str) -> Result<(), ApiError> {
+        let prefix = self.space_prefix()?;
+        self.delete(&format!("{prefix}/subscriptions/{id}"))
+    }
+
+    // ── Fixed Bill Mutations ──
+
+    pub fn create_fixed_bill(
+        &self,
+        name: &str,
+        amount: &str,
+        frequency: &str,
+        account_id: Option<&str>,
+        category_id: Option<&str>,
+    ) -> Result<RecurringExpense, ApiError> {
+        let prefix = self.space_prefix()?;
+        let idempotency_key = Uuid::new_v4().to_string();
+
+        let mut body = serde_json::Map::new();
+        body.insert("name".into(), serde_json::Value::String(name.to_string()));
+        body.insert("amount".into(), serde_json::Value::String(amount.to_string()));
+        body.insert("frequency".into(), serde_json::Value::String(frequency.to_string()));
+        if let Some(a) = account_id {
+            body.insert("account_id".into(), serde_json::Value::String(a.to_string()));
+        }
+        if let Some(c) = category_id {
+            body.insert("category_id".into(), serde_json::Value::String(c.to_string()));
+        }
+
+        let resp = self.post(
+            &format!("{prefix}/fixed-bills"),
+            &serde_json::Value::Object(body),
+            Some(&idempotency_key),
+        )?;
+        let data = resp.get("data").cloned().unwrap_or(resp);
+        Ok(serde_json::from_value(data)?)
+    }
+
+    pub fn update_fixed_bill(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        amount: Option<&str>,
+        frequency: Option<&str>,
+        active: Option<bool>,
+    ) -> Result<RecurringExpense, ApiError> {
+        let prefix = self.space_prefix()?;
+        let mut body = serde_json::Map::new();
+
+        if let Some(v) = name {
+            body.insert("name".into(), serde_json::Value::String(v.to_string()));
+        }
+        if let Some(v) = amount {
+            body.insert("amount".into(), serde_json::Value::String(v.to_string()));
+        }
+        if let Some(v) = frequency {
+            body.insert("frequency".into(), serde_json::Value::String(v.to_string()));
+        }
+        if let Some(v) = active {
+            body.insert("active".into(), serde_json::Value::Bool(v));
+        }
+
+        let resp = self.patch(
+            &format!("{prefix}/fixed-bills/{id}"),
+            &serde_json::Value::Object(body),
+        )?;
+        let data = resp.get("data").cloned().unwrap_or(resp);
+        Ok(serde_json::from_value(data)?)
+    }
+
+    pub fn delete_fixed_bill(&self, id: &str) -> Result<(), ApiError> {
+        let prefix = self.space_prefix()?;
+        self.delete(&format!("{prefix}/fixed-bills/{id}"))
+    }
+
     pub fn export_transactions_csv(
         &self,
         from_date: Option<&str>,

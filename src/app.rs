@@ -20,6 +20,9 @@ pub struct VisorApp {
     spaces: Vec<crate::models::Space>,
     transactions_screen: Rc<RefCell<screens::transactions::TransactionsScreen>>,
     tags_screen: Rc<RefCell<screens::tags::TagsScreen>>,
+    goals_screen: Rc<RefCell<screens::goals::GoalsScreen>>,
+    categories_screen: Rc<RefCell<screens::categories::CategoriesScreen>>,
+    recurring_screen: Rc<RefCell<screens::recurring::RecurringScreen>>,
     settings_modal: screens::settings::SettingsModal,
     doctor_state: screens::doctor::DoctorState,
     doctor_needs_run: bool,
@@ -111,7 +114,8 @@ impl Screen {
             .position(|s| *s == self)
             .unwrap_or(0)
     }
-}
+
+    }
 
 /// Load token from `visor.env` and save as credential if no credential exists yet.
 /// This avoids runtime env var mutation (forbidden by `unsafe_code = "forbid"`).
@@ -183,6 +187,9 @@ impl VisorApp {
             spaces,
             transactions_screen: Rc::new(RefCell::new(screens::transactions::TransactionsScreen::new())),
             tags_screen: Rc::new(RefCell::new(screens::tags::TagsScreen::new())),
+            goals_screen: Rc::new(RefCell::new(screens::goals::GoalsScreen::new())),
+            categories_screen: Rc::new(RefCell::new(screens::categories::CategoriesScreen::new())),
+            recurring_screen: Rc::new(RefCell::new(screens::recurring::RecurringScreen::new())),
             settings_modal: screens::settings::SettingsModal::None,
             doctor_state: screens::doctor::DoctorState::new(),
             doctor_needs_run: true,
@@ -398,6 +405,27 @@ impl VisorApp {
             self.tags_screen.borrow_mut().handle_input(&self.app, api, events);
         }
 
+        // Dispatch input to the goals screen when it is active.
+        if self.screen == Screen::Goals
+            && let Some(ref api) = self.api
+        {
+            self.goals_screen.borrow_mut().handle_input(&self.app, api, events);
+        }
+
+        // Dispatch input to the categories screen when it is active.
+        if self.screen == Screen::Categories
+            && let Some(ref api) = self.api
+        {
+            self.categories_screen.borrow_mut().handle_input(&self.app, api, events);
+        }
+
+        // Dispatch input to the recurring screen when it is active.
+        if self.screen == Screen::Recurring
+            && let Some(ref api) = self.api
+        {
+            self.recurring_screen.borrow_mut().handle_input(&self.app, api, events);
+        }
+
         // Handle doctor screen re-run.
         if self.screen == Screen::Doctor {
             let mut rerun = false;
@@ -495,6 +523,9 @@ impl VisorApp {
         let api = Rc::clone(self.api.as_ref().expect("api is Some at this point"));
         let tx_screen = self.transactions_screen.clone();
         let tags_screen = self.tags_screen.clone();
+        let goals_screen = self.goals_screen.clone();
+        let categories_screen = self.categories_screen.clone();
+        let recurring_screen = self.recurring_screen.clone();
         let settings_modal = self.settings_modal;
         let doctor_state = self.doctor_state.clone();
 
@@ -529,13 +560,22 @@ impl VisorApp {
                             Screen::Transactions => {
                                 screens::transactions::render_with_state(p, &mut tx_screen.borrow_mut(), &api);
                             }
-                            Screen::Recurring => screens::recurring::render(p, &api),
+                            Screen::Recurring => {
+                                let mut rec = recurring_screen.borrow_mut();
+                                screens::recurring::render_with_state(p, &mut rec, &api);
+                            }
                             Screen::CashFlow => screens::cash_flow::render(p, &api),
                             Screen::AccountsCards => {
                                 screens::accounts_cards::render(p, &api, false);
                             }
-                            Screen::Categories => screens::categories::render(p, &api),
-                            Screen::Goals => screens::goals::render(p, &api),
+                            Screen::Categories => {
+                                let mut cats = categories_screen.borrow_mut();
+                                screens::categories::render_with_state(p, &mut cats, &api);
+                            }
+                            Screen::Goals => {
+                                let mut goals = goals_screen.borrow_mut();
+                                screens::goals::render_with_state(p, &mut goals, &api);
+                            }
                             Screen::Projection => screens::projection::render(p, &api),
                             Screen::NetWorth => screens::net_worth::render(p, &api),
                             Screen::Bills => screens::bills::render(p, &api),
