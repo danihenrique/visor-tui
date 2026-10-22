@@ -54,7 +54,10 @@ pub fn render(ui: &mut Container<'_>, api: &ApiClient, modal: SettingsModal) {
         .clone()
         .unwrap_or_else(|| "—".to_string());
     let user_plan = me.plan.clone().unwrap_or_else(|| "—".to_string());
-    let active_space_id = crate::config::active_space_id().or_else(|| me.active_space_id.clone());
+    let active_space_id = api
+        .space_id()
+        .map(str::to_owned)
+        .or_else(|| me.active_space_id.clone());
 
     // Find active space name
     let active_space_name = active_space_id

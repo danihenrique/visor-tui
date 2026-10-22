@@ -158,21 +158,16 @@ impl VisorApp {
                     if self.screen == Screen::Transactions {
                         self.dispatch_screen(std::slice::from_ref(event));
                     } else {
-                        for character in paste
-                            .text
-                            .chars()
-                            .filter(|character| !character.is_control())
-                        {
-                            let character = character.to_string();
-                            self.dispatch_screen(&[InputEvent::Key(hqtui::input::KeyEvent {
-                                name: character.clone(),
-                                key: character.clone(),
-                                raw: character.clone(),
-                                char: Some(character),
-                                ctrl: false,
-                                alt: false,
-                                shift: false,
-                            })]);
+                        match self.screen {
+                            Screen::Tags => self.tags_screen.borrow_mut().paste_text(&paste.text),
+                            Screen::Categories => {
+                                self.categories_screen.borrow_mut().paste_text(&paste.text);
+                            }
+                            Screen::Goals => self.goals_screen.borrow_mut().paste_text(&paste.text),
+                            Screen::Recurring => {
+                                self.recurring_screen.borrow_mut().paste_text(&paste.text);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -420,15 +415,40 @@ impl VisorApp {
         let Some(space) = self.spaces.get(index) else {
             return;
         };
+        let Some(api) = &self.api else { return };
+        let client = match ApiClient::with_space(api.credential().clone(), &space.id) {
+            Ok(client) => client,
+            Err(error) => {
+                self.login_error = Some(format!("Falha ao selecionar espaço: {error}"));
+                return;
+            }
+        };
         if let Err(error) = config::set_default_space_id(&space.id) {
             self.login_error = Some(format!("Falha ao selecionar espaço: {error}"));
             return;
         }
-        if let Some(api) = &self.api {
-            self.api = ApiClient::with_credential(api.credential().clone())
-                .ok()
-                .map(Rc::new);
-        }
+        self.api = Some(Rc::new(client));
+        self.selected_space = index;
+        self.login_error = None;
+        self.transactions_screen = Rc::new(RefCell::new(
+            screens::transactions::TransactionsScreen::new(),
+        ));
+        self.tags_screen = Rc::new(RefCell::new(screens::tags::TagsScreen::new()));
+        self.goals_screen = Rc::new(RefCell::new(screens::goals::GoalsScreen::new()));
+        self.categories_screen =
+            Rc::new(RefCell::new(screens::categories::CategoriesScreen::new()));
+        self.recurring_screen = Rc::new(RefCell::new(screens::recurring::RecurringScreen::new()));
+        self.notifications_screen = Rc::new(RefCell::new(
+            screens::notifications::NotificationsScreen::new(),
+        ));
+        self.connections_screen =
+            Rc::new(RefCell::new(screens::connections::ConnectionsScreen::new()));
+        self.bills_screen = screens::bills::BillsScreen::default();
+        self.payables_screen = screens::payables::PayablesScreen::default();
+        self.doctor_state = screens::doctor::DoctorState::new();
+        self.settings_modal = screens::settings::SettingsModal::None;
+        self.show_hidden_accounts = false;
+        self.account_offset = 0;
         self.space_selector_visible = false;
         self.enter_pending = true;
     }
@@ -520,11 +540,11 @@ impl VisorApp {
         let modal_open = self.modal_open() || show_help;
         let api = Rc::clone(self.api.as_ref().expect("authenticated screen"));
         let api_after_draw = Rc::clone(&api);
-        let active_space = config::active_space_id();
+        let active_space = api.space_id();
         let space = self
             .spaces
             .iter()
-            .find(|space| Some(&space.id) == active_space.as_ref())
+            .find(|space| Some(space.id.as_str()) == active_space)
             .map_or_else(|| "Espaço pessoal".into(), |space| space.name.clone());
         let status = api.request_status();
         let tx_screen = Rc::clone(&self.transactions_screen);
@@ -601,6 +621,7 @@ impl VisorApp {
     fn draw_space_selector(&mut self) -> std::io::Result<()> {
         let spaces = self.spaces.clone();
         let selected_space = self.selected_space;
+        let error = self.login_error.clone();
         let visible_rows = self.app.terminal.size().rows.saturating_sub(8).max(1);
         let first_space = selected_space.saturating_sub(visible_rows - 1);
         let items: Vec<String> = spaces
@@ -613,6 +634,9 @@ impl VisorApp {
             f.ui.column(Column::new().gap(1), move |col| {
                 col.panel(Panel::new().title("Selecionar Espa\u{e7}o"), move |p| {
                     p.text("Selecione um espa\u{e7}o para continuar:");
+                    if let Some(error) = error {
+                        p.text(&error);
+                    }
                     p.divider(DividerOptions::default());
                     for (i, item) in items
                         .iter()

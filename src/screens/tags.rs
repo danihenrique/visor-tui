@@ -104,6 +104,23 @@ impl TagsScreen {
         }
     }
 
+    pub fn paste_text(&mut self, text: &str) {
+        if !matches!(
+            self.modal_state,
+            TagModalState::Create | TagModalState::Edit
+        ) {
+            return;
+        }
+        let text: String = text
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect();
+        match self.form_field {
+            TagFormField::Name => self.form_name.push_str(&text),
+            TagFormField::Color => self.form_color.push_str(&text),
+        }
+    }
+
     pub fn handle_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
         if self.modal_state != TagModalState::None {
             let modal_events = crate::presentation::modal_events(

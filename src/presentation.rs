@@ -214,6 +214,43 @@ mod tests {
     }
 
     #[test]
+    fn pasted_confirmation_letters_are_only_form_data() {
+        use crate::screens::{categories::*, goals::*, recurring::*, tags::*};
+        let mut tags = TagsScreen::new();
+        let mut categories = CategoriesScreen::new();
+        let mut goals = GoalsScreen::new();
+        let mut recurring = RecurringScreen::new();
+        tags.modal_state = TagModalState::Create;
+        categories.modal_state = CategoryModalState::Create;
+        goals.modal_state = GoalModalState::Create;
+        recurring.modal_state = RecurringModalState::CreateSubscription;
+        tags.paste_text("ynq123?\n");
+        categories.paste_text("ynq123?\n");
+        goals.paste_text("ynq123?\n");
+        recurring.paste_text("ynq123?\n");
+        assert_eq!(tags.form_name, "ynq123?");
+        assert_eq!(categories.form_name, "ynq123?");
+        assert_eq!(goals.form_name, "ynq123?");
+        assert_eq!(recurring.form_name, "ynq123?");
+        tags.modal_state = TagModalState::DeleteConfirm;
+        categories.modal_state = CategoryModalState::DeleteConfirm;
+        goals.modal_state = GoalModalState::DeleteConfirm;
+        recurring.modal_state = RecurringModalState::DeleteConfirm;
+        tags.paste_text("ynq123?\n");
+        categories.paste_text("ynq123?\n");
+        goals.paste_text("ynq123?\n");
+        recurring.paste_text("ynq123?\n");
+        assert_eq!(tags.modal_state, TagModalState::DeleteConfirm);
+        assert_eq!(categories.modal_state, CategoryModalState::DeleteConfirm);
+        assert_eq!(goals.modal_state, GoalModalState::DeleteConfirm);
+        assert_eq!(recurring.modal_state, RecurringModalState::DeleteConfirm);
+        assert_eq!(tags.form_name, "ynq123?");
+        assert_eq!(categories.form_name, "ynq123?");
+        assert_eq!(goals.form_name, "ynq123?");
+        assert_eq!(recurring.form_name, "ynq123?");
+    }
+
+    #[test]
     fn shell_keeps_content_and_footer_visible_at_common_sizes() {
         for (width, height) in [(80, 24), (120, 40), (60, 20)] {
             let text = render_to_text(width, height, "dark", |ui| {

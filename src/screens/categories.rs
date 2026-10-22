@@ -127,6 +127,25 @@ impl CategoriesScreen {
         }
     }
 
+    pub fn paste_text(&mut self, text: &str) {
+        if !matches!(
+            self.modal_state,
+            CategoryModalState::Create | CategoryModalState::Edit
+        ) {
+            return;
+        }
+        let text: String = text
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect();
+        match self.form_field {
+            CategoryFormField::Name => self.form_name.push_str(&text),
+            CategoryFormField::Parent => self.form_parent_id.push_str(&text),
+            CategoryFormField::Kind => self.form_kind.push_str(&text),
+            _ => {}
+        }
+    }
+
     pub fn handle_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
         if self.modal_state != CategoryModalState::None {
             let modal_events = crate::presentation::modal_events(

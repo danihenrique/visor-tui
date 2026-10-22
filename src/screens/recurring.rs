@@ -179,6 +179,27 @@ impl RecurringScreen {
         self.active_tab == Tab::Subscriptions
     }
 
+    pub fn paste_text(&mut self, text: &str) {
+        if !matches!(
+            self.modal_state,
+            RecurringModalState::CreateSubscription | RecurringModalState::EditSubscription
+        ) {
+            return;
+        }
+        let text: String = text
+            .chars()
+            .filter(|character| !character.is_control())
+            .collect();
+        match self.form_field {
+            RecurringFormField::Name => self.form_name.push_str(&text),
+            RecurringFormField::Amount => self.form_amount.push_str(&text),
+            RecurringFormField::AccountId => self.form_account_id.push_str(&text),
+            RecurringFormField::CategoryId => self.form_category_id.push_str(&text),
+            RecurringFormField::ServiceName => self.form_service_name.push_str(&text),
+            _ => {}
+        }
+    }
+
     pub fn handle_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
         if self.modal_state != RecurringModalState::None {
             let modal_events = crate::presentation::modal_events(
