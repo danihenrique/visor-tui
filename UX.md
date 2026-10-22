@@ -17,8 +17,10 @@ The selected calendar period persists across screens and space changes.
 
 ## Calendar periods
 
-The default is the current calendar month in Brasília. The header shows the
-selected period. `[` and `]` select the previous or next calendar month relative
+The default is the current calendar month in Brasília. A centered, accented period
+bar spans the content area directly above the summaries and records. Click its
+arrows to change month or its label to open the period picker. Muted keyboard hints
+sit beside the label. `[` and `]` select the previous or next calendar month relative
 to the range's start. `T` returns to the current month. `p` opens the period picker
 with Mês, Semana, Trimestre, Ano and Personalizado. Weeks start on Monday.
 Custom ranges include both endpoints and accept `DD/MM/YYYY` or `YYYY-MM-DD`.
@@ -47,8 +49,9 @@ scope; selected-period movement comes from the complete transaction range.
 The shell uses a restrained blue-gray palette, teal selection, rounded borders,
 and muted secondary text. The wide sidebar groups navigation and highlights only
 the active screen. At 80 columns the sidebar yields its width to the content.
-The header keeps the space name visible, and the footer shows keyboard hints and
-the request status.
+The header keeps the screen and space names visible. Period-based screens have a
+separate period bar above their content. The footer shows keyboard hints and the
+request status.
 
 | Screen | Layout |
 | --- | --- |
@@ -135,6 +138,28 @@ already use them. Card selection, recurring and payable tabs, hidden-item toggle
 and logout retain their existing bindings. Forms and pickers own all input while
 open, including pasted dates and characters that are global shortcuts elsewhere.
 
+## Mouse controls
+
+The terminal enables mouse capture while Visor runs. The sidebar switches screens
+with a click. At compact widths, **Telas** opens a screen picker. Period arrows
+change month, and the period label opens the period picker.
+
+Click a table row to select it. Double-click a transaction to open its details,
+or press `Enter` after selecting it. Other record screens update their selection
+and any inline details. Scroll the wheel over a list or report to move
+through its contents. Recurring tabs, payable status tabs, and bill card controls
+also accept clicks.
+
+Toolbar actions use the same behavior as their keyboard shortcuts. Click a form
+field to focus it, then type or choose a value. Use the wheel to reach fields that
+do not fit in a transaction dialog. Dialog buttons apply, save, confirm, or cancel
+the current action. An open modal owns mouse input, including clicks
+outside its border, so the screen behind it cannot respond.
+
+Hit areas come from the rendered controls and exclude clipped cells. A resize
+rebuilds them for the new layout. Table targets include the displayed scroll offset,
+so a click selects the visible record after scrolling.
+
 ## Transaction forms and filters
 
 - `Tab` / `Shift-Tab` moves between editable fields, scrolling the modal as needed.
@@ -178,6 +203,8 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 PYTHONDONTWRITEBYTECODE=1 UV_CACHE_DIR=/tmp/visor-uv-cache \
   uv run --with pyte python scripts/ux_smoke.py --check-ttl
+PYTHONDONTWRITEBYTECODE=1 UV_CACHE_DIR=/tmp/visor-uv-cache \
+  uv run --with pyte python scripts/ux_smoke.py --mouse-only --sizes 120x40,80x24
 ```
 
 The smoke driver runs the real binary in 120×40, 80×24 and 60×18 terminals against
@@ -187,6 +214,9 @@ space switching and idle behavior. Period checks use date-filtered, multi-page
 fixtures and cover navigation, picker validation, shared ranges and cache reuse.
 Delayed responses and failed later pages verify loading, unavailable totals and
 complete recovery on retry.
+Mouse checks at 120×40 and 80×24 cover capture, period controls, rows, double-click,
+wheel scrolling, toolbar actions, form focus, dialog buttons, and modal isolation.
+They also resize a running terminal and repeat clicks using the new layout.
 The 61-second check beyond the cache TTL runs
 at 120×40. No real account is used.
 
@@ -204,6 +234,6 @@ sidebar clicks, and rejects account mutations in visual-only mode.
 
 Export a reviewed SVG to PNG with `rsvg-convert capture.svg -o capture.png`.
 
-The redesign is verified with build, all-target Clippy with warnings denied, Rust
-tests, the complete keyboard smoke and direct inspection of every data screen at
-120×40 and 80×24.
+Verification includes build, all-target Clippy with warnings denied, Rust tests,
+keyboard and mouse smoke, and direct inspection of every data screen at 120×40
+and 80×24.
