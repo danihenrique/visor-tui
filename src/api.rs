@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
@@ -14,21 +14,63 @@ use crate::models::{
     InvestmentSummary, Me, Notification, Overview, RecurringExpense, Space, Tag, Transaction,
 };
 
-/// Cache entry with TTL-based expiration.
 #[derive(Clone)]
 struct CacheEntry {
-    data: serde_json::Value,
+    response: Result<String, CachedError>,
     fetched_at: Instant,
 }
 
-/// In-memory response cache keyed by `(space_id, endpoint, params)`.
-type ResponseCache = Arc<Mutex<HashMap<String, CacheEntry>>>;
+#[derive(Clone)]
+enum CachedError {
+    Api(Box<ApiErrorData>),
+    Transport(String),
+}
+
+impl CachedError {
+    fn from_error(error: &ApiError) -> Self {
+        match error {
+            ApiError::Api(data) => Self::Api(data.clone()),
+            _ => Self::Transport(error.to_string()),
+        }
+    }
+
+    fn into_error(self) -> ApiError {
+        match self {
+            Self::Api(data) => ApiError::Api(data),
+            Self::Transport(message) => ApiError::Unavailable(message),
+        }
+    }
+}
+
+struct RequestState {
+    cache: HashMap<String, CacheEntry>,
+    fetch_allowed: bool,
+    cooldown_until: Option<Instant>,
+    last_sync: Option<chrono::DateTime<chrono::Local>>,
+    last_failed: bool,
+}
+
+impl Default for RequestState {
+    fn default() -> Self {
+        Self {
+            cache: HashMap::new(),
+            fetch_allowed: true,
+            cooldown_until: None,
+            last_sync: None,
+            last_failed: false,
+        }
+    }
+}
 
 /// Default cache TTL in seconds.
 const CACHE_TTL_SECS: u64 = 60;
 
 /// Maximum retries for idempotent GET requests on 429.
 const MAX_RETRIES: u32 = 3;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(1);
+const MAX_TOTAL_RETRY_WAIT: Duration = Duration::from_secs(3);
+const MAX_COOLDOWN: Duration = Duration::from_hours(24);
 
 /// API client that reuses visor-cli's auth and config mechanisms.
 pub struct ApiClient {
@@ -36,7 +78,7 @@ pub struct ApiClient {
     base_url: String,
     credential: Credential,
     space_id: Option<String>,
-    cache: ResponseCache,
+    requests: Mutex<RequestState>,
 }
 
 /// Exit code constants matching the CLI contract.
@@ -51,7 +93,7 @@ pub mod exit {
 }
 
 /// Inner data for an API error, boxed to keep `ApiError` small.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ApiErrorData {
     pub status: u16,
     pub code: String,
@@ -73,6 +115,8 @@ pub enum ApiError {
     NoSpace,
     #[error("JSON decode error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("{0}")]
+    Unavailable(String),
 }
 
 impl ApiError {
@@ -130,7 +174,7 @@ impl ApiError {
     #[must_use]
     pub fn exit_code(&self) -> u8 {
         match self {
-            Self::Http(_) => exit::UNAVAILABLE,
+            Self::Http(_) | Self::Unavailable(_) => exit::UNAVAILABLE,
             Self::Api(data) => match data.status {
                 401 | 403 => exit::AUTH,
                 404 => exit::NOT_FOUND,
@@ -169,9 +213,7 @@ impl ApiError {
                     Some(seconds) => Some(format!("Tente novamente em {seconds} segundos.")),
                     None => Some("Tente novamente em um minuto.".to_owned()),
                 },
-                "IDEMPOTENCY_CONFLICT" => {
-                    Some("Esta operação já foi realizada.".to_owned())
-                }
+                "IDEMPOTENCY_CONFLICT" => Some("Esta operação já foi realizada.".to_owned()),
                 "IMMUTABLE_PROVIDER_FIELD" => Some(
                     "Este campo não pode ser editado (sincronizado automaticamente).".to_owned(),
                 ),
@@ -271,8 +313,14 @@ fn format_api_error_display(
             out.push_str(message);
             if let Some(errors) = details.get("errors").and_then(|e| e.as_array()) {
                 for error in errors {
-                    let field = error.get("field").and_then(|f| f.as_str()).unwrap_or("body");
-                    let msg = error.get("message").and_then(|m| m.as_str()).unwrap_or("é inválido");
+                    let field = error
+                        .get("field")
+                        .and_then(|f| f.as_str())
+                        .unwrap_or("body");
+                    let msg = error
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("é inválido");
                     let _ = write!(out, "\n  {field}: {msg}");
                 }
             }
@@ -289,9 +337,7 @@ fn format_api_error_display(
                     );
                 }
                 None => {
-                    out.push_str(
-                        "Limite de requisições atingido. Tente novamente em um minuto.",
-                    );
+                    out.push_str("Limite de requisições atingido. Tente novamente em um minuto.");
                 }
             }
         }
@@ -362,6 +408,8 @@ impl ApiClient {
 
         let client = Client::builder()
             .user_agent(format!("visor-tui/{}", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(REQUEST_TIMEOUT)
             .build()?;
 
         Ok(Self {
@@ -369,15 +417,21 @@ impl ApiClient {
             base_url,
             credential,
             space_id,
-            cache: Arc::new(Mutex::new(HashMap::new())),
+            requests: Mutex::new(RequestState::default()),
         })
     }
 
     /// Create a test client with explicit base URL, credential, and space ID.
     #[cfg(test)]
-    fn for_test(base_url: &str, credential: Credential, space_id: &str) -> Result<Self, ApiError> {
+    pub(crate) fn for_test(
+        base_url: &str,
+        credential: Credential,
+        space_id: &str,
+    ) -> Result<Self, ApiError> {
         let client = Client::builder()
             .user_agent(format!("visor-tui/{}", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(REQUEST_TIMEOUT)
             .build()?;
 
         Ok(Self {
@@ -385,120 +439,211 @@ impl ApiClient {
             base_url: base_url.to_string(),
             credential,
             space_id: Some(space_id.to_string()),
-            cache: Arc::new(Mutex::new(HashMap::new())),
+            requests: Mutex::new(RequestState::default()),
         })
     }
 
-    /// Build a cache key from space ID and request path.
-    fn cache_key(&self, path: &str) -> String {
-        let sid = self.space_id.as_deref().unwrap_or("_");
-        format!("{sid}:{path}")
+    /// Control network reads during screen entry and explicit user actions.
+    pub fn set_fetch_allowed(&self, allowed: bool) {
+        self.requests.lock().unwrap().fetch_allowed = allowed;
     }
 
-    /// Invalidate all cache entries whose key contains the given resource segment.
-    /// The segment should be a resource name like "/tags", "/transactions", etc.
-    /// This matches against the full cached path (e.g., `"space_id:/v1/spaces/space_id/tags"`).
-    fn invalidate_cache_prefix(&self, resource: &str) {
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.retain(|k, _| !k.ends_with(resource));
-        }
+    /// Force the next allowed read to fetch fresh data. Rate limits still apply.
+    pub fn invalidate_cache(&self) {
+        self.requests.lock().unwrap().cache.clear();
     }
 
-    /// Invalidate the entire cache (e.g., on logout or space switch).
     pub fn invalidate_all_cache(&self) {
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.clear();
-        }
+        self.invalidate_cache();
     }
 
-    /// Compute jittered exponential backoff duration for a given retry attempt.
+    #[must_use]
+    pub fn request_status(&self) -> String {
+        let state = self.requests.lock().unwrap();
+        let sync = state.last_sync.map_or_else(
+            || "sem sincronização".to_owned(),
+            |at| format!("sync {}", at.format("%H:%M:%S")),
+        );
+        let activity = if let Some(remaining) = state
+            .cooldown_until
+            .and_then(|until| until.checked_duration_since(Instant::now()))
+        {
+            format!("limite {}s", remaining.as_secs().saturating_add(1))
+        } else if state.last_failed {
+            "falha · r tentar novamente".to_owned()
+        } else {
+            format!("cache {}", state.cache.len())
+        };
+        format!("{sync} · {activity}")
+    }
+
     fn backoff_duration(attempt: u32, retry_after: Option<Duration>) -> Duration {
-        if let Some(ra) = retry_after {
-            return ra;
-        }
-        let base_ms = 500u64 * 2u64.saturating_pow(attempt);
-        let jitter_ms = base_ms / 4;
-        let total_ms = base_ms + (u64::from(std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_millis()) % jitter_ms.max(1));
-        Duration::from_millis(total_ms.min(30_000))
+        retry_after.unwrap_or_else(|| {
+            let base_ms = 250u64.saturating_mul(2u64.saturating_pow(attempt));
+            Duration::from_millis(base_ms.min(1_000))
+        })
+    }
+
+    fn retry_after(header: Option<&str>, body: &serde_json::Value) -> Option<Duration> {
+        let header_delay = header.and_then(|value| {
+            value
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .map(Duration::from_secs)
+                .or_else(|| {
+                    chrono::DateTime::parse_from_rfc2822(value).ok().map(|at| {
+                        at.signed_duration_since(chrono::Utc::now())
+                            .to_std()
+                            .unwrap_or_default()
+                    })
+                })
+        });
+        header_delay.or_else(|| {
+            body.pointer("/errors/0/details/retry_after_seconds")
+                .and_then(serde_json::Value::as_u64)
+                .map(Duration::from_secs)
+        })
+    }
+
+    fn set_cooldown(&self, delay: Duration) {
+        self.requests.lock().unwrap().cooldown_until =
+            Some(Instant::now() + delay.min(MAX_COOLDOWN));
+    }
+
+    fn cooldown_error(remaining: Duration) -> ApiError {
+        ApiError::api(
+            429,
+            "RATE_LIMITED".to_owned(),
+            "Limite de requisições".to_owned(),
+            serde_json::json!({"retry_after_seconds": remaining.as_secs().saturating_add(1)}),
+            None,
+        )
     }
 
     fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
-        let key = self.cache_key(path);
+        let text = self.get_response(path, "application/json")?;
+        Ok(serde_json::from_str(&text)?)
+    }
 
-        // Check cache first.
-        if let Ok(cache) = self.cache.lock()
-            && let Some(entry) = cache.get(&key)
-            && entry.fetched_at.elapsed() < Duration::from_secs(CACHE_TTL_SECS)
+    fn get_response(&self, path: &str, accept: &str) -> Result<String, ApiError> {
+        let key = format!(
+            "{}:{accept}:{path}",
+            self.space_id.as_deref().unwrap_or("_")
+        );
         {
-            return Ok(serde_json::from_value(entry.data.clone())?);
-        }
-
-        let url = format!("{}{}", self.base_url, path);
-        let mut last_err = None;
-
-        for attempt in 0..=MAX_RETRIES {
-            let resp = self
-                .client
-                .get(&url)
-                .header("Authorization", format!("Bearer {}", self.credential.bearer_token()))
-                .header("Accept", "application/json")
-                .send();
-
-            match resp {
-                Ok(r) => {
-                    let status = r.status().as_u16();
-
-                    if status == 429 && attempt < MAX_RETRIES {
-                        let body: serde_json::Value = r.json().unwrap_or_default();
-                        let retry_after = body
-                            .get("errors")
-                            .and_then(|e| e.as_array())
-                            .and_then(|arr| arr.first())
-                            .and_then(|e| e.get("details"))
-                            .and_then(|d| d.get("retry_after_seconds"))
-                            .and_then(serde_json::Value::as_u64)
-                            .map(Duration::from_secs);
-                        let wait = Self::backoff_duration(attempt, retry_after);
-                        std::thread::sleep(wait);
-                        last_err = Some(ApiError::from_body(status, &body));
-                        continue;
-                    }
-
-                    if !r.status().is_success() {
-                        let body: serde_json::Value = r.json().unwrap_or_default();
-                        return Err(ApiError::from_body(status, &body));
-                    }
-
-                    let value: serde_json::Value = r.json()?;
-
-                    // Store in cache.
-                    if let Ok(mut cache) = self.cache.lock() {
-                        cache.insert(key, CacheEntry {
-                            data: value.clone(),
-                            fetched_at: Instant::now(),
-                        });
-                    }
-
-                    return Ok(serde_json::from_value(value)?);
-                }
-                Err(e) => {
-                    if attempt < MAX_RETRIES {
-                        let wait = Self::backoff_duration(attempt, None);
-                        std::thread::sleep(wait);
-                        last_err = Some(ApiError::Http(e));
-                        continue;
-                    }
-                    return Err(ApiError::Http(e));
-                }
+            let state = self.requests.lock().unwrap();
+            if let Some(entry) = state.cache.get(&key)
+                && (!state.fetch_allowed
+                    || entry.fetched_at.elapsed() < Duration::from_secs(CACHE_TTL_SECS))
+            {
+                return entry.response.clone().map_err(CachedError::into_error);
+            }
+            if !state.fetch_allowed {
+                return Err(ApiError::Unavailable(
+                    "Sem dados em cache. Pressione r para atualizar.".to_owned(),
+                ));
+            }
+            if let Some(remaining) = state
+                .cooldown_until
+                .and_then(|until| until.checked_duration_since(Instant::now()))
+            {
+                return Err(Self::cooldown_error(remaining));
             }
         }
 
-        Err(last_err.unwrap_or_else(|| {
-            ApiError::api(429, "RATE_LIMITED".into(), "Max retries exceeded".into(), serde_json::Value::Null, None)
-        }))
+        let response = self.fetch_response(path, accept);
+        let cached = response
+            .as_ref()
+            .map(Clone::clone)
+            .map_err(CachedError::from_error);
+        let mut state = self.requests.lock().unwrap();
+        state.last_failed = response.is_err();
+        if response.is_ok() {
+            state.last_sync = Some(chrono::Local::now());
+        }
+        state.cache.insert(
+            key,
+            CacheEntry {
+                response: cached,
+                fetched_at: Instant::now(),
+            },
+        );
+        response
+    }
+
+    fn fetch_response(&self, path: &str, accept: &str) -> Result<String, ApiError> {
+        let url = format!("{}{}", self.base_url, path);
+        let started = Instant::now();
+        let mut total_wait = Duration::ZERO;
+        for attempt in 0..=MAX_RETRIES {
+            let remaining = REQUEST_TIMEOUT.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(ApiError::Unavailable(
+                    "A requisição excedeu o tempo limite. Pressione r para tentar novamente."
+                        .to_owned(),
+                ));
+            }
+            let response = self
+                .client
+                .get(&url)
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", self.credential.bearer_token()),
+                )
+                .header("Accept", accept)
+                .timeout(remaining)
+                .send();
+            let (error, wait) = match response {
+                Ok(response) if response.status().is_success() => return Ok(response.text()?),
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let retry_header = response
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    let body = response.json().unwrap_or_default();
+                    let error = ApiError::from_body(status, &body);
+                    if status != 429 {
+                        return Err(error);
+                    }
+                    let wait = Self::backoff_duration(
+                        attempt,
+                        Self::retry_after(retry_header.as_deref(), &body),
+                    );
+                    self.set_cooldown(wait);
+                    (error, wait)
+                }
+                Err(error) => {
+                    let retryable = error.is_connect() || error.is_timeout();
+                    let error = ApiError::Http(error);
+                    if !retryable {
+                        return Err(error);
+                    }
+                    (error, Self::backoff_duration(attempt, None))
+                }
+            };
+            if attempt == MAX_RETRIES
+                || wait > MAX_RETRY_WAIT
+                || total_wait + wait > MAX_TOTAL_RETRY_WAIT
+                || started.elapsed() + wait >= REQUEST_TIMEOUT
+            {
+                return Err(error);
+            }
+            std::thread::sleep(wait);
+            total_wait += wait;
+        }
+        unreachable!("each final attempt returns its response or error")
+    }
+
+    fn query_string(params: &[(&str, String)]) -> String {
+        let mut url = reqwest::Url::parse("http://localhost").unwrap();
+        url.query_pairs_mut()
+            .extend_pairs(params.iter().map(|(key, value)| (*key, value)));
+        url.query()
+            .filter(|query| !query.is_empty())
+            .map_or_else(String::new, |query| format!("?{query}"))
     }
 
     fn space_prefix(&self) -> Result<String, ApiError> {
@@ -520,19 +665,19 @@ impl ApiClient {
         Ok(serde_json::from_value(data)?)
     }
 
-    pub fn notifications(&self, unread: Option<bool>, limit: Option<u32>) -> Result<Vec<Notification>, ApiError> {
+    pub fn notifications(
+        &self,
+        unread: Option<bool>,
+        limit: Option<u32>,
+    ) -> Result<Vec<Notification>, ApiError> {
         let mut params = Vec::new();
         if let Some(u) = unread {
-            params.push(format!("unread={u}"));
+            params.push(("unread", u.to_string()));
         }
         if let Some(l) = limit {
-            params.push(format!("limit={l}"));
+            params.push(("limit", l.to_string()));
         }
-        let qs = if params.is_empty() {
-            String::new()
-        } else {
-            format!("?{}", params.join("&"))
-        };
+        let qs = Self::query_string(&params);
         let resp: serde_json::Value = self.get(&format!("/v1/notifications{qs}"))?;
         let data = resp.get("data").cloned().unwrap_or_default();
         Ok(serde_json::from_value(data)?)
@@ -548,7 +693,11 @@ impl ApiClient {
 
     pub fn accounts(&self, include_hidden: bool) -> Result<Vec<Account>, ApiError> {
         let prefix = self.space_prefix()?;
-        let qs = if include_hidden { "?include_hidden=true" } else { "" };
+        let qs = if include_hidden {
+            "?include_hidden=true"
+        } else {
+            ""
+        };
         let resp: serde_json::Value = self.get(&format!("{prefix}/accounts{qs}"))?;
         let data = resp.get("data").cloned().unwrap_or_default();
         Ok(serde_json::from_value(data)?)
@@ -561,20 +710,21 @@ impl ApiClient {
         Ok(serde_json::from_value(data)?)
     }
 
-    pub fn bills(&self, card_id: &str, from: Option<&str>, to: Option<&str>) -> Result<Vec<Bill>, ApiError> {
+    pub fn bills(
+        &self,
+        card_id: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+    ) -> Result<Vec<Bill>, ApiError> {
         let prefix = self.space_prefix()?;
         let mut params = Vec::new();
         if let Some(f) = from {
-            params.push(format!("from={f}"));
+            params.push(("from", f.to_string()));
         }
         if let Some(t) = to {
-            params.push(format!("to={t}"));
+            params.push(("to", t.to_string()));
         }
-        let qs = if params.is_empty() {
-            String::new()
-        } else {
-            format!("?{}", params.join("&"))
-        };
+        let qs = Self::query_string(&params);
         let resp: serde_json::Value = self.get(&format!("{prefix}/cards/{card_id}/bills{qs}"))?;
         let data = resp.get("data").cloned().unwrap_or_default();
         Ok(serde_json::from_value(data)?)
@@ -582,7 +732,11 @@ impl ApiClient {
 
     pub fn categories(&self, include_hidden: bool) -> Result<Vec<Category>, ApiError> {
         let prefix = self.space_prefix()?;
-        let qs = if include_hidden { "?include_hidden=true" } else { "" };
+        let qs = if include_hidden {
+            "?include_hidden=true"
+        } else {
+            ""
+        };
         let resp: serde_json::Value = self.get(&format!("{prefix}/categories{qs}"))?;
         let data = resp.get("data").cloned().unwrap_or_default();
         Ok(serde_json::from_value(data)?)
@@ -597,7 +751,9 @@ impl ApiClient {
 
     pub fn goals(&self, status: Option<&str>) -> Result<Vec<Goal>, ApiError> {
         let prefix = self.space_prefix()?;
-        let qs = status.map_or(String::new(), |s| format!("?status={s}"));
+        let qs = status.map_or_else(String::new, |status| {
+            Self::query_string(&[("status", status.to_owned())])
+        });
         let resp: serde_json::Value = self.get(&format!("{prefix}/goals{qs}"))?;
         let data = resp.get("data").cloned().unwrap_or_default();
         Ok(serde_json::from_value(data)?)
@@ -607,7 +763,10 @@ impl ApiClient {
         let prefix = self.space_prefix()?;
         let resp: serde_json::Value = self.get(&format!("{prefix}/investments"))?;
         let data = resp.get("data").cloned().unwrap_or_default();
-        let summary = resp.get("summary").cloned().and_then(|s| serde_json::from_value(s).ok());
+        let summary = resp
+            .get("summary")
+            .cloned()
+            .and_then(|s| serde_json::from_value(s).ok());
         Ok((serde_json::from_value(data)?, summary))
     }
 
@@ -625,9 +784,14 @@ impl ApiClient {
         Ok(serde_json::from_value(data)?)
     }
 
-    pub fn installment_plans(&self, status: Option<&str>) -> Result<Vec<InstallmentPlan>, ApiError> {
+    pub fn installment_plans(
+        &self,
+        status: Option<&str>,
+    ) -> Result<Vec<InstallmentPlan>, ApiError> {
         let prefix = self.space_prefix()?;
-        let qs = status.map_or(String::new(), |s| format!("?status={s}"));
+        let qs = status.map_or_else(String::new, |status| {
+            Self::query_string(&[("status", status.to_owned())])
+        });
         let resp: serde_json::Value = self.get(&format!("{prefix}/installment-plans{qs}"))?;
         let data = resp.get("data").cloned().unwrap_or_default();
         Ok(serde_json::from_value(data)?)
@@ -662,24 +826,43 @@ impl ApiClient {
     ) -> Result<(Vec<Transaction>, Option<String>), ApiError> {
         let prefix = self.space_prefix()?;
         let mut params = Vec::new();
-        if let Some(v) = from_date { params.push(format!("from_date={v}")); }
-        if let Some(v) = to_date { params.push(format!("to_date={v}")); }
-        if let Some(v) = account_id { params.push(format!("account_id={v}")); }
-        if let Some(v) = category_id { params.push(format!("category_id={v}")); }
-        if let Some(v) = tag_id { params.push(format!("tag_id={v}")); }
-        if let Some(v) = tx_type { params.push(format!("type={v}")); }
-        if let Some(v) = ignored { params.push(format!("ignored={v}")); }
-        if let Some(v) = search { params.push(format!("search={v}")); }
-        if let Some(v) = limit { params.push(format!("limit={v}")); }
-        if let Some(v) = after { params.push(format!("after={v}")); }
-        let qs = if params.is_empty() {
-            String::new()
-        } else {
-            format!("?{}", params.join("&"))
-        };
+        if let Some(v) = from_date {
+            params.push(("from_date", v.to_string()));
+        }
+        if let Some(v) = to_date {
+            params.push(("to_date", v.to_string()));
+        }
+        if let Some(v) = account_id {
+            params.push(("account_id", v.to_string()));
+        }
+        if let Some(v) = category_id {
+            params.push(("category_id", v.to_string()));
+        }
+        if let Some(v) = tag_id {
+            params.push(("tag_id", v.to_string()));
+        }
+        if let Some(v) = tx_type {
+            params.push(("type", v.to_string()));
+        }
+        if let Some(v) = ignored {
+            params.push(("ignored", v.to_string()));
+        }
+        if let Some(v) = search {
+            params.push(("search", v.to_string()));
+        }
+        if let Some(v) = limit {
+            params.push(("limit", v.to_string()));
+        }
+        if let Some(v) = after {
+            params.push(("after", v.to_string()));
+        }
+        let qs = Self::query_string(&params);
         let resp: serde_json::Value = self.get(&format!("{prefix}/transactions{qs}"))?;
         let data = resp.get("data").cloned().unwrap_or_default();
-        let next_cursor = resp.get("next_cursor").and_then(|c| c.as_str()).map(String::from);
+        let next_cursor = resp
+            .get("next_cursor")
+            .and_then(|c| c.as_str())
+            .map(String::from);
         Ok((serde_json::from_value(data)?, next_cursor))
     }
 
@@ -692,12 +875,20 @@ impl ApiClient {
 
     // ── Private HTTP helpers ──
 
-    fn post(&self, path: &str, body: &serde_json::Value, idempotency_key: Option<&str>) -> Result<serde_json::Value, ApiError> {
+    fn post(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+        idempotency_key: Option<&str>,
+    ) -> Result<serde_json::Value, ApiError> {
         let url = format!("{}{}", self.base_url, path);
         let mut req = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.credential.bearer_token()))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.credential.bearer_token()),
+            )
             .header("Accept", "application/json")
             .json(body);
         if let Some(key) = idempotency_key {
@@ -705,18 +896,7 @@ impl ApiClient {
         }
         let resp = req.send()?;
 
-        let status = resp.status().as_u16();
-        if !resp.status().is_success() {
-            let body: serde_json::Value = resp.json().unwrap_or_default();
-            return Err(ApiError::from_body(status, &body));
-        }
-
-        let text = resp.text()?;
-        if text.trim().is_empty() {
-            Ok(serde_json::Value::Null)
-        } else {
-            Ok(serde_json::from_str(&text)?)
-        }
+        self.write_response(resp)
     }
 
     fn patch(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value, ApiError> {
@@ -724,23 +904,15 @@ impl ApiClient {
         let resp = self
             .client
             .patch(&url)
-            .header("Authorization", format!("Bearer {}", self.credential.bearer_token()))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.credential.bearer_token()),
+            )
             .header("Accept", "application/json")
             .json(body)
             .send()?;
 
-        let status = resp.status().as_u16();
-        if !resp.status().is_success() {
-            let body: serde_json::Value = resp.json().unwrap_or_default();
-            return Err(ApiError::from_body(status, &body));
-        }
-
-        let text = resp.text()?;
-        if text.trim().is_empty() {
-            Ok(serde_json::Value::Null)
-        } else {
-            Ok(serde_json::from_str(&text)?)
-        }
+        self.write_response(resp)
     }
 
     fn delete(&self, path: &str) -> Result<(), ApiError> {
@@ -748,17 +920,50 @@ impl ApiClient {
         let resp = self
             .client
             .delete(&url)
-            .header("Authorization", format!("Bearer {}", self.credential.bearer_token()))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.credential.bearer_token()),
+            )
             .header("Accept", "application/json")
             .send()?;
 
-        let status = resp.status().as_u16();
-        if !resp.status().is_success() {
-            let body: serde_json::Value = resp.json().unwrap_or_default();
+        self.write_response(resp).map(|_| ())
+    }
+
+    fn write_response(
+        &self,
+        response: reqwest::blocking::Response,
+    ) -> Result<serde_json::Value, ApiError> {
+        let status = response.status().as_u16();
+        if !response.status().is_success() {
+            let retry_header = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let body = response.json().unwrap_or_default();
+            if status == 429 {
+                self.set_cooldown(
+                    Self::retry_after(retry_header.as_deref(), &body)
+                        .unwrap_or(Duration::from_secs(60)),
+                );
+            }
+            self.requests.lock().unwrap().last_failed = true;
             return Err(ApiError::from_body(status, &body));
         }
-
-        Ok(())
+        // A successful mutation changes aggregates and filtered lists even if its body cannot be decoded.
+        self.invalidate_cache();
+        {
+            let mut state = self.requests.lock().unwrap();
+            state.last_sync = Some(chrono::Local::now());
+            state.last_failed = false;
+        }
+        let text = response.text()?;
+        if text.trim().is_empty() {
+            Ok(serde_json::Value::Null)
+        } else {
+            Ok(serde_json::from_str(&text)?)
+        }
     }
 
     // ── Transaction Mutations ──
@@ -780,26 +985,53 @@ impl ApiClient {
         let idempotency_key = Uuid::new_v4().to_string();
 
         let mut body = serde_json::Map::new();
-        body.insert("amount".into(), serde_json::Value::String(amount.to_string()));
-        body.insert("description".into(), serde_json::Value::String(description.to_string()));
-        body.insert("type".into(), serde_json::Value::String(tx_type.to_string()));
-        body.insert("account_id".into(), serde_json::Value::String(account_id.to_string()));
+        body.insert(
+            "amount".into(),
+            serde_json::Value::String(amount.to_string()),
+        );
+        body.insert(
+            "description".into(),
+            serde_json::Value::String(description.to_string()),
+        );
+        body.insert(
+            "type".into(),
+            serde_json::Value::String(tx_type.to_string()),
+        );
+        body.insert(
+            "account_id".into(),
+            serde_json::Value::String(account_id.to_string()),
+        );
         if let Some(cat) = category_id {
-            body.insert("category_id".into(), serde_json::Value::String(cat.to_string()));
+            body.insert(
+                "category_id".into(),
+                serde_json::Value::String(cat.to_string()),
+            );
         }
         if !tag_ids.is_empty() {
-            body.insert("tag_ids".into(), serde_json::Value::Array(
-                tag_ids.iter().map(|t| serde_json::Value::String(t.clone())).collect(),
-            ));
+            body.insert(
+                "tag_ids".into(),
+                serde_json::Value::Array(
+                    tag_ids
+                        .iter()
+                        .map(|t| serde_json::Value::String(t.clone()))
+                        .collect(),
+                ),
+            );
         }
         if let Some(merchant) = merchant_name {
-            body.insert("merchant_name".into(), serde_json::Value::String(merchant.to_string()));
+            body.insert(
+                "merchant_name".into(),
+                serde_json::Value::String(merchant.to_string()),
+            );
         }
         if let Some(n) = notes {
             body.insert("notes".into(), serde_json::Value::String(n.to_string()));
         }
         if let Some(at) = transacted_at {
-            body.insert("transacted_at".into(), serde_json::Value::String(at.to_string()));
+            body.insert(
+                "transacted_at".into(),
+                serde_json::Value::String(at.to_string()),
+            );
         }
         if ignored {
             body.insert("ignored".into(), serde_json::Value::Bool(true));
@@ -810,7 +1042,6 @@ impl ApiClient {
             &serde_json::Value::Object(body),
             Some(&idempotency_key),
         )?;
-        self.invalidate_cache_prefix("/transactions");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
@@ -829,46 +1060,67 @@ impl ApiClient {
         ignored: Option<bool>,
         clear_tags: bool,
     ) -> Result<Transaction, ApiError> {
-        let prefix = self.space_prefix()?;
         let mut body = serde_json::Map::new();
 
         if let Some(v) = amount {
             body.insert("amount".into(), serde_json::Value::String(v.to_string()));
         }
         if let Some(v) = description {
-            body.insert("description".into(), serde_json::Value::String(v.to_string()));
+            body.insert(
+                "description".into(),
+                serde_json::Value::String(v.to_string()),
+            );
         }
         if let Some(v) = tx_type {
             body.insert("type".into(), serde_json::Value::String(v.to_string()));
         }
         if let Some(v) = category_id {
-            body.insert("category_id".into(), serde_json::Value::String(v.to_string()));
+            body.insert(
+                "category_id".into(),
+                serde_json::Value::String(v.to_string()),
+            );
         }
         if clear_tags {
             body.insert("tag_ids".into(), serde_json::Value::Array(vec![]));
         } else if let Some(tags) = tag_ids {
-            body.insert("tag_ids".into(), serde_json::Value::Array(
-                tags.iter().map(|t| serde_json::Value::String(t.clone())).collect(),
-            ));
+            body.insert(
+                "tag_ids".into(),
+                serde_json::Value::Array(
+                    tags.iter()
+                        .map(|t| serde_json::Value::String(t.clone()))
+                        .collect(),
+                ),
+            );
         }
         if let Some(v) = merchant_name {
-            body.insert("merchant_name".into(), serde_json::Value::String(v.to_string()));
+            body.insert(
+                "merchant_name".into(),
+                serde_json::Value::String(v.to_string()),
+            );
         }
         if let Some(v) = notes {
             body.insert("notes".into(), serde_json::Value::String(v.to_string()));
         }
         if let Some(v) = transacted_at {
-            body.insert("transacted_at".into(), serde_json::Value::String(v.to_string()));
+            body.insert(
+                "transacted_at".into(),
+                serde_json::Value::String(v.to_string()),
+            );
         }
         if let Some(v) = ignored {
             body.insert("ignored".into(), serde_json::Value::Bool(v));
         }
 
-        let resp = self.patch(
-            &format!("{prefix}/transactions/{id}"),
-            &serde_json::Value::Object(body),
-        )?;
-        self.invalidate_cache_prefix("/transactions");
+        self.patch_transaction(id, &serde_json::Value::Object(body))
+    }
+
+    pub fn patch_transaction(
+        &self,
+        id: &str,
+        body: &serde_json::Value,
+    ) -> Result<Transaction, ApiError> {
+        let prefix = self.space_prefix()?;
+        let resp = self.patch(&format!("{prefix}/transactions/{id}"), body)?;
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
@@ -876,7 +1128,6 @@ impl ApiClient {
     pub fn delete_transaction(&self, id: &str) -> Result<(), ApiError> {
         let prefix = self.space_prefix()?;
         self.delete(&format!("{prefix}/transactions/{id}"))?;
-        self.invalidate_cache_prefix("/transactions");
         Ok(())
     }
 
@@ -897,12 +1148,16 @@ impl ApiClient {
             &serde_json::Value::Object(body),
             Some(&idempotency_key),
         )?;
-        self.invalidate_cache_prefix("/tags");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
 
-    pub fn update_tag(&self, id: &str, name: Option<&str>, color: Option<&str>) -> Result<Tag, ApiError> {
+    pub fn update_tag(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        color: Option<&str>,
+    ) -> Result<Tag, ApiError> {
         let prefix = self.space_prefix()?;
         let mut body = serde_json::Map::new();
 
@@ -917,7 +1172,6 @@ impl ApiClient {
             &format!("{prefix}/tags/{id}"),
             &serde_json::Value::Object(body),
         )?;
-        self.invalidate_cache_prefix("/tags");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
@@ -925,7 +1179,6 @@ impl ApiClient {
     pub fn delete_tag(&self, id: &str) -> Result<(), ApiError> {
         let prefix = self.space_prefix()?;
         self.delete(&format!("{prefix}/tags/{id}"))?;
-        self.invalidate_cache_prefix("/tags");
         Ok(())
     }
 
@@ -943,9 +1196,15 @@ impl ApiClient {
 
         let mut body = serde_json::Map::new();
         body.insert("name".into(), serde_json::Value::String(name.to_string()));
-        body.insert("type".into(), serde_json::Value::String(category_type.to_string()));
+        body.insert(
+            "type".into(),
+            serde_json::Value::String(category_type.to_string()),
+        );
         if let Some(pid) = parent_id {
-            body.insert("parent_id".into(), serde_json::Value::String(pid.to_string()));
+            body.insert(
+                "parent_id".into(),
+                serde_json::Value::String(pid.to_string()),
+            );
         }
         if let Some(k) = kind {
             body.insert("kind".into(), serde_json::Value::String(k.to_string()));
@@ -956,7 +1215,6 @@ impl ApiClient {
             &serde_json::Value::Object(body),
             Some(&idempotency_key),
         )?;
-        self.invalidate_cache_prefix("/categories");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
@@ -975,7 +1233,10 @@ impl ApiClient {
             body.insert("name".into(), serde_json::Value::String(n.to_string()));
         }
         if let Some(pid) = parent_id {
-            body.insert("parent_id".into(), serde_json::Value::String(pid.to_string()));
+            body.insert(
+                "parent_id".into(),
+                serde_json::Value::String(pid.to_string()),
+            );
         }
         if let Some(h) = hidden {
             body.insert("hidden".into(), serde_json::Value::Bool(h));
@@ -985,7 +1246,6 @@ impl ApiClient {
             &format!("{prefix}/categories/{id}"),
             &serde_json::Value::Object(body),
         )?;
-        self.invalidate_cache_prefix("/categories");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
@@ -993,7 +1253,6 @@ impl ApiClient {
     pub fn delete_category(&self, id: &str) -> Result<(), ApiError> {
         let prefix = self.space_prefix()?;
         self.delete(&format!("{prefix}/categories/{id}"))?;
-        self.invalidate_cache_prefix("/categories");
         Ok(())
     }
 
@@ -1012,15 +1271,24 @@ impl ApiClient {
 
         let mut body = serde_json::Map::new();
         body.insert("name".into(), serde_json::Value::String(name.to_string()));
-        body.insert("target_amount".into(), serde_json::Value::String(target_amount.to_string()));
+        body.insert(
+            "target_amount".into(),
+            serde_json::Value::String(target_amount.to_string()),
+        );
         if let Some(k) = kind {
             body.insert("kind".into(), serde_json::Value::String(k.to_string()));
         }
         if let Some(d) = target_date {
-            body.insert("target_date".into(), serde_json::Value::String(d.to_string()));
+            body.insert(
+                "target_date".into(),
+                serde_json::Value::String(d.to_string()),
+            );
         }
         if let Some(c) = currency_code {
-            body.insert("currency_code".into(), serde_json::Value::String(c.to_string()));
+            body.insert(
+                "currency_code".into(),
+                serde_json::Value::String(c.to_string()),
+            );
         }
 
         let resp = self.post(
@@ -1028,7 +1296,6 @@ impl ApiClient {
             &serde_json::Value::Object(body),
             Some(&idempotency_key),
         )?;
-        self.invalidate_cache_prefix("/goals");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
@@ -1048,20 +1315,25 @@ impl ApiClient {
             body.insert("name".into(), serde_json::Value::String(n.to_string()));
         }
         if let Some(t) = target_amount {
-            body.insert("target_amount".into(), serde_json::Value::String(t.to_string()));
+            body.insert(
+                "target_amount".into(),
+                serde_json::Value::String(t.to_string()),
+            );
         }
         if let Some(s) = status {
             body.insert("status".into(), serde_json::Value::String(s.to_string()));
         }
         if let Some(d) = target_date {
-            body.insert("target_date".into(), serde_json::Value::String(d.to_string()));
+            body.insert(
+                "target_date".into(),
+                serde_json::Value::String(d.to_string()),
+            );
         }
 
         let resp = self.patch(
             &format!("{prefix}/goals/{id}"),
             &serde_json::Value::Object(body),
         )?;
-        self.invalidate_cache_prefix("/goals");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
@@ -1069,7 +1341,6 @@ impl ApiClient {
     pub fn delete_goal(&self, id: &str) -> Result<(), ApiError> {
         let prefix = self.space_prefix()?;
         self.delete(&format!("{prefix}/goals/{id}"))?;
-        self.invalidate_cache_prefix("/goals");
         Ok(())
     }
 
@@ -1089,16 +1360,31 @@ impl ApiClient {
 
         let mut body = serde_json::Map::new();
         body.insert("name".into(), serde_json::Value::String(name.to_string()));
-        body.insert("amount".into(), serde_json::Value::String(amount.to_string()));
-        body.insert("frequency".into(), serde_json::Value::String(frequency.to_string()));
+        body.insert(
+            "amount".into(),
+            serde_json::Value::String(amount.to_string()),
+        );
+        body.insert(
+            "frequency".into(),
+            serde_json::Value::String(frequency.to_string()),
+        );
         if let Some(a) = account_id {
-            body.insert("account_id".into(), serde_json::Value::String(a.to_string()));
+            body.insert(
+                "account_id".into(),
+                serde_json::Value::String(a.to_string()),
+            );
         }
         if let Some(c) = category_id {
-            body.insert("category_id".into(), serde_json::Value::String(c.to_string()));
+            body.insert(
+                "category_id".into(),
+                serde_json::Value::String(c.to_string()),
+            );
         }
         if let Some(s) = service_name {
-            body.insert("service_name".into(), serde_json::Value::String(s.to_string()));
+            body.insert(
+                "service_name".into(),
+                serde_json::Value::String(s.to_string()),
+            );
         }
 
         let resp = self.post(
@@ -1106,7 +1392,6 @@ impl ApiClient {
             &serde_json::Value::Object(body),
             Some(&idempotency_key),
         )?;
-        self.invalidate_cache_prefix("/subscriptions");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
@@ -1139,7 +1424,6 @@ impl ApiClient {
             &format!("{prefix}/subscriptions/{id}"),
             &serde_json::Value::Object(body),
         )?;
-        self.invalidate_cache_prefix("/subscriptions");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
@@ -1147,7 +1431,6 @@ impl ApiClient {
     pub fn delete_subscription(&self, id: &str) -> Result<(), ApiError> {
         let prefix = self.space_prefix()?;
         self.delete(&format!("{prefix}/subscriptions/{id}"))?;
-        self.invalidate_cache_prefix("/subscriptions");
         Ok(())
     }
 
@@ -1166,13 +1449,25 @@ impl ApiClient {
 
         let mut body = serde_json::Map::new();
         body.insert("name".into(), serde_json::Value::String(name.to_string()));
-        body.insert("amount".into(), serde_json::Value::String(amount.to_string()));
-        body.insert("frequency".into(), serde_json::Value::String(frequency.to_string()));
+        body.insert(
+            "amount".into(),
+            serde_json::Value::String(amount.to_string()),
+        );
+        body.insert(
+            "frequency".into(),
+            serde_json::Value::String(frequency.to_string()),
+        );
         if let Some(a) = account_id {
-            body.insert("account_id".into(), serde_json::Value::String(a.to_string()));
+            body.insert(
+                "account_id".into(),
+                serde_json::Value::String(a.to_string()),
+            );
         }
         if let Some(c) = category_id {
-            body.insert("category_id".into(), serde_json::Value::String(c.to_string()));
+            body.insert(
+                "category_id".into(),
+                serde_json::Value::String(c.to_string()),
+            );
         }
 
         let resp = self.post(
@@ -1180,7 +1475,6 @@ impl ApiClient {
             &serde_json::Value::Object(body),
             Some(&idempotency_key),
         )?;
-        self.invalidate_cache_prefix("/fixed-bills");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
@@ -1213,7 +1507,6 @@ impl ApiClient {
             &format!("{prefix}/fixed-bills/{id}"),
             &serde_json::Value::Object(body),
         )?;
-        self.invalidate_cache_prefix("/fixed-bills");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
@@ -1221,7 +1514,6 @@ impl ApiClient {
     pub fn delete_fixed_bill(&self, id: &str) -> Result<(), ApiError> {
         let prefix = self.space_prefix()?;
         self.delete(&format!("{prefix}/fixed-bills/{id}"))?;
-        self.invalidate_cache_prefix("/fixed-bills");
         Ok(())
     }
 
@@ -1240,37 +1532,39 @@ impl ApiClient {
     ) -> Result<String, ApiError> {
         let prefix = self.space_prefix()?;
         let mut params = Vec::new();
-        if let Some(v) = from_date { params.push(format!("from_date={v}")); }
-        if let Some(v) = to_date { params.push(format!("to_date={v}")); }
-        if let Some(v) = account_id { params.push(format!("account_id={v}")); }
-        if let Some(v) = category_id { params.push(format!("category_id={v}")); }
-        if let Some(v) = tag_id { params.push(format!("tag_id={v}")); }
-        if let Some(v) = tx_type { params.push(format!("type={v}")); }
-        if let Some(v) = ignored { params.push(format!("ignored={v}")); }
-        if let Some(v) = search { params.push(format!("search={v}")); }
-        if let Some(v) = limit { params.push(format!("limit={v}")); }
-        if let Some(v) = after { params.push(format!("after={v}")); }
-        let qs = if params.is_empty() {
-            String::new()
-        } else {
-            format!("?{}", params.join("&"))
-        };
-
-        let url = format!("{}{}/transactions{}", self.base_url, prefix, qs);
-        let resp = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.credential.bearer_token()))
-            .header("Accept", "text/csv")
-            .send()?;
-
-        let status = resp.status().as_u16();
-        if !resp.status().is_success() {
-            let body: serde_json::Value = resp.json().unwrap_or_default();
-            return Err(ApiError::from_body(status, &body));
+        if let Some(v) = from_date {
+            params.push(("from_date", v.to_string()));
         }
+        if let Some(v) = to_date {
+            params.push(("to_date", v.to_string()));
+        }
+        if let Some(v) = account_id {
+            params.push(("account_id", v.to_string()));
+        }
+        if let Some(v) = category_id {
+            params.push(("category_id", v.to_string()));
+        }
+        if let Some(v) = tag_id {
+            params.push(("tag_id", v.to_string()));
+        }
+        if let Some(v) = tx_type {
+            params.push(("type", v.to_string()));
+        }
+        if let Some(v) = ignored {
+            params.push(("ignored", v.to_string()));
+        }
+        if let Some(v) = search {
+            params.push(("search", v.to_string()));
+        }
+        if let Some(v) = limit {
+            params.push(("limit", v.to_string()));
+        }
+        if let Some(v) = after {
+            params.push(("after", v.to_string()));
+        }
+        let qs = Self::query_string(&params);
 
-        Ok(resp.text()?)
+        self.get_response(&format!("{prefix}/transactions{qs}"), "text/csv")
     }
 }
 
@@ -1320,7 +1614,18 @@ mod tests {
 
         let client = test_client(&server);
         let tx = client
-            .create_transaction("42.50", "Coffee", "expense", "acc-1", None, &[], None, None, None, false)
+            .create_transaction(
+                "42.50",
+                "Coffee",
+                "expense",
+                "acc-1",
+                None,
+                &[],
+                None,
+                None,
+                None,
+                false,
+            )
             .unwrap();
 
         assert_eq!(tx.id, "tx-new");
@@ -1487,7 +1792,18 @@ mod tests {
 
         let client = test_client(&server);
         let err = client
-            .create_transaction("", "", "expense", "acc-1", None, &[], None, None, None, false)
+            .create_transaction(
+                "",
+                "",
+                "expense",
+                "acc-1",
+                None,
+                &[],
+                None,
+                None,
+                None,
+                false,
+            )
             .unwrap_err();
 
         match &err {
@@ -1563,7 +1879,8 @@ mod tests {
 
     #[test]
     fn test_hint_immutable_provider_field() {
-        let body = json!({"errors": [{"code": "IMMUTABLE_PROVIDER_FIELD", "message": "Cannot edit"}]});
+        let body =
+            json!({"errors": [{"code": "IMMUTABLE_PROVIDER_FIELD", "message": "Cannot edit"}]});
         let err = ApiError::from_body(409, &body);
         let hint = err.hint().expect("should have hint");
         assert!(hint.contains("sincronizado"), "{hint}");
@@ -1593,15 +1910,21 @@ mod tests {
         let err = ApiError::from_body(422, &body);
         let fields = err.field_errors();
         assert_eq!(fields.len(), 2);
-        assert_eq!(fields[0], ("amount".to_string(), "must be positive".to_string()));
-        assert_eq!(fields[1], ("description".to_string(), "is required".to_string()));
+        assert_eq!(
+            fields[0],
+            ("amount".to_string(), "must be positive".to_string())
+        );
+        assert_eq!(
+            fields[1],
+            ("description".to_string(), "is required".to_string())
+        );
     }
 
     #[test]
     fn test_field_errors_empty_for_non_validation() {
         let body = json!({"errors": [{"code": "NOT_FOUND", "message": "Not found"}]});
         let err = ApiError::from_body(404, &body);
-        assert!(err.field_errors().is_empty());
+        assert_eq!(err.field_errors(), Vec::<(String, String)>::new());
     }
 
     #[test]
@@ -1685,8 +2008,7 @@ mod tests {
             .match_header("authorization", "Bearer visor_pat_test_secret")
             .with_status(200)
             .with_body(
-                json!({"data": [{"id": "t1", "name": "Food", "color": "#ff0000"}]})
-                .to_string(),
+                json!({"data": [{"id": "t1", "name": "Food", "color": "#ff0000"}]}).to_string(),
             )
             .create();
 
@@ -1756,20 +2078,14 @@ mod tests {
             .mock("GET", "/v1/spaces/s/tags")
             .match_header("authorization", "Bearer visor_pat_test_secret")
             .with_status(200)
-            .with_body(
-                json!({"data": [{"id": "t1", "name": "Old", "color": "#000"}]})
-                .to_string(),
-            )
+            .with_body(json!({"data": [{"id": "t1", "name": "Old", "color": "#000"}]}).to_string())
             .create();
         // POST creates a tag (invalidates cache)
         let mock_post = server
             .mock("POST", "/v1/spaces/s/tags")
             .match_header("authorization", "Bearer visor_pat_test_secret")
             .with_status(201)
-            .with_body(
-                json!({"data": {"id": "t2", "name": "New", "color": "#fff"}})
-                .to_string(),
-            )
+            .with_body(json!({"data": {"id": "t2", "name": "New", "color": "#fff"}}).to_string())
             .create();
         // Second GET must hit server again (cache was invalidated)
         let mock_get2 = server
@@ -1794,5 +2110,413 @@ mod tests {
         mock_get1.assert();
         mock_post.assert();
         mock_get2.assert();
+    }
+
+    fn expire_cache(client: &ApiClient) {
+        for entry in client.requests.lock().unwrap().cache.values_mut() {
+            entry.fetched_at = Instant::now()
+                .checked_sub(Duration::from_secs(CACHE_TTL_SECS + 1))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn redraw_uses_expired_cache_until_fetch_is_allowed() {
+        let mut server = mockito::Server::new();
+        let first = server
+            .mock("GET", "/v1/spaces/s/tags")
+            .with_body(r#"{"data":[{"id":"one","name":"Cached"}]}"#)
+            .expect(1)
+            .create();
+        let second = server
+            .mock("GET", "/v1/spaces/s/tags")
+            .with_body(r#"{"data":[{"id":"two","name":"Fresh"}]}"#)
+            .expect(1)
+            .create();
+        let client = test_client(&server);
+        assert_eq!(client.tags().unwrap()[0].id, "one");
+        expire_cache(&client);
+        client.set_fetch_allowed(false);
+        for _ in 0..3 {
+            assert_eq!(client.tags().unwrap()[0].id, "one");
+        }
+        client.set_fetch_allowed(true);
+        assert_eq!(client.tags().unwrap()[0].id, "two");
+        first.assert();
+        second.assert();
+    }
+
+    #[test]
+    fn redraw_cache_miss_never_sends_a_request() {
+        let mut server = mockito::Server::new();
+        let mock = server.mock("GET", mockito::Matcher::Any).expect(0).create();
+        let client = test_client(&server);
+        client.set_fetch_allowed(false);
+        assert!(client.tags().unwrap_err().to_string().contains("cache"));
+        assert!(
+            client
+                .export_transactions_csv(None, None, None, None, None, None, None, None, None, None)
+                .is_err()
+        );
+        mock.assert();
+    }
+
+    #[test]
+    fn cached_failures_preserve_api_details_without_redraw_retries() {
+        let mut server = mockito::Server::new();
+        let mock = server.mock("GET", "/v1/spaces/s/tags")
+            .with_status(422)
+            .with_body(json!({"errors":[{"code":"VALIDATION_FAILED","message":"Invalid","request_id":"r1","details":{"errors":[{"field":"name","message":"Required"}]}}]}).to_string())
+            .expect(1).create();
+        let client = test_client(&server);
+        let original = client.tags().unwrap_err();
+        assert!(client.tags().is_err());
+        expire_cache(&client);
+        client.set_fetch_allowed(false);
+        let cached = client.tags().unwrap_err();
+        assert_eq!(cached.to_string(), original.to_string());
+        assert_eq!(
+            cached.field_errors(),
+            vec![("name".to_owned(), "Required".to_owned())]
+        );
+        assert_eq!(cached.http_status(), Some(422));
+        assert!(client.request_status().contains("falha"));
+        mock.assert();
+    }
+
+    #[test]
+    fn malformed_response_does_not_retry_on_redraw() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/v1/spaces/s/tags")
+            .with_body("not JSON")
+            .expect(1)
+            .create();
+        let client = test_client(&server);
+        assert!(client.tags().is_err());
+        client.set_fetch_allowed(false);
+        assert!(client.tags().is_err());
+        mock.assert();
+    }
+
+    #[test]
+    fn refresh_fetches_before_ttl_expires() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/v1/spaces/s/tags")
+            .with_body(r#"{"data":[]}"#)
+            .expect(2)
+            .create();
+        let client = test_client(&server);
+        client.tags().unwrap();
+        client.invalidate_cache();
+        client.tags().unwrap();
+        assert!(client.request_status().contains("sync "));
+        assert!(client.request_status().contains("cache 1"));
+        mock.assert();
+    }
+
+    #[test]
+    fn transaction_queries_encode_search_and_cursor_as_single_values() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/v1/spaces/s/transactions")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded(
+                    "search".to_owned(),
+                    "café + pão & type=income#x".to_owned(),
+                ),
+                mockito::Matcher::UrlEncoded("after".to_owned(), "a+/=b&c".to_owned()),
+                mockito::Matcher::UrlEncoded("type".to_owned(), "expense".to_owned()),
+            ]))
+            .with_body(r#"{"data":[]}"#)
+            .expect(1)
+            .create();
+        let client = test_client(&server);
+        client
+            .transactions(
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("expense"),
+                None,
+                Some("café + pão & type=income#x"),
+                None,
+                Some("a+/=b&c"),
+            )
+            .unwrap();
+        mock.assert();
+    }
+
+    #[test]
+    fn csv_cache_is_separate_from_json_and_uses_encoded_queries() {
+        let mut server = mockito::Server::new();
+        let matcher = mockito::Matcher::UrlEncoded("search".to_owned(), "A&B".to_owned());
+        let json_mock = server
+            .mock("GET", "/v1/spaces/s/transactions")
+            .match_query(matcher.clone())
+            .match_header("accept", "application/json")
+            .with_body(r#"{"data":[]}"#)
+            .expect(1)
+            .create();
+        let csv_mock = server
+            .mock("GET", "/v1/spaces/s/transactions")
+            .match_query(matcher)
+            .match_header("accept", "text/csv")
+            .with_body("description,amount\nA&B,10.00\n")
+            .expect(1)
+            .create();
+        let client = test_client(&server);
+        client
+            .transactions(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("A&B"),
+                None,
+                None,
+            )
+            .unwrap();
+        let csv = client
+            .export_transactions_csv(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("A&B"),
+                None,
+                None,
+            )
+            .unwrap();
+        client.set_fetch_allowed(false);
+        assert_eq!(
+            client
+                .export_transactions_csv(
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some("A&B"),
+                    None,
+                    None
+                )
+                .unwrap(),
+            csv
+        );
+        json_mock.assert();
+        csv_mock.assert();
+    }
+
+    #[test]
+    fn successful_writes_invalidate_filtered_reads_and_aggregates() {
+        let mut server = mockito::Server::new();
+        let read = server
+            .mock("GET", "/v1/spaces/s/transactions?ignored=true")
+            .with_body(r#"{"data":[]}"#)
+            .expect(2)
+            .create();
+        let aggregate = server
+            .mock("GET", "/v1/spaces/s/overview")
+            .with_body(r#"{"data":{}}"#)
+            .expect(2)
+            .create();
+        let write = server
+            .mock("DELETE", "/v1/spaces/s/transactions/tx1")
+            .with_status(204)
+            .expect(1)
+            .create();
+        let client = test_client(&server);
+        for iteration in 0..2 {
+            client
+                .transactions(
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(true),
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap();
+            let _: serde_json::Value = client.get("/v1/spaces/s/overview").unwrap();
+            if iteration == 0 {
+                client.delete_transaction("tx1").unwrap();
+            }
+        }
+        read.assert();
+        aggregate.assert();
+        write.assert();
+    }
+
+    #[test]
+    fn notification_read_invalidates_filtered_notification_cache() {
+        let mut server = mockito::Server::new();
+        let read = server
+            .mock("GET", "/v1/notifications?unread=true&limit=20")
+            .with_body(r#"{"data":[]}"#)
+            .expect(2)
+            .create();
+        let write = server
+            .mock("PATCH", "/v1/notifications/n1")
+            .match_body(mockito::Matcher::Json(json!({"read":true})))
+            .with_status(204)
+            .expect(1)
+            .create();
+        let client = test_client(&server);
+        client.notifications(Some(true), Some(20)).unwrap();
+        client.mark_notification_read("n1").unwrap();
+        client.notifications(Some(true), Some(20)).unwrap();
+        read.assert();
+        write.assert();
+    }
+
+    #[test]
+    fn successful_mutation_invalidates_even_with_an_invalid_response_body() {
+        let mut server = mockito::Server::new();
+        let read = server
+            .mock("GET", "/v1/spaces/s/tags")
+            .with_body(r#"{"data":[]}"#)
+            .expect(2)
+            .create();
+        let write = server
+            .mock("POST", "/v1/spaces/s/tags")
+            .with_status(201)
+            .with_body("invalid JSON")
+            .expect(1)
+            .create();
+        let client = test_client(&server);
+        client.tags().unwrap();
+        assert!(client.create_tag("new", None).is_err());
+        client.tags().unwrap();
+        read.assert();
+        write.assert();
+    }
+
+    #[test]
+    fn retry_after_header_overrides_json_delay() {
+        let mut server = mockito::Server::new();
+        let limited = server
+            .mock("GET", "/v1/spaces/s/tags")
+            .with_status(429)
+            .with_header("retry-after", "0")
+            .with_body(
+                json!({"errors":[{"code":"RATE_LIMITED","details":{"retry_after_seconds":60}}]})
+                    .to_string(),
+            )
+            .expect(1)
+            .create();
+        let recovered = server
+            .mock("GET", "/v1/spaces/s/tags")
+            .with_body(r#"{"data":[]}"#)
+            .expect(1)
+            .create();
+        let client = test_client(&server);
+        assert!(client.tags().unwrap().is_empty());
+        limited.assert();
+        recovered.assert();
+    }
+
+    #[test]
+    fn long_retry_delays_defer_and_refresh_cannot_bypass_cooldown() {
+        for header in [
+            "18446744073709551615".to_owned(),
+            (chrono::Utc::now() + chrono::Duration::minutes(2))
+                .format("%a, %d %b %Y %H:%M:%S GMT")
+                .to_string(),
+        ] {
+            let mut server = mockito::Server::new();
+            let limited = server
+                .mock("GET", "/v1/spaces/s/tags")
+                .with_status(429)
+                .with_header("retry-after", &header)
+                .with_body(r#"{"errors":[{"code":"RATE_LIMITED"}]}"#)
+                .expect(1)
+                .create();
+            let blocked = server
+                .mock("GET", "/v1/spaces/s/categories")
+                .expect(0)
+                .create();
+            let client = test_client(&server);
+            assert_eq!(client.tags().unwrap_err().http_status(), Some(429));
+            client.invalidate_cache();
+            assert_eq!(
+                client.categories(false).unwrap_err().http_status(),
+                Some(429)
+            );
+            assert_eq!(client.tags().unwrap_err().http_status(), Some(429));
+            assert!(client.request_status().contains("limite "));
+            limited.assert();
+            blocked.assert();
+        }
+    }
+
+    #[test]
+    fn expired_cooldown_allows_explicit_refresh() {
+        let mut server = mockito::Server::new();
+        let limited = server
+            .mock("GET", "/v1/spaces/s/tags")
+            .with_status(429)
+            .with_header("retry-after", "60")
+            .expect(1)
+            .create();
+        let recovered = server
+            .mock("GET", "/v1/spaces/s/tags")
+            .with_body(r#"{"data":[]}"#)
+            .expect(1)
+            .create();
+        let client = test_client(&server);
+        assert!(client.tags().is_err());
+        client.requests.lock().unwrap().cooldown_until =
+            Instant::now().checked_sub(Duration::from_secs(1));
+        client.invalidate_cache();
+        client.tags().unwrap();
+        limited.assert();
+        recovered.assert();
+    }
+
+    #[test]
+    fn write_rate_limit_is_never_retried() {
+        let mut server = mockito::Server::new();
+        let write = server
+            .mock("POST", "/v1/spaces/s/tags")
+            .with_status(429)
+            .with_header("retry-after", "0")
+            .with_body(r#"{"errors":[{"code":"RATE_LIMITED"}]}"#)
+            .expect(1)
+            .create();
+        let client = test_client(&server);
+        assert_eq!(
+            client.create_tag("new", None).unwrap_err().http_status(),
+            Some(429)
+        );
+        write.assert();
+    }
+
+    #[test]
+    fn transaction_patch_preserves_the_validated_payload() {
+        let mut server = mockito::Server::new();
+        let body = json!({"category_id":"category-2","tag_ids":[],"notes":""});
+        let write = server.mock("PATCH", "/v1/spaces/s/transactions/tx1")
+            .match_body(mockito::Matcher::Json(body.clone()))
+            .with_body(r#"{"data":{"id":"tx1","account_id":"acc1","amount":"12.00","type":"expense","tag_ids":[],"ignored":false}}"#)
+            .expect(1).create();
+        let client = test_client(&server);
+        assert_eq!(client.patch_transaction("tx1", &body).unwrap().id, "tx1");
+        write.assert();
     }
 }
