@@ -489,7 +489,8 @@ fn draw_overlay(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hi
                 "Valor positivo · Data AAAA-MM-DD ou DD/MM/AAAA"
             };
             text(&inner, 0, hint, inner.theme.muted);
-            let visible = inner.height().saturating_sub(5) / 2;
+            let reserved = if form.pending_create.is_some() { 5 } else { 4 };
+            let visible = inner.height().saturating_sub(reserved) / 2;
             let focused_index = FormField::ALL
                 .iter()
                 .position(|field| *field == form.focused)
@@ -545,7 +546,7 @@ fn draw_overlay(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hi
                     ..Default::default()
                 },
             );
-            let visible = inner.height().saturating_sub(5) / 2;
+            let visible = inner.height().saturating_sub(4) / 2;
             let selected = FilterField::ALL
                 .iter()
                 .position(|field| *field == form.focused)
@@ -752,12 +753,12 @@ fn field_row(
     readonly: bool,
     error: Option<&str>,
 ) {
-    let label_width = if surface.width() < 55 { 12 } else { 17 };
-    let label = format!("{} {}", if focused { "›" } else { " " }, label);
+    let label_width = if surface.width() < 44 { 12 } else { 19 };
+    let label = format!("{} {}:", if focused { "›" } else { " " }, label);
     text(
         surface,
         y,
-        &fit(&label, label_width, Align::Left),
+        &fit(&label, label_width - 1, Align::Left),
         if focused {
             surface.theme.accent
         } else {
