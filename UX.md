@@ -8,11 +8,39 @@ decimal arithmetic. Unknown totals stay unavailable, and different currencies ar
 never added together. Tables follow the selected record; short dashboards switch
 between complete financial sections with `j` and `k`.
 
-Transactions now have keyboard filters, visible active-filter chips, searchable
+Transactions have keyboard filters, visible active-filter chips, searchable
 pickers, a create/edit modal, field validation and inline API errors. Modal input
 owns the keyboard: typing screen shortcuts or pasting text cannot navigate away
 or confirm deletion. Category edit/delete actions follow the displayed hierarchy.
 Changing space resets screen data and filters, including when VISOR_SPACE is set.
+The selected calendar period persists across screens and space changes.
+
+## Calendar periods
+
+The default is the current calendar month in Brasília. The header shows the
+selected period. `[` and `]` select the previous or next calendar month relative
+to the range's start. `T` returns to the current month. `p` opens the period picker
+with Mês, Semana, Trimestre, Ano and Personalizado. Weeks start on Monday.
+Custom ranges include both endpoints and accept `DD/MM/YYYY` or `YYYY-MM-DD`.
+Invalid dates and reversed ranges stay in the picker until corrected or cancelled.
+
+Overview, Transactions, Cash Flow, Categories, Bills and Payables use the same
+range. Transaction filters affect only the transaction list and its summaries.
+Clearing filters preserves the selected period. Bills use their due date.
+Payables shows plans whose known next payment falls in the range; the API does
+not expose a historical installment schedule.
+
+The transaction list groups records by Brasília day and shows daily subtotals.
+The app fetches every page for the selected range before displaying the count
+or financial totals. A loading screen appears during the fetch. There is no
+manual load-more action or partial total.
+
+Period summaries exclude ignored transactions and sum decimal amounts exactly.
+BRL totals stay separate from totals in other currencies. The API supplies no
+transaction exchange rates or converted amounts, so foreign-currency amounts
+remain labeled in their original currency. They are never added to BRL balances.
+Current balances and projections from the overview endpoint retain their current
+scope; selected-period movement comes from the complete transaction range.
 
 ## Visual design
 
@@ -26,15 +54,15 @@ the request status.
 | --- | --- |
 | Accounts and cards | Total balance, credit limit and used credit tiles. One row per bank account with institution, type and right-aligned balance. Individual credit-card panels show usage meters, percentage, used/available/limit amounts and closing/due dates. |
 | Overview | Balance tiles, income/expense comparisons, projection panels and an upcoming-bills table. |
-| Transactions | Loaded-record summaries, a bordered table, filter chips and category-spending bars when height allows. Summaries and bars describe loaded transactions and exclude ignored entries. |
-| Cash flow | Period totals, proportional income/expense bars, projected balances and outgoing commitments. |
+| Transactions | Complete period summaries, day groups with daily subtotals and filter chips. Category and account columns fit at 120 columns; compact layouts retain summaries, with full record details on Enter. Category spending is available on Categories. |
+| Cash flow | Period totals and a daily flow table, with currencies kept separate. `j` / `k` also reaches the current forecast, projected balances and outgoing commitments. |
 | Projection | Current, expected and projected amounts, plus the components of planned spending. |
 | Net worth | Investment totals, allocation bars, one row per position and selected-position details. |
 | Goals | Active count, selected current/target amounts, progress meter and dates. |
 | Recurring | Tabs, active count, active monthly total, next due date and subscription records. Annual and inactive charges are excluded from the monthly figure. |
-| Bills | Card selector, total/paid summaries, bill records, payment meter and minimum-payment details. |
-| Payables | Status tabs, remaining totals, installment records and selected payment progress. |
-| Categories | Count tiles and a hierarchy with translated types and visible hidden state. |
+| Bills | Card selector, totals and bill records whose due dates fall in the selected range, payment meter and minimum-payment details. |
+| Payables | Status tabs, plans with a known next due date in the period, remaining totals and selected payment progress. |
+| Categories | Period spending alongside the editable category hierarchy, translated types and visible hidden state. |
 | Tags | Count tiles, native color swatches and tag names. |
 | Notifications | Unread count, inbox table and selected-message preview. |
 | Connections | Active/attention/account counts, institution status table and sync details. |
@@ -57,7 +85,18 @@ Reviewed mock-data captures:
   [80×24](docs/screenshots/80x24-accounts.png).
 - Overview at [120×40](docs/screenshots/120x40-overview.png) and
   [80×24](docs/screenshots/80x24-overview.png).
-- Transactions at [120×40](docs/screenshots/120x40-transactions.png).
+- Transactions at [120×40](docs/screenshots/120x40-transactions.png) and
+  [80×24](docs/screenshots/80x24-transactions.png).
+- Cash Flow at [120×40](docs/screenshots/120x40-cash-flow.png) and
+  [80×24](docs/screenshots/80x24-cash-flow.png).
+- Categories at [120×40](docs/screenshots/120x40-categories.png) and
+  [80×24](docs/screenshots/80x24-categories.png).
+- Bills at [120×40](docs/screenshots/120x40-bills.png) and
+  [80×24](docs/screenshots/80x24-bills.png).
+- Payables at [120×40](docs/screenshots/120x40-payables.png) and
+  [80×24](docs/screenshots/80x24-payables.png).
+- Period picker at [120×40](docs/screenshots/120x40-period-picker.png) and
+  [80×24](docs/screenshots/80x24-period-picker.png).
 
 ## Keymap
 
@@ -71,6 +110,9 @@ the current screen's keys. Mouse controls remain available.
 | `0`, `-`, `t` | Bills, Payables, Tags |
 | `N`, `x`, `=`, `D` | Notifications, Connections, Settings, Diagnostics |
 | `j` / `k`, `↓` / `↑` | Select rows or scroll financial information |
+| `[` / `]` | Previous / next calendar month |
+| `T` | Current calendar month |
+| `p` | Choose month, week, quarter, year or custom range |
 | `r` | Refresh the current screen, bypassing cache freshness |
 | `?` | Open contextual help |
 | `Esc` | Close help, cancel a dialog or go back from a picker |
@@ -78,7 +120,7 @@ the current screen's keys. Mouse controls remain available.
 
 | Screen | Additional keys |
 | --- | --- |
-| Transactions | `/` search, `f` filters, `c` clear filters, `n` new, `e` edit, `d` delete with confirmation, `Enter` details, `m` / `→` next page, `PageUp` / `PageDown` move ten rows, `Home` / `End` first / last loaded row, `E` / `Ctrl-E` export CSV |
+| Transactions | `/` search, `f` filters, `c` clear filters, `n` new, `e` edit, `d` delete with confirmation, `Enter` details, `PageUp` / `PageDown` move ten rows, `Home` / `End` first / last row, `E` / `Ctrl-E` export CSV |
 | Categories | `n` new, `e` edit, `d` delete with confirmation, `h` show hidden |
 | Tags / Goals | `n` new, `e` edit, `d` delete with confirmation |
 | Recurring | `←` / `→` switch subscriptions / fixed bills; `n`, `e`, `d` manage subscriptions |
@@ -87,6 +129,11 @@ the current screen's keys. Mouse controls remain available.
 | Payables | `←` / `→` cycle all / active / completed |
 | Notifications | `u` unread only; `m` / `Enter` mark selected notification read |
 | Settings | `s` choose space; `l` log out with confirmation |
+
+`h` / `l` and `←` / `→` also navigate months where the current screen does not
+already use them. Card selection, recurring and payable tabs, hidden-item toggles
+and logout retain their existing bindings. Forms and pickers own all input while
+open, including pasted dates and characters that are global shortcuts elsewhere.
 
 ## Transaction forms and filters
 
@@ -106,18 +153,24 @@ the current screen's keys. Mouse controls remain available.
 - After an uncertain create response, retry with `Ctrl-S` using the same body
   and idempotency key. Before cancelling and starting another transaction, check
   the list to avoid creating a duplicate.
-- Filters cover date range, account, category, tag, type, ignored state and text.
+- Filters cover account, category, tag, type, ignored state and text. Use `p`
+  to change the shared date range.
   `Ctrl-S` applies; `Ctrl-L` clears the draft; `Esc` discards changes. Outside the
-  panel, `c` clears active filters. CSV export includes active filters and writes
+  panel, `c` clears active filters. CSV export includes the period and active filters and writes
   a new file in the current directory without overwriting an existing export.
 
 ## Requests and verification
 
 Reads use a 60-second cache. Redraws and idle time do not fetch, even after the TTL.
-Screen entry and explicit actions such as applying filters, pagination and refresh
+Screen entry and explicit actions such as applying filters, changing period and refresh
 may fetch. Successful writes invalidate cached data. Reads have bounded retry and
 backoff; long `Retry-After` values become a visible cooldown. Writes respect that
 cooldown and are never retried automatically.
+
+Complete transaction results are cached by space, inclusive range and every
+filter. A page failure does not publish partial results. Repeated cursors fail
+with an error instead of looping. Refresh and successful mutations invalidate
+the complete-range cache with the other cached reads.
 
 ```sh
 cargo build
@@ -130,7 +183,11 @@ PYTHONDONTWRITEBYTECODE=1 UV_CACHE_DIR=/tmp/visor-uv-cache \
 The smoke driver runs the real binary in 120×40, 80×24 and 60×18 terminals against
 a loopback fixture, with temporary configuration and mock credentials. It exercises
 create/edit/delete, cancellation, filters, search, CSV export, refresh, modal input,
-space switching and idle behavior. The 61-second check beyond the cache TTL runs
+space switching and idle behavior. Period checks use date-filtered, multi-page
+fixtures and cover navigation, picker validation, shared ranges and cache reuse.
+Delayed responses and failed later pages verify loading, unavailable totals and
+complete recovery on retry.
+The 61-second check beyond the cache TTL runs
 at 120×40. No real account is used.
 
 For a read-only visual review of all 16 screens at the two design sizes:
@@ -144,6 +201,8 @@ PYTHONDONTWRITEBYTECODE=1 uv run --with pyte python scripts/ux_smoke.py \
 includes plain text and a color-preserving SVG. The driver isolates mock credentials,
 forces true color independently of the parent shell, checks keyboard selection and
 sidebar clicks, and rejects account mutations in visual-only mode.
+
+Export a reviewed SVG to PNG with `rsvg-convert capture.svg -o capture.png`.
 
 The redesign is verified with build, all-target Clippy with warnings denied, Rust
 tests, the complete keyboard smoke and direct inspection of every data screen at
