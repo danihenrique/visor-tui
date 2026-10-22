@@ -1,4 +1,3 @@
-use hqtui::color::Color;
 use hqtui::input::InputEvent;
 use hqtui::prelude::*;
 use hqtui::unicode::Align;
@@ -9,9 +8,7 @@ use hqtui::widgets::{
 
 use crate::api::ApiClient;
 use crate::models::Category;
-
-const COLOR_NEGATIVE: Color = Color::rgb(239, 68, 68);
-const COLOR_NEUTRAL: Color = Color::rgb(148, 163, 184);
+use crate::presentation::{Metric, Tone, metric_strip};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CategoryModalState {
@@ -491,17 +488,57 @@ fn category_order(categories: &[Category]) -> Vec<(usize, usize)> {
     result
 }
 
-fn build_tree_rows(categories: &[Category]) -> Vec<TableRow> {
+fn category_type(value: Option<&str>) -> &str {
+    match value {
+        Some("income") => "Receita",
+        Some("expense") => "Despesa",
+        Some("transfer") => "Transferência",
+        Some(value) => value,
+        None => "—",
+    }
+}
+
+fn build_tree_rows(categories: &[Category], theme: &Theme) -> Vec<TableRow> {
     category_order(categories)
         .into_iter()
         .map(|(index, depth)| {
             let category = &categories[index];
-            let hidden = if category.hidden { " (oculta)" } else { "" };
-            TableRow::new([
-                format!("{}{}{hidden}", "  ".repeat(depth.min(8)), category.name),
-                category.category_type.clone().unwrap_or_else(|| "—".into()),
-                category.kind.clone().unwrap_or_else(|| "—".into()),
-            ])
+            let prefix = if depth == 0 {
+                String::new()
+            } else {
+                format!("{}└ ", "  ".repeat(depth.saturating_sub(1).min(7)))
+            };
+            let mut row = TableRow::new([
+                format!("{prefix}{}", category.name),
+                category_type(category.category_type.as_deref()).into(),
+                match category.kind.as_deref() {
+                    Some("system") => "Padrão",
+                    Some("custom") => "Pessoal",
+                    Some(kind) => kind,
+                    None => "—",
+                }
+                .into(),
+                if category.hidden {
+                    "Oculta".into()
+                } else {
+                    "Visível".into()
+                },
+            ]);
+            row.cell_colors = vec![
+                Some(if category.hidden {
+                    theme.muted
+                } else {
+                    theme.foreground
+                }),
+                Some(match category.category_type.as_deref() {
+                    Some("income") => theme.success,
+                    Some("expense") => theme.danger,
+                    _ => theme.muted,
+                }),
+                Some(theme.muted),
+                Some(theme.muted),
+            ];
+            row
         })
         .collect()
 }
@@ -509,16 +546,43 @@ fn build_tree_rows(categories: &[Category]) -> Vec<TableRow> {
 pub fn render_with_state(ui: &mut Container<'_>, screen: &mut CategoriesScreen, api: &ApiClient) {
     screen.load_initial(api);
 
-    let table_rows = build_tree_rows(&screen.categories);
+    let theme = ui.theme().clone();
+    let table_rows = build_tree_rows(&screen.categories, &theme);
+    let metrics = vec![
+        Metric::new(
+            "Categorias",
+            screen.categories.len().to_string(),
+            Tone::Accent,
+        ),
+        Metric::new(
+            "Receitas",
+            screen
+                .categories
+                .iter()
+                .filter(|category| category.category_type.as_deref() == Some("income"))
+                .count()
+                .to_string(),
+            Tone::Positive,
+        ),
+        Metric::new(
+            "Despesas",
+            screen
+                .categories
+                .iter()
+                .filter(|category| category.category_type.as_deref() == Some("expense"))
+                .count()
+                .to_string(),
+            Tone::Negative,
+        ),
+    ];
 
     let columns = vec![
         TableColumn::new("Nome").width(Size::Fill),
         TableColumn::new("Tipo")
             .width(Size::Cells(12))
             .align(Align::Left),
-        TableColumn::new("Kind")
-            .width(Size::Cells(12))
-            .align(Align::Left),
+        TableColumn::new("Grupo").width(Size::Cells(12)),
+        TableColumn::new("Exibição").width(Size::Cells(8)),
     ];
 
     let has_rows = !table_rows.is_empty();
@@ -538,61 +602,50 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut CategoriesScreen, 
     let delete_target_name = screen.delete_target_name.clone();
 
     ui.column(Column::new().gap(1), move |col| {
-        // Action buttons row
-        col.row(Row::new().size(Size::Cells(1)).gap(1), move |r| {
-            r.button(
-                ButtonOptions::new("Nova Categoria (n)").variant(ButtonVariant::Primary),
+        metric_strip(col, metrics);
+        col.row(Row::new().size(Size::Cells(1)).gap(1), move |row| {
+            row.button(
+                ButtonOptions::new("Nova categoria (n)").variant(ButtonVariant::Primary),
                 "categories:new",
             );
-            r.button(
+            row.button(
                 ButtonOptions::new("Editar (e)").variant(ButtonVariant::Ghost),
                 "categories:edit",
             );
-            r.button(
-                ButtonOptions::new("Excluir (d)").variant(ButtonVariant::Danger),
+            row.button(
+                ButtonOptions::new("Excluir (d)").variant(ButtonVariant::Ghost),
                 "categories:delete",
             );
         });
-
-        // Error display
-        if let Some(err) = error_msg {
-            col.panel(Panel::new().title("Erro"), move |p| {
-                p.styled_text(&err, TextStyle::new().fg(COLOR_NEGATIVE));
-            });
-        }
-
-        // Categories table
-        col.panel(Panel::new().title(panel_title), move |p| {
-            if loading {
-                p.text("Carregando...");
-            } else if has_rows {
-                p.table(
-                    TableOptions {
-                        follow_selection: true,
-                        columns: columns.clone(),
-                        rows: table_rows.clone(),
-                        header: true,
-                        zebra: true,
-                        selected,
-                        ..Default::default()
-                    },
-                    "",
-                );
-            } else {
-                p.styled_text(
-                    "Nenhuma categoria encontrada. Pressione 'n' para criar.",
-                    TextStyle::new().fg(COLOR_NEUTRAL),
-                );
-            }
-        });
-
-        // Key hints
-        col.row(Row::new().size(Size::Cells(1)), move |r| {
-            r.styled_text(
-                "n: Nova | e: Editar | d: Excluir | ↑↓: Navegar",
-                TextStyle::new().fg(COLOR_NEUTRAL),
-            );
-        });
+        col.panel(
+            Panel::new()
+                .title(panel_title)
+                .border(BorderStyle::Rounded)
+                .footer("j/k Selecionar  n Nova  e Editar  d Excluir"),
+            move |panel| {
+                if loading {
+                    panel.label("Carregando suas categorias…");
+                } else if let Some(error) = error_msg {
+                    panel.styled_text(&error, TextStyle::new().fg(theme.danger));
+                } else if has_rows {
+                    panel.table(
+                        TableOptions {
+                            columns,
+                            rows: table_rows,
+                            selected,
+                            follow_selection: true,
+                            scrollbar: true,
+                            header_color: Some(theme.muted),
+                            ..Default::default()
+                        },
+                        "categories:table",
+                    );
+                } else {
+                    panel.text("Organize seus lançamentos por categoria.");
+                    panel.label("Pressione n para criar sua primeira categoria.");
+                }
+            },
+        );
     });
 
     // Draw modals
