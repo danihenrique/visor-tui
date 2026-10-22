@@ -19,6 +19,9 @@ pub struct VisorApp {
     space_selector_visible: bool,
     spaces: Vec<crate::models::Space>,
     transactions_screen: Rc<RefCell<screens::transactions::TransactionsScreen>>,
+    settings_modal: screens::settings::SettingsModal,
+    doctor_state: screens::doctor::DoctorState,
+    doctor_needs_run: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +38,7 @@ enum Screen {
     Bills,
     Payables,
     Settings,
+    Doctor,
 }
 
 impl Screen {
@@ -52,6 +56,7 @@ impl Screen {
             Self::Bills => "Faturas",
             Self::Payables => "Contas a pagar",
             Self::Settings => "Configura\u{e7}\u{f5}es",
+            Self::Doctor => "Diagn\u{f3}stico",
         }
     }
 
@@ -69,10 +74,11 @@ impl Screen {
             Self::Bills => "0",
             Self::Payables => "-",
             Self::Settings => "=",
+            Self::Doctor => "d",
         }
     }
 
-    fn all() -> [Screen; 12] {
+    fn all() -> [Screen; 13] {
         [
             Self::Overview,
             Self::Transactions,
@@ -86,6 +92,7 @@ impl Screen {
             Self::Bills,
             Self::Payables,
             Self::Settings,
+            Self::Doctor,
         ]
     }
 
@@ -170,6 +177,9 @@ impl VisorApp {
             space_selector_visible,
             spaces,
             transactions_screen: Rc::new(RefCell::new(screens::transactions::TransactionsScreen::new())),
+            settings_modal: screens::settings::SettingsModal::None,
+            doctor_state: screens::doctor::DoctorState::new(),
+            doctor_needs_run: true,
         })
     }
 
@@ -335,6 +345,11 @@ impl VisorApp {
                             self.screen = Screen::Settings;
                             return;
                         }
+                        "d" => {
+                            self.screen = Screen::Doctor;
+                            self.doctor_needs_run = true;
+                            return;
+                        }
                         _ => {}
                     }
                 }
@@ -364,6 +379,61 @@ impl VisorApp {
             && let Some(ref api) = self.api
         {
             self.transactions_screen.borrow_mut().handle_input(&self.app, api, events);
+        }
+
+        // Handle doctor screen re-run.
+        if self.screen == Screen::Doctor {
+            let mut rerun = false;
+            for event in events {
+                if let InputEvent::Key(k) = event {
+                    if k.name == "r" {
+                        rerun = true;
+                    }
+                }
+            }
+            if self.app.pressed("doctor_rerun") {
+                rerun = true;
+            }
+            if rerun {
+                self.doctor_needs_run = true;
+            }
+        }
+
+        // Handle settings screen logout flow.
+        if self.screen == Screen::Settings {
+            // Check for key events in the modal state.
+            let mut escape_pressed = false;
+            let mut enter_pressed = false;
+            for event in events {
+                if let InputEvent::Key(k) = event {
+                    if k.name == "escape" {
+                        escape_pressed = true;
+                    }
+                    if k.name == "enter" {
+                        enter_pressed = true;
+                    }
+                }
+            }
+
+            match self.settings_modal {
+                screens::settings::SettingsModal::None => {
+                    if self.app.pressed("logout") {
+                        self.settings_modal = screens::settings::SettingsModal::LogoutConfirm;
+                    }
+                }
+                screens::settings::SettingsModal::LogoutConfirm => {
+                    if self.app.pressed("Cancelar") || escape_pressed {
+                        self.settings_modal = screens::settings::SettingsModal::None;
+                    }
+                    if self.app.pressed("Sair") || enter_pressed {
+                        // Perform logout
+                        let _ = crate::auth::clear_credential();
+                        self.api = None;
+                        self.login_token_input.clear();
+                        self.settings_modal = screens::settings::SettingsModal::None;
+                    }
+                }
+            }
         }
     }
 
@@ -399,8 +469,16 @@ impl VisorApp {
             .map(|scr| format!(" {} {}", scr.shortcut_key(), scr.label()))
             .collect();
 
+        // Run doctor checks if needed before drawing
+        if self.screen == Screen::Doctor && self.doctor_needs_run {
+            self.doctor_state.run_checks(self.api.as_deref());
+            self.doctor_needs_run = false;
+        }
+
         let api = Rc::clone(self.api.as_ref().expect("api is Some at this point"));
         let tx_screen = self.transactions_screen.clone();
+        let settings_modal = self.settings_modal;
+        let doctor_state = self.doctor_state.clone();
 
         self.app.draw(move |f| {
             f.ui.row(Row::new().gap(0), move |row| {
@@ -444,7 +522,10 @@ impl VisorApp {
                             Screen::NetWorth => screens::net_worth::render(p, &api),
                             Screen::Bills => screens::bills::render(p, &api),
                             Screen::Payables => screens::payables::render(p, &api),
-                            Screen::Settings => screens::settings::render(p, &api),
+                            Screen::Settings => screens::settings::render(p, &api, settings_modal),
+                            Screen::Doctor => {
+                                screens::doctor::render(p, &doctor_state);
+                            }
                         }
                     });
                 });
@@ -553,7 +634,7 @@ mod tests {
 
     #[test]
     fn test_screen_count() {
-        assert_eq!(Screen::all().len(), 12);
+        assert_eq!(Screen::all().len(), 13);
     }
 
     #[test]

@@ -48,6 +48,12 @@ impl ApiClient {
         Self::from_credential(credential)
     }
 
+    /// Return a reference to the current credential (for display purposes).
+    #[must_use]
+    pub fn credential(&self) -> &Credential {
+        &self.credential
+    }
+
     fn from_credential(credential: crate::auth::Credential) -> Result<Self, ApiError> {
         let space_id = config::active_space_id();
         let base_url = config::api_base_url();

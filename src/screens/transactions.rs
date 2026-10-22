@@ -52,7 +52,9 @@ pub enum ModalState {
     None,
     Detail,
     NewTransaction,
+    EditTransaction,
     DeleteConfirm,
+    ExportSuccess,
 }
 
 /// Which form field is focused inside the NewTransaction modal.
@@ -129,6 +131,24 @@ pub struct TransactionsScreen {
     pub new_tx_date: String,
     pub new_tx_error: Option<String>,
     pub new_tx_field: FormField,
+
+    // Edit transaction form state
+    pub edit_tx_id: String,
+    pub edit_tx_amount: String,
+    pub edit_tx_description: String,
+    pub edit_tx_type: TxTypeFilter,
+    pub edit_tx_category_index: usize,
+    pub edit_tx_merchant: String,
+    pub edit_tx_notes: String,
+    pub edit_tx_date: String,
+    pub edit_tx_ignored: bool,
+    pub edit_tx_error: Option<String>,
+    pub edit_tx_field: FormField,
+    pub edit_tx_source: Option<String>,
+
+    // CSV export state
+    pub exporting: bool,
+    pub export_success_path: Option<String>,
 }
 
 impl TransactionsScreen {
@@ -166,6 +186,24 @@ impl TransactionsScreen {
             new_tx_date: chrono::Local::now().format("%Y-%m-%d").to_string(),
             new_tx_error: None,
             new_tx_field: FormField::Amount,
+
+            // Edit transaction form defaults
+            edit_tx_id: String::new(),
+            edit_tx_amount: String::new(),
+            edit_tx_description: String::new(),
+            edit_tx_type: TxTypeFilter::Credit,
+            edit_tx_category_index: 0,
+            edit_tx_merchant: String::new(),
+            edit_tx_notes: String::new(),
+            edit_tx_date: String::new(),
+            edit_tx_ignored: false,
+            edit_tx_error: None,
+            edit_tx_field: FormField::Amount,
+            edit_tx_source: None,
+
+            // CSV export defaults
+            exporting: false,
+            export_success_path: None,
         }
     }
 
@@ -349,6 +387,112 @@ impl TransactionsScreen {
                 }
             }
         }
+
+        // Edit transaction trigger: 'e' key when a transaction is selected
+        // Only trigger if not already exporting (to avoid conflict with export 'e')
+        let edit_triggered = events.iter().any(|ev| {
+            matches!(ev, InputEvent::Key(k) if k.key == "e" && !k.ctrl && !k.alt && !k.shift)
+        });
+        if edit_triggered && !self.exporting {
+            if let Some(idx) = self.selected_index {
+                if idx < self.transactions.len() {
+                    let tx = &self.transactions[idx];
+                    self.edit_tx_id = tx.id.clone();
+                    self.edit_tx_amount = tx.amount.clone();
+                    self.edit_tx_description = tx.description.clone().unwrap_or_default();
+                    self.edit_tx_type = match tx.tx_type.as_str() {
+                        "debit" => TxTypeFilter::Debit,
+                        _ => TxTypeFilter::Credit,
+                    };
+                    // Find category index
+                    self.edit_tx_category_index = if let Some(ref cat_id) = tx.category_id {
+                        self.categories.iter().position(|c| &c.id == cat_id).unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    self.edit_tx_merchant = tx.merchant_name.clone().unwrap_or_default();
+                    self.edit_tx_notes = tx.notes.clone().unwrap_or_default();
+                    self.edit_tx_date = tx.transacted_at.clone().unwrap_or_default();
+                    self.edit_tx_ignored = tx.ignored;
+                    self.edit_tx_error = None;
+                    self.edit_tx_field = FormField::Amount;
+                    self.edit_tx_source = tx.source.clone();
+                    self.modal_state = ModalState::EditTransaction;
+                }
+            }
+        }
+
+        // CSV export trigger: button or 'e' key
+        let export_triggered = app.pressed("tx:export")
+            || events.iter().any(|ev| {
+                matches!(ev, InputEvent::Key(k) if k.key == "e" && !k.ctrl && !k.alt && !k.shift)
+            });
+        if export_triggered && !self.exporting {
+            self.exporting = true;
+            self.error = None;
+
+            let account_id = if self.account_filter_index > 0
+                && self.account_filter_index <= self.accounts.len()
+            {
+                Some(self.accounts[self.account_filter_index - 1].id.as_str())
+            } else {
+                None
+            };
+            let category_id = if self.category_filter_index > 0
+                && self.category_filter_index <= self.categories.len()
+            {
+                Some(self.categories[self.category_filter_index - 1].id.as_str())
+            } else {
+                None
+            };
+            let tag_id = if self.tag_filter_index > 0 && self.tag_filter_index <= self.tags.len() {
+                Some(self.tags[self.tag_filter_index - 1].id.as_str())
+            } else {
+                None
+            };
+            let tx_type = self.type_filter.api_value();
+            let search = if self.search_query.is_empty() {
+                None
+            } else {
+                Some(self.search_query.as_str())
+            };
+            let from_date = if self.date_from.is_empty() {
+                None
+            } else {
+                Some(self.date_from.as_str())
+            };
+            let to_date = if self.date_to.is_empty() {
+                None
+            } else {
+                Some(self.date_to.as_str())
+            };
+
+            match api.export_transactions_csv(
+                from_date, to_date, account_id, category_id, tag_id, tx_type, None, search,
+                None, None,
+            ) {
+                Ok(csv_data) => {
+                    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                    let filename = format!("transactions_{today}.csv");
+                    let path = dirs::home_dir()
+                        .map(|h| h.join("Downloads").join(&filename))
+                        .unwrap_or_else(|| std::path::PathBuf::from(&filename));
+                    match std::fs::write(&path, csv_data.as_bytes()) {
+                        Ok(_) => {
+                            self.export_success_path = Some(path.display().to_string());
+                            self.modal_state = ModalState::ExportSuccess;
+                        }
+                        Err(e) => {
+                            self.error = Some(format!("Erro ao salvar arquivo: {e}"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.error = Some(format_api_error(&e));
+                }
+            }
+            self.exporting = false;
+        }
     }
 
     fn handle_modal_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
@@ -523,6 +667,184 @@ impl TransactionsScreen {
                     }
                 }
             }
+            ModalState::EditTransaction => {
+                // Determine if fields are read-only based on source
+                let is_immutable = matches!(
+                    self.edit_tx_source.as_deref(),
+                    Some("connected") | Some("apple_pay")
+                );
+
+                for event in events {
+                    if let InputEvent::Key(k) = event {
+                        if k.key == "escape" {
+                            self.modal_state = ModalState::None;
+                            self.edit_tx_error = None;
+                            return;
+                        }
+                        // Tab / Shift+Tab to cycle form fields
+                        if k.name == "tab" && !k.shift {
+                            self.edit_tx_field = self.edit_tx_field.next();
+                            return;
+                        }
+                        if k.name == "tab" && k.shift {
+                            self.edit_tx_field = self.edit_tx_field.prev();
+                            return;
+                        }
+                        // Type toggle on Enter when Type field is focused (only if mutable)
+                        if k.name == "enter" && self.edit_tx_field == FormField::Type && !is_immutable {
+                            self.edit_tx_type = match self.edit_tx_type {
+                                TxTypeFilter::Credit => TxTypeFilter::Debit,
+                                _ => TxTypeFilter::Credit,
+                            };
+                            return;
+                        }
+                        // Category select cycling on Enter
+                        if k.name == "enter" && self.edit_tx_field == FormField::Category {
+                            if !self.categories.is_empty() {
+                                self.edit_tx_category_index =
+                                    (self.edit_tx_category_index + 1) % self.categories.len();
+                            }
+                            return;
+                        }
+                        // Ignored toggle on Enter when Notes field is focused (repurpose for ignored)
+                        // Actually, let's use a separate mechanism - toggle ignored with 'i' key
+                        if k.key == "i" && !k.ctrl && !k.alt && !k.shift {
+                            self.edit_tx_ignored = !self.edit_tx_ignored;
+                            return;
+                        }
+                        // Text input for the currently focused text field (skip immutable fields)
+                        if let Some(ch) = &k.char {
+                            if !k.ctrl && !k.alt {
+                                let can_edit = match self.edit_tx_field {
+                                    FormField::Amount | FormField::Description | FormField::Date => !is_immutable,
+                                    FormField::Type => false, // toggled via Enter
+                                    FormField::Account => false, // not editable in edit mode
+                                    FormField::Category => false, // cycled via Enter
+                                    _ => true,
+                                };
+                                if can_edit {
+                                    match self.edit_tx_field {
+                                        FormField::Amount => self.edit_tx_amount.push_str(ch),
+                                        FormField::Description => self.edit_tx_description.push_str(ch),
+                                        FormField::Merchant => self.edit_tx_merchant.push_str(ch),
+                                        FormField::Notes => self.edit_tx_notes.push_str(ch),
+                                        FormField::Date => self.edit_tx_date.push_str(ch),
+                                        _ => {}
+                                    }
+                                }
+                                return;
+                            }
+                        }
+                        if k.key == "backspace" {
+                            let can_edit = match self.edit_tx_field {
+                                FormField::Amount | FormField::Description | FormField::Date => !is_immutable,
+                                FormField::Type | FormField::Account | FormField::Category => false,
+                                _ => true,
+                            };
+                            if can_edit {
+                                match self.edit_tx_field {
+                                    FormField::Amount => { self.edit_tx_amount.pop(); }
+                                    FormField::Description => { self.edit_tx_description.pop(); }
+                                    FormField::Merchant => { self.edit_tx_merchant.pop(); }
+                                    FormField::Notes => { self.edit_tx_notes.pop(); }
+                                    FormField::Date => { self.edit_tx_date.pop(); }
+                                    _ => {}
+                                }
+                            }
+                            return;
+                        }
+                        if k.key == "ctrl+u" {
+                            let can_edit = match self.edit_tx_field {
+                                FormField::Amount | FormField::Description | FormField::Date => !is_immutable,
+                                FormField::Type | FormField::Account | FormField::Category => false,
+                                _ => true,
+                            };
+                            if can_edit {
+                                match self.edit_tx_field {
+                                    FormField::Amount => self.edit_tx_amount.clear(),
+                                    FormField::Description => self.edit_tx_description.clear(),
+                                    FormField::Merchant => self.edit_tx_merchant.clear(),
+                                    FormField::Notes => self.edit_tx_notes.clear(),
+                                    FormField::Date => self.edit_tx_date.clear(),
+                                    _ => {}
+                                }
+                            }
+                            return;
+                        }
+                    }
+                }
+
+                if app.pressed("tx:new_cancel") {
+                    self.modal_state = ModalState::None;
+                    self.edit_tx_error = None;
+                }
+                if app.pressed("tx:new_save") {
+                    // Validate amount
+                    let amount_trimmed = self.edit_tx_amount.trim();
+                    if amount_trimmed.is_empty() {
+                        self.edit_tx_error = Some("Valor e obrigatorio.".to_string());
+                        return;
+                    }
+                    if amount_trimmed.parse::<f64>().is_err() {
+                        self.edit_tx_error = Some("Valor invalido. Use formato numerico.".to_string());
+                        return;
+                    }
+
+                    let category_id = if self.edit_tx_category_index < self.categories.len() {
+                        Some(self.categories[self.edit_tx_category_index].id.as_str())
+                    } else {
+                        None
+                    };
+                    let tx_type_str = match self.edit_tx_type {
+                        TxTypeFilter::Credit => "credit",
+                        TxTypeFilter::Debit => "debit",
+                        TxTypeFilter::All => "credit",
+                    };
+                    let description = if self.edit_tx_description.is_empty() {
+                        None
+                    } else {
+                        Some(self.edit_tx_description.as_str())
+                    };
+                    let merchant = if self.edit_tx_merchant.is_empty() {
+                        None
+                    } else {
+                        Some(self.edit_tx_merchant.as_str())
+                    };
+                    let notes = if self.edit_tx_notes.is_empty() {
+                        None
+                    } else {
+                        Some(self.edit_tx_notes.as_str())
+                    };
+                    let transacted_at = if self.edit_tx_date.is_empty() {
+                        None
+                    } else {
+                        Some(self.edit_tx_date.as_str())
+                    };
+
+                    match api.update_transaction(
+                        &self.edit_tx_id,
+                        Some(amount_trimmed),
+                        description,
+                        Some(tx_type_str),
+                        category_id,
+                        None, // tag_ids - not editing tags in this form
+                        merchant,
+                        notes,
+                        transacted_at,
+                        Some(self.edit_tx_ignored),
+                        false, // clear_tags
+                    ) {
+                        Ok(_tx) => {
+                            self.modal_state = ModalState::None;
+                            self.edit_tx_error = None;
+                            self.fetch_transactions(api, false);
+                        }
+                        Err(e) => {
+                            self.edit_tx_error = Some(format_api_error(&e));
+                        }
+                    }
+                }
+            }
             ModalState::DeleteConfirm => {
                 if app.pressed("tx:delete_cancel") || app.pressed("tx:escape") {
                     self.modal_state = ModalState::None;
@@ -544,6 +866,14 @@ impl TransactionsScreen {
                             }
                         }
                     }
+                }
+            }
+            ModalState::ExportSuccess => {
+                if app.pressed("tx:export_ok") || app.pressed("tx:escape")
+                    || events.iter().any(|ev| matches!(ev, InputEvent::Key(k) if k.key == "enter" || k.key == "escape"))
+                {
+                    self.modal_state = ModalState::None;
+                    self.export_success_path = None;
                 }
             }
             ModalState::None => {}
@@ -584,6 +914,21 @@ impl TransactionsScreen {
         let new_tx_date = self.new_tx_date.clone();
         let new_tx_error = self.new_tx_error.clone();
         let new_tx_field = self.new_tx_field;
+        // Edit transaction form state (cloned for closure capture)
+        let edit_tx_amount = self.edit_tx_amount.clone();
+        let edit_tx_description = self.edit_tx_description.clone();
+        let edit_tx_type = self.edit_tx_type;
+        let edit_tx_category_index = self.edit_tx_category_index;
+        let edit_tx_merchant = self.edit_tx_merchant.clone();
+        let edit_tx_notes = self.edit_tx_notes.clone();
+        let edit_tx_date = self.edit_tx_date.clone();
+        let edit_tx_ignored = self.edit_tx_ignored;
+        let edit_tx_error = self.edit_tx_error.clone();
+        let edit_tx_field = self.edit_tx_field;
+        let edit_tx_source = self.edit_tx_source.clone();
+
+        let exporting = self.exporting;
+        let export_success_path = self.export_success_path.clone();
 
         // Pre-compute table rows outside closures to avoid borrow issues
         let colored_rows: Vec<TableRow> = transactions
@@ -779,8 +1124,13 @@ impl TransactionsScreen {
                         "tx:delete",
                     );
                 }
-                if loading {
-                    r.text(" Carregando...");
+                r.button(
+                    ButtonOptions::new("Exportar CSV").variant(ButtonVariant::Ghost),
+                    "tx:export",
+                );
+                if loading || exporting {
+                    let status = if exporting { " Exportando..." } else { " Carregando..." };
+                    r.text(status);
                 }
             });
 
@@ -915,6 +1265,75 @@ impl TransactionsScreen {
                     buttons: vec![
                         ModalButton::new("Cancelar"),
                         ModalButton::new("Excluir"),
+                    ],
+                    ..Default::default()
+                });
+            }
+            ModalState::ExportSuccess => {
+                let path = export_success_path.as_deref().unwrap_or("arquivo exportado");
+                ui.modal(ModalOptions {
+                    title: Some("Exportacao Concluida".to_string()),
+                    message: Some(format!("Arquivo CSV salvo em:\n{path}")),
+                    buttons: vec![ModalButton::new("OK")],
+                    ..Default::default()
+                });
+            }
+            ModalState::EditTransaction => {
+                let is_immutable = matches!(
+                    edit_tx_source.as_deref(),
+                    Some("connected") | Some("apple_pay")
+                );
+                let field_marker = |f: FormField| -> &'static str {
+                    if f == edit_tx_field { " > " } else { "   " }
+                };
+                let readonly_tag = if is_immutable { " [somente leitura]" } else { "" };
+                let type_label = match edit_tx_type {
+                    TxTypeFilter::Credit => "CREDITO",
+                    TxTypeFilter::Debit => "DEBITO",
+                    TxTypeFilter::All => "CREDITO",
+                };
+                let category_name = if !categories.is_empty() && edit_tx_category_index < categories.len() {
+                    &categories[edit_tx_category_index].name
+                } else {
+                    "(nenhuma)"
+                };
+                let ignored_label = if edit_tx_ignored { "SIM" } else { "NAO" };
+                let error_line = edit_tx_error.as_ref().map(|e| format!("\nERRO: {e}")).unwrap_or_default();
+                let form_message = format!(
+                    "{m_amt}Valor:       {amount}{ro}\n\
+                     {m_desc}Descricao:   {desc}{ro}\n\
+                     {m_type}Tipo:        {type_lbl}  [Enter para alternar]{ro}\n\
+                     {m_cat}Categoria:   {cat}  [Enter para ciclar]\n\
+                     {m_merch}Estabelec.:  {merch}\n\
+                     {m_notes}Notas:       {notes}\n\
+                     {m_date}Data:        {date}{ro}\n\
+                     Ignorado:    {ign}  [i para alternar]{err}",
+                    m_amt = field_marker(FormField::Amount),
+                    amount = if edit_tx_amount.is_empty() { "_" } else { &edit_tx_amount },
+                    ro = readonly_tag,
+                    m_desc = field_marker(FormField::Description),
+                    desc = if edit_tx_description.is_empty() { "_" } else { &edit_tx_description },
+                    m_type = field_marker(FormField::Type),
+                    type_lbl = type_label,
+                    m_cat = field_marker(FormField::Category),
+                    cat = category_name,
+                    m_merch = field_marker(FormField::Merchant),
+                    merch = if edit_tx_merchant.is_empty() { "_" } else { &edit_tx_merchant },
+                    m_notes = field_marker(FormField::Notes),
+                    notes = if edit_tx_notes.is_empty() { "_" } else { &edit_tx_notes },
+                    m_date = field_marker(FormField::Date),
+                    date = if edit_tx_date.is_empty() { "_" } else { &edit_tx_date },
+                    ign = ignored_label,
+                    err = error_line,
+                );
+                ui.modal(ModalOptions {
+                    title: Some("Editar Transacao".to_string()),
+                    message: Some(form_message),
+                    width: Some(60),
+                    height: Some(14),
+                    buttons: vec![
+                        ModalButton::new("Cancelar"),
+                        ModalButton::new("Salvar"),
                     ],
                     ..Default::default()
                 });

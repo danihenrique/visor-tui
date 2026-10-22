@@ -12,10 +12,10 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 
 | CLI Command | TUI Screen / Action | Status |
 |---|---|---|
-| `visor auth login` | Login screen: OAuth browser flow + PAT entry form | 🚧 |
+| `visor auth login` | Login screen: OAuth browser flow + PAT entry form | ✅ |
 | `visor auth login --with-token` | PAT input form (masked, stdin-style) | ✅ |
 | `visor auth login --no-browser` | Show OAuth URL for manual copy + code entry | ⬜ |
-| `visor auth logout` | Settings > Logout with confirmation modal | ⬜ |
+| `visor auth logout` | Settings > Logout with confirmation modal | ✅ |
 | `visor auth status` | Settings screen: current token kind, user, expiry | ✅ |
 | `visor whoami` | Sidebar/header: user name, email, active space | ✅ |
 | `visor me` | Profile screen: full user details (name, email, locale, plan, currency) | ✅ |
@@ -159,10 +159,10 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 | Method | Path | TUI Screen / Action | Status |
 |---|---|---|---|
 | GET | `/v1/spaces/{id}/transactions` | Transações list with filters + pagination | ✅ |
-| POST | `/v1/spaces/{id}/transactions` | New transaction form submit (with Idempotency-Key) | ⬜ |
+| POST | `/v1/spaces/{id}/transactions` | New transaction form submit (with Idempotency-Key) | ✅ |
 | GET | `/v1/spaces/{id}/transactions/{id}` | Transaction detail view | ✅ |
-| PATCH | `/v1/spaces/{id}/transactions/{id}` | Edit transaction form submit | ⬜ |
-| DELETE | `/v1/spaces/{id}/transactions/{id}` | Delete with confirmation modal | ⬜ |
+| PATCH | `/v1/spaces/{id}/transactions/{id}` | Edit transaction form submit | 🚧 |
+| DELETE | `/v1/spaces/{id}/transactions/{id}` | Delete with confirmation modal | ✅ |
 
 ### OAuth Token Endpoints
 

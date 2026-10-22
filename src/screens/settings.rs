@@ -1,12 +1,22 @@
 use hqtui::prelude::*;
 use hqtui::color::Color;
-use hqtui::widgets::{KeyValueOptions, KeyValueRow, ButtonOptions, ButtonVariant};
+use hqtui::widgets::{
+    ButtonOptions, ButtonVariant, DividerOptions, KeyValueOptions, KeyValueRow, ModalButton,
+    ModalOptions, TextStyle,
+};
 
 use crate::api::{ApiClient, ApiError};
 
 const COLOR_NEGATIVE: Color = Color::rgb(239, 68, 68);
 const COLOR_ACCENT: Color = Color::rgb(34, 197, 94);
 const COLOR_NEUTRAL: Color = Color::rgb(148, 163, 184);
+
+/// Whether the logout confirmation modal is currently visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsModal {
+    None,
+    LogoutConfirm,
+}
 
 fn draw_error(ui: &mut Container<'_>, err: &ApiError) {
     let err_msg = format!("Falha ao carregar configurações: {err}");
@@ -16,7 +26,7 @@ fn draw_error(ui: &mut Container<'_>, err: &ApiError) {
     });
 }
 
-pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
+pub fn render(ui: &mut Container<'_>, api: &ApiClient, modal: SettingsModal) {
     // Load user profile
     let me = match api.me() {
         Ok(data) => data,
@@ -61,7 +71,19 @@ pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
         KeyValueRow::new("Plano", user_plan),
     ];
 
-    let auth_status = "Token ativo".to_string();
+    // Auth status details from credential
+    let cred = api.credential();
+    let token_type = cred.kind_label().to_string();
+    let redacted_token = cred.redacted();
+    let expiry_display = cred.expiry_display();
+    let store_type = "File (~/.config/visor/credentials.json)".to_string();
+
+    let auth_rows = vec![
+        KeyValueRow::new("Tipo", token_type),
+        KeyValueRow::new("Token", redacted_token),
+        KeyValueRow::new("Expiração", expiry_display),
+        KeyValueRow::new("Armazenamento", store_type),
+    ];
 
     ui.column(Column::new().gap(1), move |col| {
         // Perfil panel
@@ -84,7 +106,7 @@ pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
         // Autenticação panel
         col.panel(Panel::new().title("Autenticação"), move |p| {
             p.key_values(KeyValueOptions {
-                rows: vec![KeyValueRow::new("Status", auth_status.clone())],
+                rows: auth_rows.clone(),
                 ..Default::default()
             });
         });
@@ -102,4 +124,20 @@ pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
             );
         });
     });
+
+    // Draw logout confirmation modal overlay
+    if modal == SettingsModal::LogoutConfirm {
+        ui.modal(ModalOptions {
+            title: Some("Confirmar Logout".to_string()),
+            message: Some(
+                "Tem certeza que deseja sair? Isso removerá as credenciais armazenadas."
+                    .to_string(),
+            ),
+            buttons: vec![
+                ModalButton::new("Cancelar"),
+                ModalButton::new("Sair"),
+            ],
+            ..Default::default()
+        });
+    }
 }

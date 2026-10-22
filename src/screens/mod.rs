@@ -10,3 +10,4 @@ pub mod net_worth;
 pub mod bills;
 pub mod payables;
 pub mod settings;
+pub mod doctor;

@@ -68,6 +68,39 @@ impl Credential {
     pub fn redacted(&self) -> String {
         redact_token(self.bearer_token())
     }
+
+    /// Human-readable credential kind label.
+    #[must_use]
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            Self::PersonalToken { .. } => "Personal Access Token",
+            Self::OAuth { .. } => "OAuth",
+        }
+    }
+
+    /// Formatted expiry string for OAuth tokens, or "N/A" for PATs.
+    #[must_use]
+    pub fn expiry_display(&self) -> String {
+        match self {
+            Self::PersonalToken { .. } => "N/A".to_string(),
+            Self::OAuth { expires_at, .. } => match expires_at {
+                Some(ts) => {
+                    let secs = (*ts).max(0) as u64;
+                    let days = secs / 86400;
+                    let hours = (secs % 86400) / 3600;
+                    let mins = (secs % 3600) / 60;
+                    if days > 0 {
+                        format!("{days}d {hours}h remaining")
+                    } else if hours > 0 {
+                        format!("{hours}h {mins}m remaining")
+                    } else {
+                        format!("{mins}m remaining")
+                    }
+                }
+                None => "No expiry".to_string(),
+            },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
