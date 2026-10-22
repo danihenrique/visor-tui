@@ -3,16 +3,17 @@ use hqtui::widgets::{TableColumn, TableOptions, TableRow};
 
 use crate::api::ApiClient;
 use crate::models::OverviewProjection;
+use crate::presentation::TableSelection;
 
 fn money(value: Option<&str>, currency: &str) -> String {
     crate::presentation::format_currency(value, Some(currency))
 }
 
 pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
-    render_scrolled(ui, api, 0);
+    render_scrolled(ui, api, &mut TableSelection::default());
 }
 
-pub fn render_scrolled(ui: &mut Container<'_>, api: &ApiClient, selected: usize) {
+pub fn render_scrolled(ui: &mut Container<'_>, api: &ApiClient, selection: &mut TableSelection) {
     match api.overview() {
         Ok(overview) => {
             if let Some(projection) = &overview.projection {
@@ -20,15 +21,17 @@ pub fn render_scrolled(ui: &mut Container<'_>, api: &ApiClient, selected: usize)
                     ui,
                     projection,
                     overview.currency_code.as_deref().unwrap_or("BRL"),
-                    selected,
+                    selection,
                 );
             } else {
+                selection.set_row_count(0);
                 ui.panel(Panel::new().title("Projeção"), |panel| {
                     panel.text("Sem dados de projeção");
                 });
             }
         }
         Err(error) => {
+            selection.set_row_count(0);
             let message = format!("Erro ao carregar dados: {error}");
             let danger = ui.theme().danger;
             ui.panel(Panel::new().title("Erro"), move |panel| {
@@ -42,7 +45,7 @@ fn render_projection_data(
     ui: &mut Container<'_>,
     projection: &OverviewProjection,
     currency: &str,
-    selected: usize,
+    selection: &mut TableSelection,
 ) {
     let theme = ui.theme().clone();
     let mut rows = vec![
@@ -100,6 +103,8 @@ fn render_projection_data(
         )),
     );
 
+    selection.set_row_count(rows.len());
+    let selected = selection.selected();
     ui.panel(Panel::new().title("Projeção"), move |panel| {
         panel.table(
             TableOptions {
@@ -107,7 +112,7 @@ fn render_projection_data(
                     TableColumn::new("Campo").width(Size::Cells(22)),
                     TableColumn::new("Valor").width(Size::Fill),
                 ],
-                selected: Some(selected.min(rows.len().saturating_sub(1))),
+                selected,
                 rows,
                 header: false,
                 follow_selection: true,
@@ -141,6 +146,7 @@ mod tests {
             "estimated_day_to_day": "-90", "projected_balance": "1150"
         })).unwrap();
         for (width, height) in [(60, 18), (80, 24)] {
+            let mut selection = TableSelection::default();
             let first = render_to_text(width, height, "dark", |ui| {
                 crate::presentation::shell(
                     ui,
@@ -148,13 +154,14 @@ mod tests {
                     "Pessoal".into(),
                     "Ok".into(),
                     false,
-                    |content| render_projection_data(content, &projection, "BRL", 0),
+                    |content| render_projection_data(content, &projection, "BRL", &mut selection),
                 );
             });
             assert!(
                 first.contains("Contas") && first.contains("50,00 BRL"),
                 "{width}x{height}\n{first}"
             );
+            selection.move_by(isize::MAX);
             let last = render_to_text(width, height, "dark", |ui| {
                 crate::presentation::shell(
                     ui,
@@ -162,7 +169,7 @@ mod tests {
                     "Pessoal".into(),
                     "Ok".into(),
                     false,
-                    |content| render_projection_data(content, &projection, "BRL", usize::MAX),
+                    |content| render_projection_data(content, &projection, "BRL", &mut selection),
                 );
             });
             assert!(

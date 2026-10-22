@@ -2,6 +2,31 @@ use hqtui::prelude::*;
 
 use crate::keymap::Screen;
 
+#[derive(Debug, Default)]
+pub struct TableSelection {
+    index: usize,
+    row_count: usize,
+}
+
+impl TableSelection {
+    pub fn set_row_count(&mut self, row_count: usize) {
+        self.row_count = row_count;
+        self.index = self.index.min(row_count.saturating_sub(1));
+    }
+
+    pub fn move_by(&mut self, rows: isize) {
+        self.index = self
+            .index
+            .saturating_add_signed(rows)
+            .min(self.row_count.saturating_sub(1));
+    }
+
+    #[must_use]
+    pub fn selected(&self) -> Option<usize> {
+        (self.row_count > 0).then_some(self.index)
+    }
+}
+
 #[must_use]
 pub fn theme() -> Theme {
     Theme {
@@ -115,6 +140,119 @@ pub fn shell<'a>(
 mod tests {
     use super::*;
     use hqtui::testing::render_to_text;
+
+    #[test]
+    fn scrolling_reports_stop_at_boundaries_before_the_next_frame() {
+        use crate::{api::ApiClient, auth::Credential, screens};
+
+        let mut server = mockito::Server::new();
+        let responses = [
+            (
+                "/v1/me",
+                serde_json::json!({"id":"u","name":"Daniel","email":"daniel@example.test"}),
+            ),
+            (
+                "/v1/spaces",
+                serde_json::json!({"data":[{"id":"s","name":"Pessoal"}]}),
+            ),
+            (
+                "/v1/spaces/s/overview",
+                serde_json::json!({
+                    "bank_balance":"12345.67",
+                    "period":{"income":"5000","expenses":"1200","result":"3800"},
+                    "projection":{"current_balance":"3800","expected_income":"500","projected_balance":"3930"}
+                }),
+            ),
+            (
+                "/v1/spaces/s/accounts",
+                serde_json::json!({"data":[{"id":"a","name":"Conta","balance":"12345.67"}]}),
+            ),
+            (
+                "/v1/spaces/s/cards",
+                serde_json::json!({"data":[{"id":"c","name":"Cartão","credit_limit":"5000","available_credit_limit":"4000"}]}),
+            ),
+            (
+                "/v1/spaces/s/investments",
+                serde_json::json!({"data":[{"id":"i","name":"Fundo","balance":"1111"}]}),
+            ),
+        ];
+        let mocks: Vec<_> = responses
+            .into_iter()
+            .map(|(path, response)| {
+                server
+                    .mock("GET", path)
+                    .with_status(200)
+                    .with_body(response.to_string())
+                    .expect(1)
+                    .create()
+            })
+            .collect();
+        let api = ApiClient::for_test(
+            &server.url(),
+            Credential::PersonalToken {
+                token: "test-only".into(),
+            },
+            "s",
+        )
+        .unwrap();
+        type View = fn(&mut Container<'_>, &ApiClient, &mut TableSelection);
+        let views: [(&str, View); 6] = [
+            ("overview", screens::overview::draw_overview_scrolled),
+            ("cash_flow", screens::cash_flow::render_scrolled),
+            ("projection", screens::projection::render_scrolled),
+            ("net_worth", screens::net_worth::render_scrolled),
+            ("accounts_cards", |ui, api, selection| {
+                screens::accounts_cards::render_scrolled(ui, api, false, selection)
+            }),
+            ("settings", |ui, api, selection| {
+                screens::settings::render_scrolled(
+                    ui,
+                    api,
+                    screens::settings::SettingsModal::None,
+                    selection,
+                )
+            }),
+        ];
+        for (name, view) in views {
+            let mut selection = TableSelection::default();
+            api.set_fetch_allowed(true);
+            render_to_text(60, 18, "dark", |ui| view(ui, &api, &mut selection));
+            api.set_fetch_allowed(false);
+            selection.move_by(isize::MAX);
+            let bottom = selection.selected().expect("populated report");
+            assert!(bottom > 0, "{name}");
+            for _ in 0..100 {
+                selection.move_by(1);
+            }
+            selection.move_by(-1);
+            assert_eq!(selection.selected(), Some(bottom - 1), "{name}");
+            render_to_text(60, 18, "dark", |ui| view(ui, &api, &mut selection));
+            assert_eq!(selection.selected(), Some(bottom - 1), "{name}");
+            for _ in 0..100 {
+                selection.move_by(-1);
+            }
+            selection.move_by(1);
+            assert_eq!(selection.selected(), Some(1), "{name}");
+        }
+        for mock in mocks {
+            mock.assert();
+        }
+    }
+
+    #[test]
+    fn selection_tracks_shrinking_and_empty_results() {
+        let mut selection = TableSelection::default();
+        selection.set_row_count(12);
+        selection.move_by(11);
+        selection.set_row_count(3);
+        selection.move_by(-1);
+        assert_eq!(selection.selected(), Some(1));
+        selection.set_row_count(0);
+        selection.move_by(1);
+        assert_eq!(selection.selected(), None);
+        selection.set_row_count(2);
+        assert_eq!(selection.selected(), Some(0));
+    }
 
     #[test]
     fn currency_groups_and_carries_rounding() {

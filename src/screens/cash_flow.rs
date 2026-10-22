@@ -3,19 +3,23 @@ use hqtui::widgets::{TableColumn, TableOptions, TableRow};
 
 use crate::api::{ApiClient, ApiError};
 use crate::models::Overview;
+use crate::presentation::TableSelection;
 
 fn money(value: Option<&str>, currency: &str) -> String {
     crate::presentation::format_currency(value, Some(currency))
 }
 
 pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
-    render_scrolled(ui, api, 0);
+    render_scrolled(ui, api, &mut TableSelection::default());
 }
 
-pub fn render_scrolled(ui: &mut Container<'_>, api: &ApiClient, selected: usize) {
+pub fn render_scrolled(ui: &mut Container<'_>, api: &ApiClient, selection: &mut TableSelection) {
     match api.overview() {
-        Ok(data) => render_cash_flow_data(ui, &data, selected),
-        Err(error) => render_error(ui, &error),
+        Ok(data) => render_cash_flow_data(ui, &data, selection),
+        Err(error) => {
+            selection.set_row_count(0);
+            render_error(ui, &error);
+        }
     }
 }
 
@@ -28,7 +32,7 @@ fn render_error(ui: &mut Container<'_>, error: &ApiError) {
     });
 }
 
-fn render_cash_flow_data(ui: &mut Container<'_>, data: &Overview, selected: usize) {
+fn render_cash_flow_data(ui: &mut Container<'_>, data: &Overview, selection: &mut TableSelection) {
     let currency = data.currency_code.as_deref().unwrap_or("BRL");
     let theme = ui.theme().clone();
     let mut rows = Vec::new();
@@ -99,6 +103,8 @@ fn render_cash_flow_data(ui: &mut Container<'_>, data: &Overview, selected: usiz
         rows.push(TableRow::new(["Projeção", "Sem dados."]));
     }
 
+    selection.set_row_count(rows.len());
+    let selected = selection.selected();
     ui.panel(Panel::new().title("Fluxo de Caixa"), move |panel| {
         panel.table(
             TableOptions {
@@ -106,7 +112,7 @@ fn render_cash_flow_data(ui: &mut Container<'_>, data: &Overview, selected: usiz
                     TableColumn::new("Campo").width(Size::Cells(20)),
                     TableColumn::new("Valor").width(Size::Fill),
                 ],
-                selected: Some(selected.min(rows.len().saturating_sub(1))),
+                selected,
                 rows,
                 header: false,
                 follow_selection: true,
@@ -146,6 +152,7 @@ mod tests {
             }
         })).unwrap();
         for (width, height) in [(60, 18), (80, 24)] {
+            let mut selection = TableSelection::default();
             let first = render_to_text(width, height, "dark", |ui| {
                 crate::presentation::shell(
                     ui,
@@ -153,13 +160,14 @@ mod tests {
                     "Pessoal".into(),
                     "Ok".into(),
                     false,
-                    |content| render_cash_flow_data(content, &data, 0),
+                    |content| render_cash_flow_data(content, &data, &mut selection),
                 );
             });
             assert!(
                 first.contains("Resultado") && first.contains("3.800,00 BRL"),
                 "{width}x{height}\n{first}"
             );
+            selection.move_by(isize::MAX);
             let last = render_to_text(width, height, "dark", |ui| {
                 crate::presentation::shell(
                     ui,
@@ -167,7 +175,7 @@ mod tests {
                     "Pessoal".into(),
                     "Ok".into(),
                     false,
-                    |content| render_cash_flow_data(content, &data, usize::MAX),
+                    |content| render_cash_flow_data(content, &data, &mut selection),
                 );
             });
             assert!(

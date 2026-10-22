@@ -23,8 +23,8 @@ pub struct VisorApp {
     selected_space: usize,
     enter_pending: bool,
     show_hidden_accounts: bool,
-    account_offset: usize,
-    summary_selection: usize,
+    account_selection: presentation::TableSelection,
+    summary_selection: presentation::TableSelection,
     bills_screen: screens::bills::BillsScreen,
     payables_screen: screens::payables::PayablesScreen,
     spaces: Vec<crate::models::Space>,
@@ -119,8 +119,8 @@ impl VisorApp {
             selected_space: 0,
             enter_pending: true,
             show_hidden_accounts: false,
-            account_offset: 0,
-            summary_selection: 0,
+            account_selection: presentation::TableSelection::default(),
+            summary_selection: presentation::TableSelection::default(),
             bills_screen: screens::bills::BillsScreen::default(),
             payables_screen: screens::payables::PayablesScreen::default(),
             spaces,
@@ -259,7 +259,7 @@ impl VisorApp {
     fn enter_screen(&mut self, screen: Screen) {
         if self.screen != screen {
             self.screen = screen;
-            self.summary_selection = 0;
+            self.summary_selection = presentation::TableSelection::default();
             self.enter_pending = true;
         }
     }
@@ -301,10 +301,10 @@ impl VisorApp {
         ) && !self.modal_open()
         {
             if pressed_key(events, "j") || pressed_key(events, "down") {
-                self.summary_selection = self.summary_selection.saturating_add(1);
+                self.summary_selection.move_by(1);
             }
             if pressed_key(events, "k") || pressed_key(events, "up") {
-                self.summary_selection = self.summary_selection.saturating_sub(1);
+                self.summary_selection.move_by(-1);
             }
         }
         match self.screen {
@@ -344,10 +344,10 @@ impl VisorApp {
                     self.enter_pending = true;
                 }
                 if pressed_key(events, "j") || pressed_key(events, "down") {
-                    self.account_offset = self.account_offset.saturating_add(1);
+                    self.account_selection.move_by(1);
                 }
                 if pressed_key(events, "k") || pressed_key(events, "up") {
-                    self.account_offset = self.account_offset.saturating_sub(1);
+                    self.account_selection.move_by(-1);
                 }
             }
             Screen::Doctor => {
@@ -467,8 +467,8 @@ impl VisorApp {
         self.doctor_state = screens::doctor::DoctorState::new();
         self.settings_modal = screens::settings::SettingsModal::None;
         self.show_hidden_accounts = false;
-        self.account_offset = 0;
-        self.summary_selection = 0;
+        self.account_selection = presentation::TableSelection::default();
+        self.summary_selection = presentation::TableSelection::default();
         self.space_selector_visible = false;
         self.enter_pending = true;
     }
@@ -580,8 +580,8 @@ impl VisorApp {
         let settings_modal = self.settings_modal;
         let doctor_state = self.doctor_state.clone();
         let show_hidden = self.show_hidden_accounts;
-        let account_offset = self.account_offset;
-        let summary_selection = self.summary_selection;
+        let account_selection = &mut self.account_selection;
+        let summary_selection = &mut self.summary_selection;
         let bills_screen = &self.bills_screen;
         let payables_screen = &self.payables_screen;
         self.app.draw(move |frame| {
@@ -590,12 +590,12 @@ impl VisorApp {
                     Screen::Overview => screens::overview::draw_overview_scrolled(panel, &api, summary_selection),
                     Screen::Transactions => screens::transactions::render_with_state(panel, &mut tx_screen.borrow_mut(), &api),
                     Screen::Recurring => screens::recurring::render_with_state(panel, &mut recurring_screen.borrow_mut(), &api),
-                    Screen::CashFlow => screens::cash_flow::render(panel, &api),
-                    Screen::AccountsCards => screens::accounts_cards::render_scrolled(panel, &api, show_hidden, account_offset),
+                    Screen::CashFlow => screens::cash_flow::render_scrolled(panel, &api, summary_selection),
+                    Screen::AccountsCards => screens::accounts_cards::render_scrolled(panel, &api, show_hidden, account_selection),
                     Screen::Categories => screens::categories::render_with_state(panel, &mut categories_screen.borrow_mut(), &api),
                     Screen::Goals => screens::goals::render_with_state(panel, &mut goals_screen.borrow_mut(), &api),
-                    Screen::Projection => screens::projection::render(panel, &api),
-                    Screen::NetWorth => screens::net_worth::render(panel, &api),
+                    Screen::Projection => screens::projection::render_scrolled(panel, &api, summary_selection),
+                    Screen::NetWorth => screens::net_worth::render_scrolled(panel, &api, summary_selection),
                     Screen::Bills => screens::bills::render_with_state(panel, bills_screen),
                     Screen::Payables => screens::payables::render_with_state(panel, &api, payables_screen),
                     Screen::Tags => screens::tags::render_with_state(panel, &mut tags_screen.borrow_mut(), &api),

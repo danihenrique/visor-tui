@@ -3,16 +3,21 @@ use hqtui::unicode::Align;
 
 use crate::api::ApiClient;
 use crate::models::Overview;
-use crate::presentation::format_currency;
+use crate::presentation::{TableSelection, format_currency};
 
 pub fn draw_overview(ui: &mut Container<'_>, api: &ApiClient) {
-    draw_overview_scrolled(ui, api, 0);
+    draw_overview_scrolled(ui, api, &mut TableSelection::default());
 }
 
-pub fn draw_overview_scrolled(ui: &mut Container<'_>, api: &ApiClient, selected: usize) {
+pub fn draw_overview_scrolled(
+    ui: &mut Container<'_>,
+    api: &ApiClient,
+    selection: &mut TableSelection,
+) {
     match api.overview() {
-        Ok(data) => draw_overview_data(ui, &data, selected),
+        Ok(data) => draw_overview_data(ui, &data, selection),
         Err(error) => {
+            selection.set_row_count(0);
             ui.text(&format!(
                 "Falha ao carregar visão geral: {error}. Pressione r para tentar novamente."
             ));
@@ -20,7 +25,7 @@ pub fn draw_overview_scrolled(ui: &mut Container<'_>, api: &ApiClient, selected:
     }
 }
 
-fn draw_overview_data(ui: &mut Container<'_>, data: &Overview, selected: usize) {
+fn draw_overview_data(ui: &mut Container<'_>, data: &Overview, selection: &mut TableSelection) {
     let currency = data.currency_code.as_deref();
     let mut rows = Vec::new();
     let mut money = |label: &str, value: Option<&str>, debt: bool| {
@@ -94,7 +99,8 @@ fn draw_overview_data(ui: &mut Container<'_>, data: &Overview, selected: usize) 
             .color(ui.theme().warning),
         );
     }
-    let selected = Some(selected.min(rows.len().saturating_sub(1)));
+    selection.set_row_count(rows.len());
+    let selected = selection.selected();
     let period = format!(
         "{} a {}",
         data.period_start.as_deref().unwrap_or("—"),
@@ -125,7 +131,7 @@ fn draw_overview_data(ui: &mut Container<'_>, data: &Overview, selected: usize) 
 #[cfg(test)]
 #[allow(dead_code)]
 pub(crate) fn draw_overview_mock(ui: &mut Container<'_>, data: &Overview) {
-    draw_overview_data(ui, data, 0);
+    draw_overview_data(ui, data, &mut TableSelection::default());
 }
 
 #[cfg(test)]
@@ -135,11 +141,15 @@ mod tests {
     #[test]
     fn compact_overview_keeps_currency_and_projected_balance_reachable() {
         let data: Overview = serde_json::from_value(serde_json::json!({"bank_balance":"12345.67", "projection":{"projected_balance":"9876.54"}})).unwrap();
-        let text =
-            hqtui::testing::render_to_text(56, 10, "dark", |ui| draw_overview_data(ui, &data, 0));
+        let mut selection = TableSelection::default();
+        let text = hqtui::testing::render_to_text(56, 10, "dark", |ui| {
+            draw_overview_data(ui, &data, &mut selection)
+        });
         assert!(text.contains("12.345,67 BRL"), "{text}");
-        let text =
-            hqtui::testing::render_to_text(56, 10, "dark", |ui| draw_overview_data(ui, &data, 20));
+        selection.move_by(isize::MAX);
+        let text = hqtui::testing::render_to_text(56, 10, "dark", |ui| {
+            draw_overview_data(ui, &data, &mut selection)
+        });
         assert!(text.contains("Saldo projetado"));
         assert!(text.contains("9.876,54 BRL"), "{text}");
     }

@@ -1,6 +1,7 @@
 use hqtui::prelude::*;
 
 use crate::api::ApiClient;
+use crate::presentation::TableSelection;
 
 /// Whether the logout confirmation modal is currently visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,14 +11,14 @@ pub enum SettingsModal {
 }
 
 pub fn render(ui: &mut Container<'_>, api: &ApiClient, modal: SettingsModal) {
-    render_scrolled(ui, api, modal, 0);
+    render_scrolled(ui, api, modal, &mut TableSelection::default());
 }
 
 pub fn render_scrolled(
     ui: &mut Container<'_>,
     api: &ApiClient,
     modal: SettingsModal,
-    selected: usize,
+    selection: &mut TableSelection,
 ) {
     let mut rows = Vec::new();
     match api.me() {
@@ -56,7 +57,8 @@ pub fn render_scrolled(
     ] {
         rows.push(TableRow::new([label.to_string(), value]));
     }
-    let selected = Some(selected.min(rows.len().saturating_sub(1)));
+    selection.set_row_count(rows.len());
+    let selected = selection.selected();
     ui.column(Column::new().gap(1), move |col| {
         col.row(Row::new().size(Size::Cells(1)).gap(1), move |row| {
             row.button(ButtonOptions::new("Trocar espaço (s)"), "change_space");
@@ -127,13 +129,15 @@ mod tests {
             "s",
         )
         .unwrap();
+        let mut selection = TableSelection::default();
         let first = hqtui::testing::render_to_text(56, 10, "dark", |ui| {
-            render_scrolled(ui, &api, SettingsModal::None, 0)
+            render_scrolled(ui, &api, SettingsModal::None, &mut selection)
         });
         assert!(first.contains("Daniel"), "{first}");
         assert!(first.contains("daniel@example.test"), "{first}");
+        selection.move_by(isize::MAX);
         let last = hqtui::testing::render_to_text(56, 10, "dark", |ui| {
-            render_scrolled(ui, &api, SettingsModal::None, 9)
+            render_scrolled(ui, &api, SettingsModal::None, &mut selection)
         });
         assert!(last.contains("credentials.json"), "{last}");
         me.assert();

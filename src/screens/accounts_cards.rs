@@ -3,21 +3,22 @@ use hqtui::unicode::Align;
 
 use crate::api::ApiClient;
 use crate::models::{Account, Card};
-use crate::presentation::format_currency;
+use crate::presentation::{TableSelection, format_currency};
 
 pub fn render(ui: &mut Container<'_>, api: &ApiClient, show_hidden: bool) {
-    render_scrolled(ui, api, show_hidden, 0);
+    render_scrolled(ui, api, show_hidden, &mut TableSelection::default());
 }
 
 pub fn render_scrolled(
     ui: &mut Container<'_>,
     api: &ApiClient,
     show_hidden: bool,
-    selected: usize,
+    selection: &mut TableSelection,
 ) {
     match (api.accounts(show_hidden), api.cards()) {
-        (Ok(accounts), Ok(cards)) => render_content(ui, &accounts, &cards, show_hidden, selected),
+        (Ok(accounts), Ok(cards)) => render_content(ui, &accounts, &cards, show_hidden, selection),
         (Err(error), _) | (_, Err(error)) => {
+            selection.set_row_count(0);
             ui.text(&format!(
                 "Falha ao carregar contas: {error}. Pressione r para tentar novamente."
             ));
@@ -30,7 +31,7 @@ fn render_content(
     accounts: &[Account],
     cards: &[Card],
     show_hidden: bool,
-    selected: usize,
+    selection: &mut TableSelection,
 ) {
     let mut rows = Vec::new();
     for account in accounts {
@@ -117,7 +118,8 @@ fn render_content(
             utilization,
         ]));
     }
-    let selected = (!rows.is_empty()).then_some(selected.min(rows.len().saturating_sub(1)));
+    selection.set_row_count(rows.len());
+    let selected = selection.selected();
     ui.column(Column::new().gap(1), move |col| {
         col.row(Row::new().size(Size::Cells(1)), move |row| {
             row.checkbox(
@@ -156,7 +158,13 @@ pub fn render_with_data(
     cards: &[Card],
     show_hidden: bool,
 ) {
-    render_content(ui, accounts, cards, show_hidden, 0);
+    render_content(
+        ui,
+        accounts,
+        cards,
+        show_hidden,
+        &mut TableSelection::default(),
+    );
 }
 
 #[cfg(test)]
@@ -170,12 +178,14 @@ mod tests {
         )
         .unwrap();
         let cards: Vec<Card> = serde_json::from_value(serde_json::json!([{"id":"c","name":"Cartão","credit_limit":"20000.00","current_bill_due_date":"2026-11-01"}])).unwrap();
+        let mut selection = TableSelection::default();
         let text = hqtui::testing::render_to_text(56, 10, "dark", |ui| {
-            render_content(ui, &accounts, &cards, false, 0)
+            render_content(ui, &accounts, &cards, false, &mut selection)
         });
         assert!(text.contains("12.345,67 BRL"), "{text}");
+        selection.move_by(isize::MAX);
         let text = hqtui::testing::render_to_text(56, 10, "dark", |ui| {
-            render_content(ui, &accounts, &cards, false, 9)
+            render_content(ui, &accounts, &cards, false, &mut selection)
         });
         assert!(text.contains("2026-11-01"), "{text}");
     }

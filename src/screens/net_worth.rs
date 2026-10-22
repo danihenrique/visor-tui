@@ -3,21 +3,25 @@ use hqtui::widgets::{TableColumn, TableOptions, TableRow};
 
 use crate::api::{ApiClient, ApiError};
 use crate::models::{Investment, InvestmentSummary};
+use crate::presentation::TableSelection;
 
 fn money(value: Option<&str>, currency: Option<&str>) -> String {
     crate::presentation::format_currency(value, currency)
 }
 
 pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
-    render_scrolled(ui, api, 0);
+    render_scrolled(ui, api, &mut TableSelection::default());
 }
 
-pub fn render_scrolled(ui: &mut Container<'_>, api: &ApiClient, selected: usize) {
+pub fn render_scrolled(ui: &mut Container<'_>, api: &ApiClient, selection: &mut TableSelection) {
     match api.investments() {
         Ok((investments, summary)) => {
-            render_net_worth_data(ui, &investments, summary.as_ref(), selected);
+            render_net_worth_data(ui, &investments, summary.as_ref(), selection);
         }
-        Err(error) => render_error(ui, &error),
+        Err(error) => {
+            selection.set_row_count(0);
+            render_error(ui, &error);
+        }
     }
 }
 
@@ -34,7 +38,7 @@ fn render_net_worth_data(
     ui: &mut Container<'_>,
     investments: &[Investment],
     summary: Option<&InvestmentSummary>,
-    selected: usize,
+    selection: &mut TableSelection,
 ) {
     let theme = ui.theme().clone();
     let currency = summary
@@ -98,6 +102,8 @@ fn render_net_worth_data(
         )),
     );
 
+    selection.set_row_count(rows.len());
+    let selected = selection.selected();
     ui.panel(Panel::new().title("Patrimônio"), move |panel| {
         panel.table(
             TableOptions {
@@ -105,7 +111,7 @@ fn render_net_worth_data(
                     TableColumn::new("Campo").width(Size::Cells(18)),
                     TableColumn::new("Valor").width(Size::Fill),
                 ],
-                selected: Some(selected.min(rows.len().saturating_sub(1))),
+                selected,
                 rows,
                 header: false,
                 follow_selection: true,
@@ -148,6 +154,7 @@ mod tests {
         }))
         .unwrap();
         for (width, height) in [(60, 18), (80, 24)] {
+            let mut selection = TableSelection::default();
             let first = render_to_text(width, height, "dark", |ui| {
                 crate::presentation::shell(
                     ui,
@@ -155,13 +162,16 @@ mod tests {
                     "Pessoal".into(),
                     "Ok".into(),
                     false,
-                    |content| render_net_worth_data(content, &investments, Some(&summary), 0),
+                    |content| {
+                        render_net_worth_data(content, &investments, Some(&summary), &mut selection)
+                    },
                 );
             });
             assert!(
                 first.contains("Valor total") && first.contains("11.110,00 BRL"),
                 "{width}x{height}\n{first}"
             );
+            selection.move_by(isize::MAX);
             let last = render_to_text(width, height, "dark", |ui| {
                 crate::presentation::shell(
                     ui,
@@ -169,7 +179,9 @@ mod tests {
                     "Pessoal".into(),
                     "Ok".into(),
                     false,
-                    |content| render_net_worth_data(content, &investments, Some(&summary), 21),
+                    |content| {
+                        render_net_worth_data(content, &investments, Some(&summary), &mut selection)
+                    },
                 );
             });
             assert!(
