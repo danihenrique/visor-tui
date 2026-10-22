@@ -1,0 +1,51 @@
+[package]
+name = "visor-tui"
+version = "0.1.0"
+edition = "2024"
+description = "Terminal UI for Visor Finance personal API"
+license = "MIT"
+homepage = "https://docs.visorfinance.app"
+readme = "README.md"
+keywords = ["visor", "finance", "tui", "terminal"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "visor-tui"
+path = "src/main.rs"
+
+[dependencies]
+hqtui = { git = "https://github.com/profullstack/hqtui" }
+base64 = "0.23.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std", "serde"] }
+dirs = "7.0.0"
+getrandom = "0.4.3"
+keyring = "4.2.0"
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "form", "gzip", "json", "query", "rustls", "system-proxy"] }
+rpassword = "7.5.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+toml = "1.1.8"
+uuid = { version = "1.28.0", features = ["v4"] }
+
+[dev-dependencies]
+mockito = "1.7.2"
+tempfile = "3.27.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

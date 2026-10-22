@@ -1,0 +1,8 @@
+.ref/
+.worktrees/
+target/
+.env*
+*.swp
+*.swo
+*~
+.DS_Store
