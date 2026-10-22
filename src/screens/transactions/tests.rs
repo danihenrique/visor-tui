@@ -50,6 +50,53 @@ fn valid_form() -> TransactionForm {
     form
 }
 
+#[test]
+fn refresh_button_bypasses_a_fresh_cache() {
+    let mut server = mockito::Server::new();
+    let read = server
+        .mock("GET", "/v1/spaces/s/transactions?limit=50")
+        .with_body(r#"{"data":[],"next_cursor":null}"#)
+        .expect(2)
+        .create();
+    let metadata: Vec<_> = ["accounts", "categories", "tags"]
+        .into_iter()
+        .map(|path| {
+            server
+                .mock("GET", format!("/v1/spaces/s/{path}").as_str())
+                .with_body(r#"{"data":[]}"#)
+                .expect(1)
+                .create()
+        })
+        .collect();
+    let api = ApiClient::for_test(
+        &server.url(),
+        Credential::PersonalToken {
+            token: "visor_pat_mock".into(),
+        },
+        "s",
+    )
+    .unwrap();
+    let mut state = screen();
+    state.fetch_transactions(&api, false);
+    let effect = state.click(view::Action::Key("r".into()));
+    state.execute(effect, &api);
+    read.assert();
+    for request in metadata {
+        request.assert();
+    }
+}
+
+#[test]
+fn right_arrow_loads_more_only_when_a_cursor_exists() {
+    let mut state = screen();
+    assert_eq!(keys(&mut state, "\u{1b}[C"), [Effect::None]);
+    state.next_cursor = Some("next-page".into());
+    assert_eq!(
+        keys(&mut state, "\u{1b}[C"),
+        [Effect::Fetch { append: true }]
+    );
+}
+
 fn client(server: &mockito::Server) -> ApiClient {
     ApiClient::for_test(
         &server.url(),

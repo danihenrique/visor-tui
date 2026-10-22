@@ -36,6 +36,7 @@ pub enum TransactionMode {
 #[derive(Debug, Clone, PartialEq)]
 enum Effect {
     None,
+    Refresh,
     Fetch { append: bool },
     Save(Value),
     Delete(String),
@@ -97,6 +98,7 @@ impl TransactionsScreen {
     }
 
     pub fn refresh(&mut self, api: &ApiClient) {
+        api.invalidate_cache();
         self.load_initial(api);
     }
 
@@ -171,6 +173,7 @@ impl TransactionsScreen {
     fn execute(&mut self, effect: Effect, api: &ApiClient) {
         match effect {
             Effect::None => {}
+            Effect::Refresh => self.refresh(api),
             Effect::Fetch { append } => self.fetch_transactions(api, append),
             Effect::Save(body) => self.save(api, &body),
             Effect::Delete(id) => match api.delete_transaction(&id) {
@@ -399,8 +402,8 @@ impl TransactionsScreen {
                 self.filters = TransactionFilters::default();
                 return Effect::Fetch { append: false };
             }
-            "r" => return Effect::Fetch { append: false },
-            "m" if self.next_cursor.is_some() => return Effect::Fetch { append: true },
+            "r" => return Effect::Refresh,
+            "m" | "right" if self.next_cursor.is_some() => return Effect::Fetch { append: true },
             "E" | "ctrl+e" => return Effect::Export,
             _ => {}
         }
