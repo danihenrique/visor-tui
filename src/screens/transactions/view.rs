@@ -649,10 +649,30 @@ fn draw_overlay(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hi
             let offset = focused_index.saturating_sub(visible.saturating_sub(1));
             for (index, field) in FormField::ALL.iter().enumerate().skip(offset).take(visible) {
                 let y = 1 + (index - offset) * 2;
+                let label = if *field == FormField::Amount {
+                    let currency = if let Some(original) = &form.original {
+                        original.currency_code.as_deref()
+                    } else {
+                        state
+                            .accounts
+                            .iter()
+                            .find(|account| Some(&account.id) == form.account_id.as_ref())
+                            .and_then(|account| account.currency_code.as_deref())
+                    };
+                    format!(
+                        "Valor ({})",
+                        currency
+                            .map(str::trim)
+                            .filter(|code| !code.is_empty())
+                            .unwrap_or("?")
+                    )
+                } else {
+                    field.label().to_owned()
+                };
                 field_row(
                     &inner,
                     y,
-                    field.label(),
+                    &label,
                     &form_value(state, form, *field),
                     *field == form.focused,
                     form.pending_create.is_some() || !form.editable(*field),
@@ -798,12 +818,7 @@ fn draw_overlay(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hi
                     .unwrap_or("Transação selecionada"),
                 inner.theme.foreground,
             );
-            text(
-                &inner,
-                2,
-                &format_amount(&transaction.amount, &transaction.tx_type),
-                RED,
-            );
+            text(&inner, 2, &transaction_amount(transaction), RED);
             text(
                 &inner,
                 3,
@@ -835,7 +850,7 @@ fn draw_overlay(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hi
             let message = format!(
                 "{}\n{}\nData: {}\nConta: {}\nCategoria: {}\nTags: {}\nStatus: {} · Origem: {}\nIgnorado: {}\nNotas: {}",
                 tx.description.as_deref().unwrap_or("Sem descrição"),
-                format_amount(&tx.amount, &tx.tx_type),
+                transaction_amount(tx),
                 tx.transacted_at.as_deref().unwrap_or("—"),
                 choice_name(state, PickerKind::Account, Some(&tx.account_id)),
                 choice_name(state, PickerKind::Category, tx.category_id.as_deref()),

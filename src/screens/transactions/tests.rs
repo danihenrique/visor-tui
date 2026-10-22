@@ -583,6 +583,72 @@ fn rendering_keeps_focused_field_and_controls_visible_at_small_sizes() {
 }
 
 #[test]
+fn transaction_dialogs_preserve_original_currency() {
+    for currency in [Some("USD"), None] {
+        let mut tx = transaction();
+        tx.currency_code = currency.map(str::to_owned);
+        let code = currency.unwrap_or("?");
+        for mode in [
+            TransactionMode::Detail(tx.clone()),
+            TransactionMode::DeleteConfirm {
+                transaction: tx.clone(),
+                confirmed: false,
+            },
+            TransactionMode::Form(Box::new(TransactionForm::edit(tx.clone()))),
+        ] {
+            let editing = matches!(mode, TransactionMode::Form(_));
+            let state = TransactionsScreen {
+                transactions: vec![tx.clone()],
+                mode,
+                ..screen()
+            };
+            let buffer = Rc::new(RefCell::new(FrameBuffer::new(80, 24)));
+            let surface = Surface::root(buffer.clone(), Rc::new(hqtui::theme::dark()));
+            view::draw(&surface, &state);
+            let text: String = buffer
+                .borrow()
+                .chars
+                .iter()
+                .filter_map(|cell| char::from_u32(*cell))
+                .collect();
+            let expected = if editing {
+                format!("Valor ({code})")
+            } else {
+                format!("-{code} 12,34")
+            };
+            assert!(
+                text.contains(&expected),
+                "Expected original currency {expected:?}, got:\n{text}"
+            );
+            assert!(
+                !text.contains("R$"),
+                "A foreign or unknown amount was labeled BRL:\n{text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn new_transaction_amount_label_uses_selected_account_currency() {
+    let mut state = screen();
+    state.accounts[0].currency_code = Some("EUR".into());
+    state.mode = TransactionMode::Form(Box::new(valid_form()));
+    let buffer = Rc::new(RefCell::new(FrameBuffer::new(80, 24)));
+    let surface = Surface::root(buffer.clone(), Rc::new(hqtui::theme::dark()));
+    view::draw(&surface, &state);
+    let text: String = buffer
+        .borrow()
+        .chars
+        .iter()
+        .filter_map(|cell| char::from_u32(*cell))
+        .collect();
+    assert!(
+        text.contains("Valor (EUR)"),
+        "Expected selected account currency, got:\n{text}"
+    );
+}
+
+#[test]
 fn table_amounts_fit_without_a_trailing_ellipsis() {
     for width in [120, 100, 80, 60, 40] {
         let state = screen();

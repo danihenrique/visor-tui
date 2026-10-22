@@ -40,7 +40,7 @@ impl FormField {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::Amount => "Valor (R$)",
+            Self::Amount => "Valor",
             Self::Description => "Descrição",
             Self::Type => "Tipo",
             Self::Account => "Conta",
