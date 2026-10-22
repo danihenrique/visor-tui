@@ -524,6 +524,51 @@ impl ApiClient {
         self.delete(&format!("{prefix}/transactions/{id}"))
     }
 
+    // ── Tag Mutations ──
+
+    pub fn create_tag(&self, name: &str, color: Option<&str>) -> Result<Tag, ApiError> {
+        let prefix = self.space_prefix()?;
+        let idempotency_key = Uuid::new_v4().to_string();
+
+        let mut body = serde_json::Map::new();
+        body.insert("name".into(), serde_json::Value::String(name.to_string()));
+        if let Some(c) = color {
+            body.insert("color".into(), serde_json::Value::String(c.to_string()));
+        }
+
+        let resp = self.post(
+            &format!("{prefix}/tags"),
+            &serde_json::Value::Object(body),
+            Some(&idempotency_key),
+        )?;
+        let data = resp.get("data").cloned().unwrap_or(resp);
+        Ok(serde_json::from_value(data)?)
+    }
+
+    pub fn update_tag(&self, id: &str, name: Option<&str>, color: Option<&str>) -> Result<Tag, ApiError> {
+        let prefix = self.space_prefix()?;
+        let mut body = serde_json::Map::new();
+
+        if let Some(n) = name {
+            body.insert("name".into(), serde_json::Value::String(n.to_string()));
+        }
+        if let Some(c) = color {
+            body.insert("color".into(), serde_json::Value::String(c.to_string()));
+        }
+
+        let resp = self.patch(
+            &format!("{prefix}/tags/{id}"),
+            &serde_json::Value::Object(body),
+        )?;
+        let data = resp.get("data").cloned().unwrap_or(resp);
+        Ok(serde_json::from_value(data)?)
+    }
+
+    pub fn delete_tag(&self, id: &str) -> Result<(), ApiError> {
+        let prefix = self.space_prefix()?;
+        self.delete(&format!("{prefix}/tags/{id}"))
+    }
+
     pub fn export_transactions_csv(
         &self,
         from_date: Option<&str>,

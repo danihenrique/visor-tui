@@ -19,6 +19,7 @@ pub struct VisorApp {
     space_selector_visible: bool,
     spaces: Vec<crate::models::Space>,
     transactions_screen: Rc<RefCell<screens::transactions::TransactionsScreen>>,
+    tags_screen: Rc<RefCell<screens::tags::TagsScreen>>,
     settings_modal: screens::settings::SettingsModal,
     doctor_state: screens::doctor::DoctorState,
     doctor_needs_run: bool,
@@ -37,6 +38,7 @@ enum Screen {
     NetWorth,
     Bills,
     Payables,
+    Tags,
     Settings,
     Doctor,
 }
@@ -55,6 +57,7 @@ impl Screen {
             Self::NetWorth => "Patrim\u{f4}nio",
             Self::Bills => "Faturas",
             Self::Payables => "Contas a pagar",
+            Self::Tags => "Tags",
             Self::Settings => "Configura\u{e7}\u{f5}es",
             Self::Doctor => "Diagn\u{f3}stico",
         }
@@ -73,12 +76,13 @@ impl Screen {
             Self::NetWorth => "9",
             Self::Bills => "0",
             Self::Payables => "-",
+            Self::Tags => "t",
             Self::Settings => "=",
             Self::Doctor => "d",
         }
     }
 
-    fn all() -> [Screen; 13] {
+    fn all() -> [Screen; 14] {
         [
             Self::Overview,
             Self::Transactions,
@@ -91,6 +95,7 @@ impl Screen {
             Self::NetWorth,
             Self::Bills,
             Self::Payables,
+            Self::Tags,
             Self::Settings,
             Self::Doctor,
         ]
@@ -177,6 +182,7 @@ impl VisorApp {
             space_selector_visible,
             spaces,
             transactions_screen: Rc::new(RefCell::new(screens::transactions::TransactionsScreen::new())),
+            tags_screen: Rc::new(RefCell::new(screens::tags::TagsScreen::new())),
             settings_modal: screens::settings::SettingsModal::None,
             doctor_state: screens::doctor::DoctorState::new(),
             doctor_needs_run: true,
@@ -341,6 +347,10 @@ impl VisorApp {
                             self.screen = Screen::Payables;
                             return;
                         }
+                        "t" => {
+                            self.screen = Screen::Tags;
+                            return;
+                        }
                         "=" => {
                             self.screen = Screen::Settings;
                             return;
@@ -379,6 +389,13 @@ impl VisorApp {
             && let Some(ref api) = self.api
         {
             self.transactions_screen.borrow_mut().handle_input(&self.app, api, events);
+        }
+
+        // Dispatch input to the tags screen when it is active.
+        if self.screen == Screen::Tags
+            && let Some(ref api) = self.api
+        {
+            self.tags_screen.borrow_mut().handle_input(&self.app, api, events);
         }
 
         // Handle doctor screen re-run.
@@ -477,6 +494,7 @@ impl VisorApp {
 
         let api = Rc::clone(self.api.as_ref().expect("api is Some at this point"));
         let tx_screen = self.transactions_screen.clone();
+        let tags_screen = self.tags_screen.clone();
         let settings_modal = self.settings_modal;
         let doctor_state = self.doctor_state.clone();
 
@@ -522,6 +540,10 @@ impl VisorApp {
                             Screen::NetWorth => screens::net_worth::render(p, &api),
                             Screen::Bills => screens::bills::render(p, &api),
                             Screen::Payables => screens::payables::render(p, &api),
+                            Screen::Tags => {
+                                let mut tags = tags_screen.borrow_mut();
+                                screens::tags::render_with_state(p, &mut tags, &api);
+                            }
                             Screen::Settings => screens::settings::render(p, &api, settings_modal),
                             Screen::Doctor => {
                                 screens::doctor::render(p, &doctor_state);
@@ -634,7 +656,7 @@ mod tests {
 
     #[test]
     fn test_screen_count() {
-        assert_eq!(Screen::all().len(), 13);
+        assert_eq!(Screen::all().len(), 14);
     }
 
     #[test]

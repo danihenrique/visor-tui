@@ -19,7 +19,7 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 | `visor auth status` | Settings screen: current token kind, user, expiry | ✅ |
 | `visor whoami` | Sidebar/header: user name, email, active space | ✅ |
 | `visor me` | Profile screen: full user details (name, email, locale, plan, currency) | ✅ |
-| `visor doctor` | Diagnostics screen: 4 checks (version, login, API, space) with ok/warn/fail | ⬜ |
+| `visor doctor` | Diagnostics screen: 4 checks (version, login, API, space) with ok/warn/fail | ✅ |
 | `visor open <page>` | Keyboard shortcut or menu: open dashboard page in browser | ⬜ |
 | Keyboard navigation (1-9,0,-,=, arrows, Tab, mouse) | Sidebar nav with distinct keys per screen | ✅ |
 | Help overlay (? key) | Modal with navigation shortcuts | ✅ |
@@ -83,7 +83,10 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 |---|---|---|
 | `visor categories list` | Categorias screen: hierarchical tree view | ✅ |
 | `--include-hidden` | Show/hide hidden toggle | ✅ |
-| `visor tags list` | Tags management screen: list with color indicators | ⬜ |
+| `visor tags list` | Tags management screen: list with color indicators | ✅ |
+| `visor tags create` | Tags screen: "Nova Tag" button + create modal (name + color) | ✅ |
+| `visor tags edit` | Tags screen: select + 'e' key opens edit modal (name + color) | ✅ |
+| `visor tags delete` | Tags screen: select + 'd' key opens delete confirmation modal | ✅ |
 
 ### Recurring Expenses
 
@@ -177,22 +180,22 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 
 | Feature | TUI Implementation | Status |
 |---|---|---|
-| OAuth 2.0 Authorization Code + PKCE | Login screen opens browser, listens on loopback callback | ⬜ |
-| PKCE S256 challenge/verifier | Generated internally during OAuth flow | ⬜ |
-| State parameter (CSRF) | Generated and validated internally | ⬜ |
-| Login timeout (300s) | Countdown/cancel on login screen | ⬜ |
-| Scopes (`pfm:read`, `pfm:transactions:write`) | Shown during OAuth consent; write ops check scope | ⬜ |
-| Auto-refresh (proactive within 60s) | Background refresh, transparent to user | ⬜ |
-| Reactive refresh on TOKEN_EXPIRED | Retry with refreshed token, transparent | ⬜ |
-| Multi-process safety (adopt newer credential) | Reload from store on refresh failure | ⬜ |
+| OAuth 2.0 Authorization Code + PKCE | Login screen opens browser, listens on loopback callback | ✅ |
+| PKCE S256 challenge/verifier | Generated internally during OAuth flow | ✅ |
+| State parameter (CSRF) | Generated and validated internally | ✅ |
+| Login timeout (300s) | Countdown/cancel on login screen | ✅ |
+| Scopes (`pfm:read`, `pfm:transactions:write`) | Shown during OAuth consent; write ops check scope | ✅ |
+| Auto-refresh (proactive within 60s) | Background refresh, transparent to user | ✅ |
+| Reactive refresh on TOKEN_EXPIRED | Retry with refreshed token, transparent | ✅ |
+| Multi-process safety (adopt newer credential) | Reload from store on refresh failure | ✅ |
 | Personal API Token input | Masked text input form | ✅ |
 | PAT validation (must start with `visor_pat_`) | Client-side validation before storage | ⬜ |
 | VISOR_TOKEN env override | Read on startup, takes precedence over store | ✅ |
-| Keyring credential store (default) | Reuse CLI's keyring integration | ⬜ |
-| File credential store (`VISOR_CREDENTIAL_STORE=file`) | Read/write `credentials.json` with 0600 perms | ⬜ |
-| Credential JSON format (tagged union) | Match CLI's `personal_token` / `oauth` format | ⬜ |
-| Config dir resolution ($VISOR_CONFIG_DIR, XDG, ~/.config/visor) | Match CLI resolution order | ⬜ |
-| Token redaction in debug output | Redact to `visor_pat_abcd_...` | ⬜ |
+| Keyring credential store (default) | Reuse CLI's keyring integration | ✅ |
+| File credential store (`VISOR_CREDENTIAL_STORE=file`) | Read/write `credentials.json` with 0600 perms | ✅ |
+| Credential JSON format (tagged union) | Match CLI's `personal_token` / `oauth` format | ✅ |
+| Config dir resolution ($VISOR_CONFIG_DIR, XDG, ~/.config/visor) | Match CLI resolution order | ✅ |
+| Token redaction in debug output | Redact to `visor_pat_abcd_...` | ✅ |
 
 ---
 
@@ -297,12 +300,12 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 
 | Category | Total Items | Done | In Progress | Not Started |
 |---|---|---|---|---|
-| Commands → Screens | 62 | 17 | 1 | 44 |
-| API Endpoints | 19 | 14 | 0 | 5 |
-| Auth Flow | 16 | 0 | 0 | 16 |
-| Config & State | 9 | 0 | 0 | 9 |
-| Output & Display | 12 | 0 | 0 | 12 |
-| Other Features | 13 | 0 | 0 | 13 |
+| Commands → Screens | 62 | 22 | 1 | 39 |
+| API Endpoints | 19 | 14 | 1 | 4 |
+| Auth Flow | 16 | 15 | 0 | 1 |
+| Config & State | 9 | 5 | 0 | 4 |
+| Output & Display | 12 | 1 | 0 | 11 |
+| Other Features | 13 | 1 | 0 | 12 |
 | Exit Codes & Errors | 16 | 0 | 0 | 16 |
 | Dashboard Screens | 11 | 10 | 1 | 0 |
-| **Total** | **158** | **41** | **2** | **115** |
+| **Total** | **158** | **68** | **3** | **87** |

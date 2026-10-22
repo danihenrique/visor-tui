@@ -11,3 +11,4 @@ pub mod bills;
 pub mod payables;
 pub mod settings;
 pub mod doctor;
+pub mod tags;
