@@ -683,3 +683,10 @@ fn resolve_account_name(accounts: &[Account], id: &str) -> String {
 fn format_api_error(err: &ApiError) -> String {
     format!("Erro: {err}")
 }
+
+/// Stateless render entry point for app.rs — creates a fresh screen, loads data, and renders.
+pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
+    let mut screen = TransactionsScreen::new();
+    screen.load_initial(api);
+    screen.render(ui);
+}

@@ -123,15 +123,35 @@ impl VisorApp {
                         Screen::Overview => {
                             screens::overview::draw_overview(col, &self.api);
                         }
+                        Screen::Transactions => {
+                            screens::transactions::render(col, &self.api);
+                        }
+                        Screen::Recurring => {
+                            screens::recurring::render(col, &self.api);
+                        }
+                        Screen::CashFlow => {
+                            screens::cash_flow::render(col, &self.api);
+                        }
                         Screen::AccountsCards => {
                             screens::accounts_cards::render(col, &self.api, false);
                         }
-                        _ => {
-                            let label = current.label();
-                            col.panel(Panel::new().title(label), move |p| {
-                                p.heading(label);
-                                p.text("Tela em desenvolvimento — disponivel em breve.");
-                            });
+                        Screen::Categories => {
+                            screens::categories::render(col, &self.api);
+                        }
+                        Screen::Goals => {
+                            screens::goals::render(col, &self.api);
+                        }
+                        Screen::Projection => {
+                            screens::projection::render(col, &self.api);
+                        }
+                        Screen::NetWorth => {
+                            screens::net_worth::render(col, &self.api);
+                        }
+                        Screen::Bills => {
+                            screens::bills::render(col, &self.api);
+                        }
+                        Screen::Payables => {
+                            screens::payables::render(col, &self.api);
                         }
                     }
                 });
