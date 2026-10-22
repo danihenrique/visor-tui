@@ -2,6 +2,144 @@ use hqtui::prelude::*;
 
 use crate::keymap::Screen;
 
+#[derive(Clone, Copy, Debug)]
+pub enum Tone {
+    Neutral,
+    Positive,
+    Negative,
+    Warning,
+    Accent,
+}
+
+impl Tone {
+    #[must_use]
+    pub fn color(self, theme: &Theme) -> Color {
+        match self {
+            Self::Neutral => theme.foreground,
+            Self::Positive => theme.success,
+            Self::Negative => theme.danger,
+            Self::Warning => theme.warning,
+            Self::Accent => theme.accent,
+        }
+    }
+}
+
+pub struct Metric {
+    pub label: String,
+    pub value: String,
+    pub tone: Tone,
+}
+
+impl Metric {
+    pub fn new(label: impl Into<String>, value: impl Into<String>, tone: Tone) -> Self {
+        Self {
+            label: label.into(),
+            value: value.into(),
+            tone,
+        }
+    }
+}
+
+pub fn metric_strip(ui: &mut Container<'_>, metrics: Vec<Metric>) {
+    let height = if ui.height() < 14 { 3 } else { 4 };
+    ui.row(Row::new().size(Size::Cells(height)).gap(1), move |row| {
+        for metric in metrics {
+            row.panel(
+                Panel::new()
+                    .title(metric.label)
+                    .border(BorderStyle::Rounded)
+                    .size(Size::Fill),
+                move |tile| {
+                    tile.styled_text(
+                        &metric.value,
+                        TextStyle::new().fg(metric.tone.color(tile.theme())).bold(),
+                    );
+                },
+            );
+        }
+    });
+}
+
+#[must_use]
+pub fn amount(value: Option<&str>) -> Option<f64> {
+    value?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+}
+
+pub(crate) fn minor_units(value: &str) -> Option<i128> {
+    let value = value.trim();
+    let negative = value.starts_with('-');
+    let unsigned = value.strip_prefix(['-', '+']).unwrap_or(value);
+    let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let mut cents = whole.parse::<i128>().ok()?.checked_mul(100)?;
+    let mut digits = fraction.bytes();
+    cents = cents.checked_add(i128::from(digits.next().unwrap_or(b'0') - b'0') * 10)?;
+    cents = cents.checked_add(i128::from(digits.next().unwrap_or(b'0') - b'0'))?;
+    if digits.next().is_some_and(|digit| digit >= b'5') {
+        cents = cents.checked_add(1)?;
+    }
+    if negative {
+        cents.checked_neg()
+    } else {
+        Some(cents)
+    }
+}
+
+#[must_use]
+pub fn money_total<'a>(
+    items: impl IntoIterator<Item = (Option<&'a str>, Option<&'a str>)>,
+) -> String {
+    let mut currency = None;
+    let mut total = 0_i128;
+    let mut invalid = false;
+    let mut mixed = false;
+    for (value, code) in items {
+        let code = code.filter(|code| !code.trim().is_empty()).unwrap_or("BRL");
+        if currency.is_some_and(|previous| previous != code) {
+            mixed = true;
+        }
+        currency = Some(code);
+        if let Some(next) = value
+            .and_then(minor_units)
+            .and_then(|value| total.checked_add(value))
+        {
+            total = next;
+        } else {
+            invalid = true;
+        }
+    }
+    if mixed {
+        return "Várias moedas".into();
+    }
+    let Some(currency) = currency.filter(|_| !invalid) else {
+        return "Indisponível".into();
+    };
+    format_minor_units(total, currency)
+}
+
+fn format_minor_units(value: i128, currency: &str) -> String {
+    let unsigned = value.unsigned_abs();
+    let whole = (unsigned / 100).to_string();
+    let mut grouped = String::new();
+    for (index, digit) in whole.chars().enumerate() {
+        if index > 0 && (whole.len() - index).is_multiple_of(3) {
+            grouped.push('.');
+        }
+        grouped.push(digit);
+    }
+    let sign = if value < 0 { "-" } else { "" };
+    format!("{sign}{grouped},{:02} {currency}", unsigned % 100)
+}
+
 #[derive(Debug, Default)]
 pub struct TableSelection {
     index: usize,
@@ -35,12 +173,12 @@ pub fn theme() -> Theme {
         surface: Color::hex(0x0011_1c2e),
         foreground: Color::hex(0x00e2_e8f0),
         muted: Color::hex(0x0094_a3b8),
-        primary: Color::hex(0x0034_d399),
-        accent: Color::hex(0x0038_bdf8),
+        primary: Color::hex(0x005e_c4b6),
+        accent: Color::hex(0x008e_b8d8),
         success: Color::hex(0x0034_d399),
         danger: Color::hex(0x00fb_7185),
         border: Color::hex(0x0033_4155),
-        border_focused: Color::hex(0x0034_d399),
+        border_focused: Color::hex(0x005e_c4b6),
         title: Color::hex(0x00f1_f5f9),
         selection: Color::hex(0x0016_4e63),
         selection_text: Color::hex(0x00f0_fdfa),
@@ -50,27 +188,10 @@ pub fn theme() -> Theme {
 
 #[must_use]
 pub fn format_currency(value: Option<&str>, currency: Option<&str>) -> String {
-    let Some(raw) = value.filter(|value| !value.is_empty()) else {
-        return "—".into();
-    };
-    let code = currency.unwrap_or("BRL");
-    let Ok(amount) = raw.parse::<f64>() else {
-        return format!("{raw} {code}");
-    };
-    if !amount.is_finite() {
-        return "—".into();
-    }
-    let rounded = format!("{:.2}", amount.abs());
-    let (whole, fraction) = rounded.split_once('.').unwrap_or((&rounded, "00"));
-    let mut grouped = String::new();
-    for (index, digit) in whole.chars().enumerate() {
-        if index > 0 && (whole.len() - index).is_multiple_of(3) {
-            grouped.push('.');
-        }
-        grouped.push(digit);
-    }
-    let sign = if amount < 0.0 { "-" } else { "" };
-    format!("{sign}{grouped},{fraction} {code}")
+    value.and_then(minor_units).map_or_else(
+        || "—".into(),
+        |value| format_minor_units(value, currency.unwrap_or("BRL")),
+    )
 }
 
 pub fn shell<'a>(
@@ -81,58 +202,110 @@ pub fn shell<'a>(
     modal_open: bool,
     content: impl FnOnce(&mut Container<'a>) + 'a,
 ) {
-    let compact = ui.width() < 80;
+    let compact = ui.width() <= 100;
     let wide = ui.width() >= 110 && ui.height() >= 24;
+    let grouped = ui.height() >= 30;
+    let short = ui.height() < 14;
     let muted = ui.theme().muted;
     let accent = ui.theme().accent;
+    let surface = ui.theme().surface;
     ui.column(Column::new().gap(0), move |col| {
-        col.row(Row::new().size(Size::Cells(2)).gap(1), move |header| {
-            header.styled_text(" VISOR", TextStyle::new().fg(accent).bold());
-            header.text(&format!("{}  ·  {space}", current.label()));
-        });
+        col.row(
+            Row::new()
+                .size(Size::Cells(if short { 1 } else { 2 }))
+                .gap(2)
+                .background(surface),
+            move |header| {
+                header.column(Column::new().size(Size::Cells(8)), move |brand| {
+                    brand.styled_text(" VISOR", TextStyle::new().fg(accent).bold());
+                });
+                header.text(&format!("{}  ·  {space}", current.label()));
+            },
+        );
         col.row(Row::new().size(Size::Fill).gap(1), move |body| {
             if wide {
-                body.column(Column::new().size(Size::Cells(26)), move |sidebar| {
-                    sidebar.panel(Panel::new().title("Navegação"), move |nav| {
+                body.panel(
+                    Panel::new()
+                        .title("Seu dinheiro")
+                        .border(BorderStyle::Rounded)
+                        .size(Size::Cells(26)),
+                    move |nav| {
                         for screen in Screen::all() {
+                            if grouped {
+                                let group = match screen {
+                                    Screen::Overview => Some("FINANÇAS"),
+                                    Screen::Categories => Some("PLANEJAMENTO"),
+                                    Screen::Notifications => Some("ESPAÇO"),
+                                    _ => None,
+                                };
+                                if let Some(group) = group {
+                                    nav.styled_text(group, TextStyle::new().fg(muted));
+                                }
+                            }
                             let active = screen == current;
-                            let label = format!("{} {}", screen.shortcut_key(), screen.label());
+                            let label = format!(
+                                "{} {} {}",
+                                if active { "▎" } else { " " },
+                                screen.shortcut_key(),
+                                screen.label()
+                            );
                             if modal_open {
                                 nav.styled_text(
                                     &label,
                                     TextStyle::new().fg(if active { accent } else { muted }),
                                 );
                             } else {
-                                nav.button(
-                                    ButtonOptions::new(label).variant(if active {
-                                        ButtonVariant::Primary
-                                    } else {
-                                        ButtonVariant::Ghost
-                                    }),
-                                    &format!("nav:{}", screen.index()),
-                                );
+                                nav.sized(Size::Cells(1), move |item| {
+                                    item.table(
+                                        TableOptions {
+                                            columns: vec![TableColumn::new("").width(Size::Fill)],
+                                            rows: vec![TableRow::new([label]).color(if active {
+                                                accent
+                                            } else {
+                                                muted
+                                            })],
+                                            selected: active.then_some(0),
+                                            header: false,
+                                            ..Default::default()
+                                        },
+                                        &format!("nav:{}", screen.index()),
+                                    );
+                                });
                             }
                         }
-                    });
-                });
+                    },
+                );
             }
-            body.column(Column::new().size(Size::Fill), move |main| {
-                main.panel(Panel::new().title(current.label()), content);
-            });
+            body.column(Column::new().size(Size::Fill), content);
         });
         col.row(Row::new().size(Size::Cells(1)), move |footer| {
             footer.styled_text(&status, TextStyle::new().fg(muted));
         });
-        col.row(Row::new().size(Size::Cells(1)), move |footer| {
-            let hint = if modal_open {
-                " Tab/Shift+Tab Campo  Ctrl+S Salvar  Esc Voltar"
-            } else if compact {
-                " Tab Telas  ? Ajuda  r Atualizar  q Sair"
-            } else {
-                " Tab/Shift+Tab Telas  1–0/-/t/N/x/=/D  ? Ajuda  r Atualizar  q Sair"
-            };
-            footer.styled_text(hint, TextStyle::new().fg(muted));
-        });
+        col.row(
+            Row::new().size(Size::Cells(1)).background(surface),
+            move |footer| {
+                let hint = if modal_open {
+                    " Tab Campo  Ctrl+S Salvar  Esc Voltar".to_owned()
+                } else if compact {
+                    " Tab Telas  j/k Selecionar  ? Ajuda  r Atualizar  q Sair".to_owned()
+                } else {
+                    let local = match current {
+                        Screen::Transactions => "/ Buscar  n Nova  Enter Detalhes",
+                        Screen::AccountsCards => "h Ocultas  j/k Conta/cartão",
+                        Screen::Recurring | Screen::Payables | Screen::Bills => {
+                            "←/→ Grupo  j/k Selecionar"
+                        }
+                        Screen::Categories | Screen::Goals | Screen::Tags => {
+                            "n Criar  e Editar  d Excluir"
+                        }
+                        Screen::Settings => "s Espaço  l Sair da conta",
+                        _ => "j/k Selecionar",
+                    };
+                    format!(" Tab Telas  {local}  ? Ajuda  r Atualizar  q Sair")
+                };
+                footer.styled_text(&hint, TextStyle::new().fg(muted));
+            },
+        );
     });
 }
 
@@ -195,6 +368,30 @@ pub fn modal_events(
 mod tests {
     use super::*;
     use hqtui::testing::render_to_text;
+
+    #[test]
+    fn totals_preserve_cents_and_do_not_invent_missing_money() {
+        assert_eq!(
+            money_total([(Some("0.10"), None), (Some("0.20"), None)]),
+            "0,30 BRL"
+        );
+        assert_eq!(
+            money_total([(Some("9999999999999999.99"), None), (Some("0.01"), None)]),
+            "10.000.000.000.000.000,00 BRL"
+        );
+        assert_eq!(
+            money_total([(Some("1"), Some("BRL")), (Some("2"), Some("USD"))]),
+            "Várias moedas"
+        );
+        assert_eq!(
+            money_total([(Some("1"), None), (None, None)]),
+            "Indisponível"
+        );
+        assert_eq!(money_total([(Some("NaN"), None)]), "Indisponível");
+        assert_eq!(money_total([]), "Indisponível");
+        assert_eq!(money_total([(Some("-1.005"), None)]), "-1,01 BRL");
+        assert_eq!(amount(Some("inf")), None);
+    }
 
     #[test]
     fn scrolling_reports_stop_at_boundaries_before_the_next_frame() {
@@ -274,20 +471,32 @@ mod tests {
             render_to_text(60, 18, "dark", |ui| view(ui, &api, &mut selection));
             api.set_fetch_allowed(false);
             selection.move_by(isize::MAX);
-            let bottom = selection.selected().expect("populated report");
-            assert!(bottom > 0, "{name}");
+            let Some(bottom) = selection.selected() else {
+                selection.move_by(1);
+                assert_eq!(selection.selected(), None, "{name}");
+                continue;
+            };
+
             for _ in 0..100 {
                 selection.move_by(1);
             }
             selection.move_by(-1);
-            assert_eq!(selection.selected(), Some(bottom - 1), "{name}");
+            assert_eq!(
+                selection.selected(),
+                Some(bottom.saturating_sub(1)),
+                "{name}"
+            );
             render_to_text(60, 18, "dark", |ui| view(ui, &api, &mut selection));
-            assert_eq!(selection.selected(), Some(bottom - 1), "{name}");
+            assert_eq!(
+                selection.selected(),
+                Some(bottom.saturating_sub(1)),
+                "{name}"
+            );
             for _ in 0..100 {
                 selection.move_by(-1);
             }
             selection.move_by(1);
-            assert_eq!(selection.selected(), Some(1), "{name}");
+            assert_eq!(selection.selected(), Some(bottom.min(1)), "{name}");
         }
         for mock in mocks {
             mock.assert();
@@ -298,7 +507,12 @@ mod tests {
     fn selection_tracks_shrinking_and_empty_results() {
         let mut selection = TableSelection::default();
         selection.set_row_count(12);
-        selection.move_by(11);
+        selection.move_by(isize::MAX);
+        assert_eq!(selection.selected(), Some(11));
+        selection.move_by(1);
+        assert_eq!(selection.selected(), Some(11));
+        selection.move_by(-1);
+        assert_eq!(selection.selected(), Some(10));
         selection.set_row_count(3);
         selection.move_by(-1);
         assert_eq!(selection.selected(), Some(1));
@@ -316,6 +530,10 @@ mod tests {
         assert_eq!(format_currency(Some("-12.50"), None), "-12,50 BRL");
         assert_eq!(format_currency(None, None), "—");
         assert_eq!(format_currency(Some("NaN"), None), "—");
+        assert_eq!(
+            format_currency(Some("9999999999999999.99"), None),
+            "9.999.999.999.999.999,99 BRL"
+        );
     }
 
     #[test]
