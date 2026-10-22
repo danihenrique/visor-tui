@@ -608,9 +608,15 @@ fn draw_overlay(
         }
         text(
             &inner,
-            inner.height().saturating_sub(1),
-            "↑/↓ escolher · Enter selecionar · Esc voltar",
+            inner.height().saturating_sub(2),
+            "↑/↓ escolher · Enter selecionar",
             inner.theme.muted,
+        );
+        buttons(
+            &inner,
+            inner.height().saturating_sub(1),
+            &[("Esc Voltar", "escape")],
+            hits,
         );
         return;
     }

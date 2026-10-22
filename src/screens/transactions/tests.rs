@@ -903,3 +903,42 @@ fn mouse_row_double_click_opens_detail_and_modal_clicks_do_not_reach_the_list() 
         matches!(&state.mode, TransactionMode::Form(form) if form.focused == FormField::Category)
     );
 }
+
+#[test]
+fn picker_back_button_returns_to_form_and_preserves_selected_tags() {
+    use crate::interaction::test_support::click_text;
+    let api = ApiClient::for_test(
+        "http://127.0.0.1:1",
+        Credential::PersonalToken {
+            token: "test-only".into(),
+        },
+        "s",
+    )
+    .unwrap();
+    for (width, height) in [(60, 18), (80, 24), (120, 40)] {
+        for field in [FormField::Account, FormField::Category, FormField::Tags] {
+            let mut state = screen();
+            let mut form = valid_form();
+            form.focused = field;
+            state.mode = TransactionMode::Form(Box::new(form));
+            keys(&mut state, "\r");
+            assert!(state.picker().is_some());
+            let text = transaction_lines(&state, width, height).join("\n");
+            if field == FormField::Tags {
+                state.handle_input(&api, &[click_text(&text, "Viagem")]);
+                assert!(state.picker().is_some());
+            }
+            let text = transaction_lines(&state, width, height).join("\n");
+            state.handle_input(&api, &[click_text(&text, "Esc Voltar")]);
+            assert!(state.picker().is_none());
+            let TransactionMode::Form(form) = &state.mode else {
+                panic!("picker closed the form");
+            };
+            assert_eq!(form.focused, field);
+            assert_eq!(form.amount, "1.234,56");
+            if field == FormField::Tags {
+                assert_eq!(form.tag_ids, ["t-2"]);
+            }
+        }
+    }
+}

@@ -22,7 +22,7 @@ pub struct VisorApp {
     screen: Screen,
     api: Option<Rc<ApiClient>>,
     show_help: bool,
-    screen_selector: Option<usize>,
+    screen_selector: Option<ScreenSelector>,
     login_token_input: String,
     login_error: Option<String>,
     space_selector_visible: bool,
@@ -74,6 +74,115 @@ fn parse_env_token(contents: &str) -> Option<auth::Credential> {
         }
     }
     None
+}
+
+#[derive(Clone, Copy)]
+struct ScreenSelector {
+    selected: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SelectorOutcome {
+    Editing,
+    Cancelled,
+    Selected(Screen),
+}
+
+impl ScreenSelector {
+    fn handle_input(&mut self, event: &InputEvent, hits: &Interactions) -> SelectorOutcome {
+        let key = match event {
+            InputEvent::Key(key) => key.name.as_str(),
+            InputEvent::Mouse(mouse) => match hits.click(event) {
+                Some(Control::Field(index)) => {
+                    return Screen::from_index(index)
+                        .map_or(SelectorOutcome::Editing, SelectorOutcome::Selected);
+                }
+                Some(Control::Button(_)) => "escape",
+                _ if mouse.action == hqtui::input::MouseAction::Scroll => {
+                    if mouse.scroll > 0 { "down" } else { "up" }
+                }
+                _ => return SelectorOutcome::Editing,
+            },
+            _ => return SelectorOutcome::Editing,
+        };
+        match key {
+            "escape" => SelectorOutcome::Cancelled,
+            "enter" => Screen::from_index(self.selected)
+                .map_or(SelectorOutcome::Editing, SelectorOutcome::Selected),
+            "down" | "j" => {
+                self.selected = (self.selected + 1).min(Screen::all().len() - 1);
+                SelectorOutcome::Editing
+            }
+            "up" | "k" => {
+                self.selected = self.selected.saturating_sub(1);
+                SelectorOutcome::Editing
+            }
+            _ => SelectorOutcome::Editing,
+        }
+    }
+
+    fn render(self, ui: &mut Container<'_>, hits: Interactions) {
+        ui.sized(Size::Cells(1), move |ui| {
+            ui.draw(move |surface| {
+                use crate::interaction::coord;
+                use hqtui::{
+                    surface::TextOptions,
+                    widgets::{draw_button, draw_modal},
+                };
+
+                hits.clear();
+                let root = Surface::root(Rc::clone(surface.buffer()), Rc::clone(&surface.theme));
+                let screens = Screen::all();
+                let inner = draw_modal(
+                    &root,
+                    &ModalOptions {
+                        title: Some("Telas".into()),
+                        width: Some(50),
+                        height: Some(screens.len() + 5),
+                        align: Some(Align::Left),
+                        ..Default::default()
+                    },
+                );
+                let capacity = inner.height().saturating_sub(3);
+                let offset = self.selected.saturating_sub(capacity.saturating_sub(1));
+                for (index, screen) in screens.iter().enumerate().skip(offset).take(capacity) {
+                    let row = inner.sub(
+                        1,
+                        coord(index - offset + 1),
+                        inner.width().saturating_sub(2),
+                        1,
+                    );
+                    row.text(
+                        0,
+                        0,
+                        &format!(
+                            "{} {}",
+                            if index == self.selected { "›" } else { " " },
+                            screen.label()
+                        ),
+                        &TextOptions::new().fg(if index == self.selected {
+                            inner.theme.accent
+                        } else {
+                            inner.theme.foreground
+                        }),
+                    );
+                    hits.add(&row, Control::Field(index));
+                }
+                let width = hqtui::unicode::string_width("Cancelar") + 4;
+                let button = inner.sub(
+                    coord(inner.width().saturating_sub(width) / 2),
+                    coord(inner.height().saturating_sub(2)),
+                    width,
+                    1,
+                );
+                let drawn_width = draw_button(&button, &ButtonOptions::new("Cancelar"));
+                hits.add(
+                    &button.sub(0, 0, drawn_width, 1),
+                    Control::Button("escape".into()),
+                );
+            });
+        });
+    }
 }
 
 impl VisorApp {
@@ -186,40 +295,14 @@ impl VisorApp {
 
     fn handle_input(&mut self, events: &[InputEvent]) {
         for event in events {
-            if let Some(selected) = self.screen_selector {
-                match event {
-                    InputEvent::Key(key) => match key.name.as_str() {
-                        "escape" => self.screen_selector = None,
-                        "enter" => {
-                            self.screen_selector = None;
-                            if let Some(screen) = Screen::from_index(selected) {
-                                self.enter_screen(screen);
-                            }
-                        }
-                        "down" | "j" => {
-                            self.screen_selector = Some((selected + 1).min(Screen::all().len() - 1));
-                        }
-                        "up" | "k" => self.screen_selector = Some(selected.saturating_sub(1)),
-                        _ => {}
-                    },
-                    InputEvent::Mouse(mouse) => match self.hits.click(event) {
-                        Some(Control::Field(index)) => {
-                            self.screen_selector = None;
-                            if let Some(screen) = Screen::from_index(index) {
-                                self.enter_screen(screen);
-                            }
-                        }
-                        Some(Control::Button(_)) => self.screen_selector = None,
-                        _ if mouse.action == hqtui::input::MouseAction::Scroll => {
-                            self.screen_selector = Some(
-                                selected
-                                    .saturating_add_signed(if mouse.scroll > 0 { 1 } else { -1 })
-                                    .min(Screen::all().len() - 1),
-                            );
-                        }
-                        _ => {}
-                    },
-                    _ => {}
+            if let Some(selector) = &mut self.screen_selector {
+                match selector.handle_input(event, &self.hits) {
+                    SelectorOutcome::Editing => {}
+                    SelectorOutcome::Cancelled => self.screen_selector = None,
+                    SelectorOutcome::Selected(screen) => {
+                        self.screen_selector = None;
+                        self.enter_screen(screen);
+                    }
                 }
                 continue;
             }
@@ -365,7 +448,11 @@ impl VisorApp {
         if let Some(Control::Button(id)) = self.hits.click(event) {
             self.transactions_screen.borrow_mut().reset_click_sequence();
             match id.as_str() {
-                "nav:picker" => self.screen_selector = Some(self.screen.index()),
+                "nav:picker" => {
+                    self.screen_selector = Some(ScreenSelector {
+                        selected: self.screen.index(),
+                    });
+                }
                 "period:previous" => self.set_period(self.period.previous_month()),
                 "period:next" => self.set_period(self.period.next_month()),
                 "period:picker" => self.period_picker = Some(PeriodPicker::new(&self.period)),
@@ -809,11 +896,8 @@ impl VisorApp {
                 }
             });
             if let Some(picker) = period_picker { picker.render(frame.ui); }
-            if let Some(selected) = screen_selector {
-                let screens = Screen::all();
-                let labels: Vec<_> = screens.iter().map(|screen| screen.label()).collect();
-                let message = screens.iter().enumerate().map(|(index, screen)| format!("{} {}", if index == selected { "›" } else { " " }, screen.label())).collect::<Vec<_>>().join("\n");
-                frame.ui.mouse_modal(ModalOptions { title: Some("Telas".into()), message: Some(message), width: Some(50), align: Some(Align::Left), buttons: vec![ModalButton::new("Cancelar")], ..Default::default() }, &labels, &menu_hits);
+            if let Some(selector) = screen_selector {
+                selector.render(frame.ui, menu_hits);
             }
             if show_help {
                 frame.ui.mouse_modal(ModalOptions {
@@ -915,6 +999,84 @@ fn pressed_key(events: &[InputEvent], name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interaction::test_support::{click, click_text};
+    use hqtui::{input::MouseAction, testing::render_to_text};
+
+    #[test]
+    fn screen_menu_scrolls_last_screen_into_view_and_clicks_its_original_index() {
+        for (width, height) in [(60, 18), (80, 24), (120, 40)] {
+            let hits = Interactions::default();
+            let mut selector = ScreenSelector { selected: 0 };
+            let text = render_to_text(width, height, "dark", |ui| {
+                selector.render(ui, hits.clone());
+            });
+            let mut wheel = click_text(&text, "Visão Geral");
+            if let InputEvent::Mouse(mouse) = &mut wheel {
+                mouse.action = MouseAction::Scroll;
+                mouse.scroll = 1;
+            }
+            for _ in 0..15 {
+                assert_eq!(
+                    selector.handle_input(&wheel, &hits),
+                    SelectorOutcome::Editing
+                );
+            }
+            let text = render_to_text(width, height, "dark", |ui| {
+                selector.render(ui, hits.clone());
+            });
+            let event = click_text(&text, "Diagnóstico");
+            assert_eq!(
+                hits.click(&event),
+                Some(Control::Field(Screen::Doctor.index()))
+            );
+            assert_eq!(
+                selector.handle_input(&event, &hits),
+                SelectorOutcome::Selected(Screen::Doctor)
+            );
+            for screen in Screen::all() {
+                if text.contains(screen.label()) {
+                    assert_eq!(
+                        hits.click(&click_text(&text, screen.label())),
+                        Some(Control::Field(screen.index()))
+                    );
+                }
+            }
+            assert_eq!(
+                selector.handle_input(&click_text(&text, "Cancelar"), &hits),
+                SelectorOutcome::Cancelled
+            );
+            assert_eq!(
+                selector.handle_input(&key_event("enter"), &hits),
+                SelectorOutcome::Selected(Screen::Doctor)
+            );
+            for (key, index) in [("up", 14), ("k", 13), ("down", 14), ("j", 15)] {
+                assert_eq!(selector.handle_input(&key_event(key), &hits), SelectorOutcome::Editing);
+                assert_eq!(selector.selected, index);
+            }
+        }
+    }
+
+    #[test]
+    fn screen_menu_clears_background_targets_and_ignores_outside_clicks() {
+        for (width, height) in [(60, 18), (80, 24)] {
+            let hits = Interactions::default();
+            let mut selector = ScreenSelector { selected: 0 };
+            let text = render_to_text(width, height, "dark", |ui| {
+                ui.mouse_button(ButtonOptions::new("Background"), "nav:2", &hits);
+                selector.render(ui, hits.clone());
+            });
+            assert_eq!(hits.at(0, 0), None);
+            assert_eq!(
+                selector.handle_input(&click(0, 0), &hits),
+                SelectorOutcome::Editing
+            );
+            assert_eq!(selector.selected, 0);
+            assert_eq!(
+                selector.handle_input(&click_text(&text, "Cancelar"), &hits),
+                SelectorOutcome::Cancelled
+            );
+        }
+    }
 
     #[test]
     fn test_screen_shortcut_keys_are_unique() {
