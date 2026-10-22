@@ -4,7 +4,7 @@ use hqtui::unicode::Align;
 
 use crate::api::ApiClient;
 use crate::models::{Bill, Card};
-use crate::presentation::format_currency;
+use crate::presentation::{Metric, Tone, amount, format_currency, metric_strip, money_total};
 
 #[derive(Default)]
 pub struct BillsScreen {
@@ -84,79 +84,248 @@ pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
     render_with_state(ui, &screen);
 }
 
+fn bill_status(status: Option<&str>) -> &str {
+    match status {
+        Some("open") => "Aberta",
+        Some("closed") => "Fechada",
+        Some("paid") => "Paga",
+        Some("overdue") => "Vencida",
+        Some("future") => "Futura",
+        Some(status) => status,
+        None => "—",
+    }
+}
+
+fn paid_ratio(bill: &Bill) -> Option<f64> {
+    let total = amount(bill.total_amount.as_deref())?;
+    let paid = amount(bill.paid_amount.as_deref())?;
+    (total > 0.0).then_some((paid / total).clamp(0.0, 1.0))
+}
+
 pub fn render_with_state(ui: &mut Container<'_>, screen: &BillsScreen) {
+    let theme = ui.theme().clone();
+    let compact = ui.width() < 85;
     let card = screen.cards.get(screen.selected_card).map_or_else(
         || "Nenhum cartão".to_string(),
         |card| {
             format!(
-                "{}  ({}/{})",
+                "{}  ·  {} de {}",
                 card.name,
                 screen.selected_card + 1,
                 screen.cards.len()
             )
         },
     );
+    let metrics = vec![
+        Metric::new(
+            "Total das faturas",
+            money_total(
+                screen
+                    .bills
+                    .iter()
+                    .map(|bill| (bill.total_amount.as_deref(), bill.currency_code.as_deref())),
+            ),
+            Tone::Neutral,
+        ),
+        Metric::new(
+            "Total pago",
+            money_total(
+                screen
+                    .bills
+                    .iter()
+                    .map(|bill| (bill.paid_amount.as_deref(), bill.currency_code.as_deref())),
+            ),
+            Tone::Positive,
+        ),
+        Metric::new(
+            "Em aberto",
+            screen
+                .bills
+                .iter()
+                .filter(|bill| {
+                    matches!(bill.status.as_deref(), Some("open" | "closed" | "overdue"))
+                })
+                .count()
+                .to_string(),
+            Tone::Warning,
+        ),
+    ];
     let rows = screen
         .bills
         .iter()
         .map(|bill| {
             let currency = bill.currency_code.as_deref();
             let estimate = if bill.amount_is_estimate { "~" } else { "" };
-            TableRow::new([
-                bill.status.clone().unwrap_or_else(|| "—".into()),
+            let mut cells = vec![
+                bill_status(bill.status.as_deref()).into(),
                 bill.due_date.clone().unwrap_or_else(|| "—".into()),
                 format!(
                     "{estimate}{}",
                     format_currency(bill.total_amount.as_deref(), currency)
                 ),
                 format_currency(bill.paid_amount.as_deref(), currency),
-                format_currency(bill.minimum_payment.as_deref(), currency),
-            ])
+            ];
+            if !compact {
+                cells.push(format_currency(bill.minimum_payment.as_deref(), currency));
+            }
+            let status_color = match bill.status.as_deref() {
+                Some("paid") => theme.success,
+                Some("overdue") => theme.danger,
+                _ => theme.warning,
+            };
+            let mut row = TableRow::new(cells);
+            row.cell_colors = vec![
+                Some(status_color),
+                None,
+                None,
+                Some(theme.success),
+                Some(theme.muted),
+            ];
+            row
         })
         .collect::<Vec<_>>();
     let error = screen.error.clone();
     let selected = screen.selected_bill;
-    let detail = selected
-        .and_then(|index| screen.bills.get(index))
-        .map(|bill| format!("Fechamento {}", bill.close_date.as_deref().unwrap_or("—")));
-    ui.column(Column::new().gap(1), move |col| {
+    let selected_bill = selected.and_then(|index| screen.bills.get(index)).cloned();
+    let show_detail = ui.height() >= 16;
+    let compact_detail = selected_bill.as_ref().map(|bill| {
+        format!(
+            "Fechamento {} · Mínimo {}",
+            bill.close_date.as_deref().unwrap_or("—"),
+            format_currency(
+                bill.minimum_payment.as_deref(),
+                bill.currency_code.as_deref()
+            )
+        )
+    });
+    ui.column(Column::new().gap(usize::from(show_detail)), move |col| {
+        if show_detail {
+            metric_strip(col, metrics);
+        }
         col.row(Row::new().size(Size::Cells(1)).gap(1), move |row| {
-            row.button(ButtonOptions::new("←"), "bills:previous");
-            row.text(&card);
-            row.button(ButtonOptions::new("→"), "bills:next");
+            row.sized(Size::Cells(3), |button| {
+                button.button(ButtonOptions::new("←"), "bills:previous");
+            });
+            row.sized(Size::Fill, move |name| {
+                name.styled_text(&card, TextStyle::new().fg(theme.accent).bold());
+            });
+            row.sized(Size::Cells(3), |button| {
+                button.button(ButtonOptions::new("→"), "bills:next");
+            });
         });
         col.panel(
             Panel::new()
-                .title("Faturas")
-                .footer("←/→ Cartão  j/k Faturas"),
+                .title("Faturas do cartão")
+                .border(BorderStyle::Rounded)
+                .footer("←/→ Cartão  j/k Faturas  ~ Valor estimado"),
             move |panel| {
                 if let Some(error) = error {
-                    panel.text(&error);
+                    panel.styled_text(&error, TextStyle::new().fg(theme.danger));
                 } else if rows.is_empty() {
                     panel.text("Nenhuma fatura neste cartão.");
+                    panel.label("Use ←/→ para consultar outro cartão.");
                 } else {
+                    let mut columns = vec![
+                        TableColumn::new("Status").width(Size::Fill),
+                        TableColumn::new("Vencimento").width(Size::Cells(10)),
+                        TableColumn::new("Total")
+                            .width(Size::Cells(17))
+                            .align(Align::Right),
+                        TableColumn::new("Pago")
+                            .width(Size::Cells(17))
+                            .align(Align::Right),
+                    ];
+                    if !compact {
+                        columns.push(
+                            TableColumn::new("Mínimo")
+                                .width(Size::Cells(16))
+                                .align(Align::Right),
+                        );
+                    }
                     panel.table(
                         TableOptions {
-                            columns: vec![
-                                TableColumn::new("Status"),
-                                TableColumn::new("Vencimento"),
-                                TableColumn::new("Total").align(Align::Right),
-                                TableColumn::new("Pago").align(Align::Right),
-                                TableColumn::new("Mínimo").align(Align::Right),
-                            ],
+                            columns,
                             rows,
                             selected,
-                            zebra: true,
                             follow_selection: true,
+                            scrollbar: true,
+                            header_color: Some(theme.muted),
                             ..Default::default()
                         },
                         "bills:table",
                     );
-                    if let Some(detail) = detail {
-                        panel.text(&detail);
-                    }
                 }
             },
         );
+        if show_detail && let Some(bill) = selected_bill {
+            col.panel(
+                Panel::new()
+                    .title("Pagamento da fatura selecionada")
+                    .border(BorderStyle::Rounded)
+                    .size(Size::Cells(4)),
+                move |panel| {
+                    if let Some(ratio) = paid_ratio(&bill) {
+                        panel.meter(MeterOptions::new(ratio).label("Pago").color(theme.success));
+                    } else {
+                        panel.label("Pagamento indisponível");
+                    }
+                    panel.label(&format!(
+                        "Fechamento {} · Mínimo {}",
+                        bill.close_date.as_deref().unwrap_or("—"),
+                        format_currency(
+                            bill.minimum_payment.as_deref(),
+                            bill.currency_code.as_deref()
+                        )
+                    ));
+                },
+            );
+        }
+        if !show_detail && let Some(detail) = compact_detail {
+            col.label(&detail);
+        }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_bills_keep_minimum_and_closing_date_visible() {
+        let screen = BillsScreen {
+            cards: serde_json::from_value(serde_json::json!([{"id":"c", "name":"Nubank Ultravioleta"}])).unwrap(),
+            bills: serde_json::from_value(serde_json::json!([{"status":"open", "due_date":"2026-11-02", "close_date":"2026-10-25", "total_amount":"2450", "paid_amount":"0", "minimum_payment":"367.50"}])).unwrap(),
+            selected_bill: Some(0),
+            ..Default::default()
+        };
+        for (width, height) in [(56, 10), (60, 18), (80, 24)] {
+            let text = hqtui::testing::render_to_text(width, height, "dark", |ui| {
+                render_with_state(ui, &screen);
+            });
+            for value in [
+                "Nubank Ultravioleta",
+                "2026-10-25",
+                "367,50 BRL",
+                "2.450,00 BRL",
+            ] {
+                assert!(
+                    text.contains(value),
+                    "Missing {value} at {width}x{height}\n{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn paid_progress_requires_known_positive_total() {
+        let mut bill: Bill =
+            serde_json::from_value(serde_json::json!({"total_amount":"100", "paid_amount":"25"}))
+                .unwrap();
+        assert_eq!(paid_ratio(&bill), Some(0.25));
+        bill.paid_amount = None;
+        assert_eq!(paid_ratio(&bill), None);
+        bill.paid_amount = Some("25".into());
+        bill.total_amount = Some("0".into());
+        assert_eq!(paid_ratio(&bill), None);
+    }
 }
