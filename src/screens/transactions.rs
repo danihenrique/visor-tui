@@ -191,25 +191,29 @@ impl TransactionsScreen {
         let result = if let Some(original) = &form.original {
             api.patch_transaction(&original.id, body)
         } else {
-            api.create_transaction(
-                body["amount"].as_str().unwrap_or_default(),
-                body["description"].as_str().unwrap_or_default(),
-                body["type"].as_str().unwrap_or_default(),
-                body["account_id"].as_str().unwrap_or_default(),
-                body["category_id"].as_str(),
-                &form.tag_ids,
-                body["merchant_name"].as_str(),
-                body["notes"].as_str(),
-                body["transacted_at"].as_str(),
-                form.ignored,
-            )
+            api.create_transaction_payload(body, &form.create_key)
         };
         match result {
             Ok(_) => {
                 self.mode = TransactionMode::List;
                 self.fetch_transactions(api, false);
             }
-            Err(error) => form.api_error(&error),
+            Err(error) => {
+                if form.original.is_none() {
+                    if matches!(&error, crate::api::ApiError::Api(data) if data.status == 422) {
+                        form.pending_create = None;
+                        form.create_key = uuid::Uuid::new_v4().to_string();
+                    } else if !matches!(
+                        &error,
+                        crate::api::ApiError::NoCredential
+                            | crate::api::ApiError::NoSpace
+                            | crate::api::ApiError::Unavailable(_)
+                    ) {
+                        form.pending_create = Some(body.clone());
+                    }
+                }
+                form.api_error(&error);
+            }
         }
     }
 
@@ -261,6 +265,13 @@ impl TransactionsScreen {
                 if key.name == "escape" {
                     self.mode = TransactionMode::List;
                     return Effect::None;
+                }
+                if let Some(body) = &form.pending_create {
+                    return if key.key == "ctrl+s" || key.name == "enter" {
+                        Effect::Save(body.clone())
+                    } else {
+                        Effect::None
+                    };
                 }
                 if key.name == "tab" {
                     form.move_focus(key.shift);
@@ -534,6 +545,7 @@ impl TransactionsScreen {
         };
         match &mut self.mode {
             TransactionMode::Form(form) => {
+                form.errors.remove(&form.focused);
                 match kind {
                     PickerKind::Account => form.account_id = choice.id,
                     PickerKind::Category => {
@@ -580,6 +592,9 @@ impl TransactionsScreen {
     }
 
     fn insert_text(&mut self, text: &str) {
+        if matches!(&self.mode, TransactionMode::Form(form) if form.pending_create.is_some()) {
+            return;
+        }
         let cleaned: String = text.chars().filter(|ch| !ch.is_control()).collect();
         if let Some(picker) = self.picker_mut() {
             picker.query.push_str(&cleaned);
@@ -614,6 +629,7 @@ impl TransactionsScreen {
             }
             view::Action::Field(field) => {
                 if let TransactionMode::Form(form) = &mut self.mode
+                    && form.pending_create.is_none()
                     && form.editable(field)
                 {
                     form.focused = field;

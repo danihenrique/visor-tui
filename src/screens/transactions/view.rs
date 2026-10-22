@@ -3,7 +3,7 @@ use hqtui::{
     color::Color,
     prelude::*,
     surface::TextOptions,
-    unicode::{Align, fit, string_width},
+    unicode::{Align, fit, string_width, wrap},
     widgets::{ModalOptions, draw_modal},
 };
 
@@ -124,32 +124,37 @@ fn draw_list(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hitbo
         hits,
     );
     let chips = chips(state);
-    text(
-        surface,
-        2,
-        &if chips.is_empty() {
-            "Todos os lançamentos · f para filtrar".into()
-        } else {
-            chips.join("  ")
-        },
-        surface.theme.muted,
-    );
-    if !chips.is_empty() {
-        hit(
-            surface,
-            1,
-            2,
-            width.saturating_sub(2),
-            Action::Key("f".into()),
-            hits,
-        );
+    let chip_text = if chips.is_empty() {
+        "Todos os lançamentos · f para filtrar".into()
+    } else {
+        chips.join("  ")
+    };
+    let mut chip_lines = wrap(&chip_text, width.saturating_sub(2));
+    let max_chip_lines = height.saturating_sub(9).max(1);
+    if chip_lines.len() > max_chip_lines {
+        chip_lines.truncate(max_chip_lines);
+        chip_lines[max_chip_lines - 1] = "Mais filtros ativos · f para ver todos".into();
     }
+    for (index, line) in chip_lines.iter().enumerate() {
+        text(surface, 2 + index, line, surface.theme.muted);
+        if !chips.is_empty() {
+            hit(
+                surface,
+                1,
+                2 + index,
+                width.saturating_sub(2),
+                Action::Key("f".into()),
+                hits,
+            );
+        }
+    }
+    let actions_y = 2 + chip_lines.len();
     if let Some(error) = &state.error {
-        text(surface, 3, error, RED);
+        text(surface, actions_y, error, RED);
     } else {
         buttons(
             surface,
-            3,
+            actions_y,
             &[
                 ("Enter Detalhes", "enter"),
                 ("e Editar", "e"),
@@ -159,7 +164,7 @@ fn draw_list(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hitbo
             hits,
         );
     }
-    let table_y = 5;
+    let table_y = actions_y + 2;
     let rows_visible = height.saturating_sub(table_y + 2);
     let selected = state.selected_index.unwrap_or(0);
     let offset = selected.saturating_sub(rows_visible.saturating_sub(1));
@@ -167,8 +172,13 @@ fn draw_list(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hitbo
     let date_width = if width >= 48 { 11 } else { 0 };
     let category_width = if width >= 100 { 18 } else { 0 };
     let account_width = if width >= 120 { 18 } else { 0 };
+    let gaps = [date_width, category_width, account_width]
+        .iter()
+        .filter(|width| **width > 0)
+        .count()
+        + 1;
     let description_width =
-        width.saturating_sub(amount_width + date_width + category_width + account_width + 3);
+        width.saturating_sub(amount_width + date_width + category_width + account_width + 2 + gaps);
     let header = row_text(
         "DATA",
         "DESCRIÇÃO",
@@ -183,7 +193,7 @@ fn draw_list(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hitbo
             amount_width,
         ],
     );
-    text(surface, 4, &header, surface.theme.muted);
+    text(surface, table_y - 1, &header, surface.theme.muted);
     if state.loading {
         text(
             surface,
@@ -266,7 +276,7 @@ fn draw_list(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hitbo
         );
         text(surface, y, &row, surface.theme.foreground);
         surface.text(
-            coord(width.saturating_sub(amount_width + 2)),
+            coord(width.saturating_sub(amount_width + 1)),
             coord(y),
             &fit(&amount, amount_width, Align::Right),
             &TextOptions::new().fg(if tx.tx_type.eq_ignore_ascii_case("credit") {
@@ -471,7 +481,9 @@ fn draw_overlay(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hi
                     ..Default::default()
                 },
             );
-            let hint = if form.connected() {
+            let hint = if form.pending_create.is_some() {
+                "Envio incerto · rascunho bloqueado para evitar duplicação"
+            } else if form.connected() {
                 "Importada · campos de origem são somente leitura"
             } else {
                 "Valor positivo · Data AAAA-MM-DD ou DD/MM/AAAA"
@@ -491,13 +503,24 @@ fn draw_overlay(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hi
                     field.label(),
                     &form_value(state, form, *field),
                     *field == form.focused,
-                    !form.editable(*field),
+                    form.pending_create.is_some() || !form.editable(*field),
                     form.errors.get(field).map(String::as_str),
                 );
                 hit(&inner, 0, y, inner.width(), Action::Field(*field), hits);
             }
             if let Some(error) = &form.error {
-                text(&inner, inner.height().saturating_sub(3), error, RED);
+                let error_y = inner
+                    .height()
+                    .saturating_sub(if form.pending_create.is_some() { 4 } else { 3 });
+                text(&inner, error_y, error, RED);
+            }
+            if form.pending_create.is_some() {
+                text(
+                    &inner,
+                    inner.height().saturating_sub(3),
+                    "Ctrl-S repetir · Esc sair; confira a lista antes de N",
+                    inner.theme.muted,
+                );
             }
             buttons(
                 &inner,

@@ -152,6 +152,21 @@ fn edit_preserves_tags_and_timestamp_and_can_clear_tags() {
 }
 
 #[test]
+fn unchanged_edit_text_is_omitted_so_whitespace_is_preserved() {
+    let mut tx = transaction();
+    tx.description = Some("  Mercado  ".into());
+    tx.notes = Some("   ".into());
+    let mut form = TransactionForm::edit(tx);
+    let body = form.payload().unwrap();
+    assert!(body.get("description").is_none());
+    assert!(body.get("notes").is_none());
+    form.notes = "nova nota".into();
+    assert_eq!(form.payload().unwrap()["notes"], "nova nota");
+    form.notes.clear();
+    assert_eq!(form.payload().unwrap()["notes"], "");
+}
+
+#[test]
 fn imported_transactions_only_send_editable_fields() {
     for source in ["connected", "apple_pay"] {
         let mut tx = transaction();
@@ -308,6 +323,109 @@ fn create_uses_normalized_amount_lowercase_type_and_required_category() {
 }
 
 #[test]
+fn uncertain_create_retries_same_body_and_key_without_allowing_edits() {
+    let mut server = mockito::Server::new();
+    let api = client(&server);
+    let form = valid_form();
+    let key = form.create_key.clone();
+    let first = server
+        .mock("POST", "/v1/spaces/s/transactions")
+        .match_header("idempotency-key", key.as_str())
+        .with_status(201)
+        .with_body("incomplete response")
+        .expect(1)
+        .create();
+    let replay = server
+        .mock("POST", "/v1/spaces/s/transactions")
+        .match_header("idempotency-key", key.as_str())
+        .with_status(201)
+        .with_body(json!({"data":transaction()}).to_string())
+        .expect(1)
+        .create();
+    let refresh = server
+        .mock("GET", "/v1/spaces/s/transactions")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_body(json!({"data":[]}).to_string())
+        .create();
+    let mut state = screen();
+    state.mode = TransactionMode::Form(Box::new(form));
+    let first_effect = keys(&mut state, "\x13").pop().unwrap();
+    let first_body = match &first_effect {
+        Effect::Save(body) => body.clone(),
+        _ => panic!("expected save"),
+    };
+    state.execute(first_effect, &api);
+    let TransactionMode::Form(form) = &state.mode else {
+        panic!("draft closed after uncertain response")
+    };
+    assert_eq!(form.pending_create.as_ref(), Some(&first_body));
+    assert_eq!(form.create_key, key);
+    keys(&mut state, "\tXYZ");
+    if let TransactionMode::Form(form) = &state.mode {
+        assert_eq!(form.description, "Pagamento");
+    }
+    let retry = keys(&mut state, "\x13").pop().unwrap();
+    assert_eq!(retry, Effect::Save(first_body));
+    state.execute(retry, &api);
+    assert!(!state.is_modal_open());
+    first.assert();
+    replay.assert();
+    refresh.assert();
+}
+
+#[test]
+fn rejected_create_unlocks_draft_and_uses_a_new_key_after_correction() {
+    let mut server = mockito::Server::new();
+    let api = client(&server);
+    let rejected = server
+        .mock("POST", "/v1/spaces/s/transactions")
+        .with_status(422)
+        .with_body(json!({"errors":[{"code":"VALIDATION_ERROR","message":"Invalid"}]}).to_string())
+        .expect(1)
+        .create();
+    let mut state = screen();
+    let form = valid_form();
+    let original_key = form.create_key.clone();
+    state.mode = TransactionMode::Form(Box::new(form));
+    let effect = keys(&mut state, "\x13").pop().unwrap();
+    state.execute(effect, &api);
+    let TransactionMode::Form(form) = &state.mode else {
+        panic!("rejected draft closed")
+    };
+    assert!(form.pending_create.is_none());
+    assert_ne!(form.create_key, original_key);
+    let corrected_key = form.create_key.clone();
+    keys(&mut state, "\tX");
+    let TransactionMode::Form(form) = &state.mode else {
+        panic!()
+    };
+    assert_eq!(form.description, "PagamentoX");
+    let accepted = server
+        .mock("POST", "/v1/spaces/s/transactions")
+        .match_header("idempotency-key", corrected_key.as_str())
+        .match_body(mockito::Matcher::PartialJson(
+            json!({"description":"PagamentoX"}),
+        ))
+        .with_status(201)
+        .with_body(json!({"data":transaction()}).to_string())
+        .expect(1)
+        .create();
+    let refresh = server
+        .mock("GET", "/v1/spaces/s/transactions")
+        .match_query(mockito::Matcher::Any)
+        .with_status(200)
+        .with_body(json!({"data":[]}).to_string())
+        .create();
+    let effect = keys(&mut state, "\x13").pop().unwrap();
+    state.execute(effect, &api);
+    assert!(!state.is_modal_open());
+    rejected.assert();
+    accepted.assert();
+    refresh.assert();
+}
+
+#[test]
 fn connected_edit_patch_omits_immutable_fields_and_clears_tags() {
     let mut server = mockito::Server::new();
     let api = client(&server);
@@ -316,7 +434,7 @@ fn connected_edit_patch_omits_immutable_fields_and_clears_tags() {
     let patch = server
         .mock("PATCH", "/v1/spaces/s/transactions/tx-1")
         .match_body(mockito::Matcher::Json(
-            json!({"category_id":"c-1","tag_ids":[],"notes":"","ignored":true}),
+            json!({"category_id":"c-1","tag_ids":[],"ignored":true}),
         ))
         .with_status(200)
         .with_body(json!({"data":tx}).to_string())
@@ -404,5 +522,67 @@ fn rendering_keeps_focused_field_and_controls_visible_at_small_sizes() {
             "save action hidden at {width}x{height}"
         );
         assert!(!state.hitboxes.borrow().is_empty());
+    }
+}
+
+#[test]
+fn table_amounts_fit_without_a_trailing_ellipsis() {
+    for width in [120, 100, 80, 60, 40] {
+        let state = screen();
+        let buffer = Rc::new(RefCell::new(FrameBuffer::new(width, 24)));
+        let surface = Surface::root(buffer.clone(), Rc::new(hqtui::theme::dark()));
+        view::draw(&surface, &state);
+        let data = buffer.borrow();
+        let row: String = data
+            .chars
+            .chunks(width)
+            .find_map(|cells| {
+                let row: String = cells
+                    .iter()
+                    .filter_map(|cell| char::from_u32(*cell))
+                    .collect();
+                row.contains("R$ 12,34").then_some(row)
+            })
+            .expect("amount missing");
+        assert!(
+            row.trim_end().ends_with("R$ 12,34"),
+            "amount clipped at {width}: {row}"
+        );
+    }
+}
+
+#[test]
+fn active_filter_chips_wrap_and_keep_all_dimensions_visible() {
+    let mut state = screen();
+    state.filters = TransactionFilters {
+        date_from: "2026-10-01".into(),
+        date_to: "2026-10-22".into(),
+        account_id: Some("a-1".into()),
+        category_id: Some("c-1".into()),
+        tag_id: Some("t-1".into()),
+        tx_type: TxTypeFilter::Debit,
+        ignored: IgnoredFilter::OnlyIgnored,
+        search: "café".into(),
+    };
+    let buffer = Rc::new(RefCell::new(FrameBuffer::new(80, 24)));
+    let surface = Surface::root(buffer.clone(), Rc::new(hqtui::theme::dark()));
+    view::draw(&surface, &state);
+    let text: String = buffer
+        .borrow()
+        .chars
+        .iter()
+        .filter_map(|cell| char::from_u32(*cell))
+        .collect();
+    for chip in [
+        "De:",
+        "Até:",
+        "Busca:",
+        "Conta:",
+        "Categoria:",
+        "Tag:",
+        "Despesa",
+        "Ignorados",
+    ] {
+        assert!(text.contains(chip), "missing chip {chip}");
     }
 }

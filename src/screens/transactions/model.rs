@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use chrono::{NaiveDate, TimeZone};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::api::ApiError;
 use crate::models::Transaction;
@@ -144,6 +145,8 @@ impl FormField {
 #[derive(Debug, Clone)]
 pub struct TransactionForm {
     pub original: Option<Transaction>,
+    pub create_key: String,
+    pub pending_create: Option<Value>,
     pub amount: String,
     pub description: String,
     pub tx_type: TxTypeFilter,
@@ -164,6 +167,8 @@ impl TransactionForm {
     pub fn new() -> Self {
         Self {
             original: None,
+            create_key: Uuid::new_v4().to_string(),
+            pending_create: None,
             amount: String::new(),
             description: String::new(),
             tx_type: TxTypeFilter::Debit,
@@ -268,8 +273,14 @@ impl TransactionForm {
     pub fn payload(&mut self) -> Option<Value> {
         self.errors.clear();
         self.error = None;
-        let mut body =
-            json!({ "tag_ids": self.tag_ids, "notes": self.notes.trim(), "ignored": self.ignored });
+        let mut body = json!({ "tag_ids": self.tag_ids, "ignored": self.ignored });
+        if self
+            .original
+            .as_ref()
+            .is_none_or(|tx| tx.notes.as_deref().unwrap_or_default() != self.notes)
+        {
+            body["notes"] = json!(self.notes.trim());
+        }
         if let Some(id) = &self.category_id {
             body["category_id"] = json!(id);
         } else if self.original.is_none() {
@@ -319,7 +330,13 @@ impl TransactionForm {
                     "Informe uma descrição de 1 a 255 caracteres.".into(),
                 );
             }
-            body["description"] = json!(self.description.trim());
+            if self
+                .original
+                .as_ref()
+                .is_none_or(|tx| tx.description.as_deref().unwrap_or_default() != self.description)
+            {
+                body["description"] = json!(self.description.trim());
+            }
             body["type"] = json!(self.tx_type.api_value().unwrap_or("debit"));
         }
         if self.original.is_none() {
