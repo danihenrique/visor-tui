@@ -1,15 +1,12 @@
 use hqtui::color::Color;
 use hqtui::input::InputEvent;
 use hqtui::prelude::*;
-use hqtui::unicode::Align;
 use hqtui::widgets::{TableColumn, TableOptions, TableRow, TextStyle};
 
 use crate::api::ApiClient;
 use crate::models::Notification;
 
 const COLOR_NEGATIVE: Color = Color::rgb(239, 68, 68);
-const COLOR_NEUTRAL: Color = Color::rgb(148, 163, 184);
-const COLOR_ACCENT: Color = Color::rgb(59, 130, 246);
 
 pub struct NotificationsScreen {
     pub notifications: Vec<Notification>,
@@ -144,105 +141,158 @@ fn format_date(date_str: Option<&str>) -> String {
     }
 }
 
+fn topic_label(topic: Option<&str>) -> &str {
+    match topic {
+        Some("bill") => "Fatura",
+        Some("connection") => "Conexão",
+        Some("goal") => "Meta",
+        Some("transaction") => "Transação",
+        Some(topic) => topic,
+        None => "Geral",
+    }
+}
+
 pub fn render_with_state(
     ui: &mut Container<'_>,
     screen: &mut NotificationsScreen,
     api: &ApiClient,
 ) {
+    use crate::presentation::{Metric, Tone, metric_strip};
     screen.load(api);
-
-    let table_rows: Vec<TableRow> = screen
+    let width = ui.width();
+    let show_metrics = ui.height() >= 15;
+    let wide = width >= 90;
+    let muted = ui.theme().muted;
+    let accent = ui.theme().accent;
+    let rows = screen
         .notifications
         .iter()
-        .map(|n| {
-            let title = n.title.as_deref().unwrap_or("(sem título)").to_string();
-            let topic = n.topic.as_deref().unwrap_or("—").to_string();
-            let date = format_date(n.created_at.as_deref());
-            let read_status = if n.read { "✓" } else { "●" }.to_string();
-            TableRow::new([title, topic, date, read_status])
+        .map(|notification| {
+            let mut cells = vec![
+                if notification.read {
+                    "✓".into()
+                } else {
+                    "●".into()
+                },
+                notification
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "Sem título".into()),
+            ];
+            if wide {
+                cells.push(topic_label(notification.topic.as_deref()).into());
+            }
+            cells.push(format_date(notification.created_at.as_deref()));
+            let mut colors = vec![None; cells.len()];
+            colors[0] = Some(if notification.read { muted } else { accent });
+            if notification.read {
+                colors[1] = Some(muted);
+            }
+            TableRow {
+                cells,
+                cell_colors: colors,
+                ..Default::default()
+            }
         })
-        .collect();
-
-    let columns = vec![
-        TableColumn::new("Título").width(Size::Fill),
-        TableColumn::new("Tópico")
-            .width(Size::Cells(20))
-            .align(Align::Left),
-        TableColumn::new("Data")
-            .width(Size::Cells(12))
-            .align(Align::Center),
-        TableColumn::new("Lida")
-            .width(Size::Cells(6))
-            .align(Align::Center),
+        .collect::<Vec<_>>();
+    let mut columns = vec![
+        TableColumn::new("").width(Size::Cells(2)),
+        TableColumn::new("Mensagem").width(Size::Fill),
     ];
-
-    let has_rows = !table_rows.is_empty();
-    let notif_count = screen.notifications.len();
-    let unread_count = screen.notifications.iter().filter(|n| !n.read).count();
-    let filter_label = if screen.unread_filter {
-        format!("Notificações ({unread_count} não lidas) [Filtro: somente não lidas]")
-    } else {
-        format!("Notificações ({notif_count} total, {unread_count} não lidas)")
-    };
-    let error_msg = screen.error.clone();
-    let loading = screen.loading;
+    if wide {
+        columns.push(TableColumn::new("Assunto").width(Size::Cells(14)));
+    }
+    columns.push(TableColumn::new("Recebida").width(Size::Cells(10)));
+    let count = screen.notifications.len();
+    let unread = screen.notifications.iter().filter(|n| !n.read).count();
+    let detail = screen
+        .selected_index
+        .and_then(|i| screen.notifications.get(i))
+        .map(|n| {
+            (
+                n.title.clone().unwrap_or_else(|| "Mensagem".into()),
+                n.body
+                    .clone()
+                    .unwrap_or_else(|| "Sem detalhes adicionais.".into()),
+                topic_label(n.topic.as_deref()).to_owned(),
+            )
+        });
     let selected = screen.selected_index;
+    let error = screen.error.clone();
+    let loading = screen.loading;
     let unread_filter = screen.unread_filter;
-
     ui.column(Column::new().gap(1), move |col| {
-        // Filter indicator and action buttons
-        col.row(Row::new().size(Size::Cells(1)).gap(1), move |r| {
-            if unread_filter {
-                r.styled_text(
-                    " Filtro ativo: somente não lidas ",
-                    TextStyle::new().fg(COLOR_ACCENT).bold(),
-                );
-            }
-        });
-
-        // Error display
-        if let Some(err) = error_msg {
-            col.panel(Panel::new().title("Erro"), move |p| {
-                p.styled_text(&err, TextStyle::new().fg(COLOR_NEGATIVE));
-            });
-        }
-
-        // Notifications table
-        col.panel(Panel::new().title(filter_label), move |p| {
-            if loading {
-                p.text("Carregando...");
-            } else if has_rows {
-                p.table(
-                    TableOptions {
-                        follow_selection: true,
-                        columns: columns.clone(),
-                        rows: table_rows.clone(),
-                        header: true,
-                        zebra: true,
-                        selected,
-                        ..Default::default()
-                    },
-                    "",
-                );
-            } else if unread_filter {
-                p.styled_text(
-                    "Nenhuma notificação não lida.",
-                    TextStyle::new().fg(COLOR_NEUTRAL),
-                );
-            } else {
-                p.styled_text(
-                    "Nenhuma notificação encontrada.",
-                    TextStyle::new().fg(COLOR_NEUTRAL),
-                );
-            }
-        });
-
-        // Key hints
-        col.row(Row::new(), move |r| {
-            r.styled_text(
-                "↑↓/jk: Navegar | m/Enter: Marcar lida | u: Filtrar não lidas | r: Atualizar",
-                TextStyle::new().fg(COLOR_NEUTRAL),
+        if show_metrics {
+            metric_strip(
+                col,
+                vec![
+                    Metric::new("Não lidas", unread.to_string(), Tone::Accent),
+                    Metric::new("Nesta lista", count.to_string(), Tone::Neutral),
+                    Metric::new(
+                        "Filtro",
+                        if unread_filter { "Não lidas" } else { "Todas" },
+                        Tone::Neutral,
+                    ),
+                ],
             );
+        }
+        col.panel(
+            Panel::new().title(if unread_filter {
+                "Caixa de entrada · não lidas"
+            } else {
+                "Caixa de entrada"
+            }),
+            move |panel| {
+                if loading {
+                    panel.label("Carregando notificações…");
+                } else if let Some(error) = error {
+                    panel.styled_text(&error, TextStyle::new().fg(COLOR_NEGATIVE));
+                } else if rows.is_empty() {
+                    panel.text(if unread_filter {
+                        "Tudo em dia. Nenhuma mensagem não lida."
+                    } else {
+                        "Sua caixa de entrada está vazia."
+                    });
+                    panel.label("u Alternar filtro  ·  r Atualizar");
+                } else {
+                    panel.table(
+                        TableOptions {
+                            columns,
+                            rows,
+                            selected,
+                            follow_selection: true,
+                            scrollbar: true,
+                            zebra: true,
+                            ..Default::default()
+                        },
+                        "notifications:table",
+                    );
+                }
+            },
+        );
+        if let Some((title, body, topic)) = detail {
+            col.panel(
+                Panel::new().title(title).footer(topic).size(Size::Cells(5)),
+                move |panel| {
+                    for line in hqtui::unicode::wrap(&body, panel.width())
+                        .into_iter()
+                        .take(3)
+                    {
+                        panel.styled_text(&line, TextStyle::new().fg(muted));
+                    }
+                },
+            );
+        }
+        col.row(Row::new().size(Size::Cells(1)), move |row| {
+            row.sized(Size::Fill, |hint| {
+                hint.label("j/k Selecionar  m/Enter Lida  u Filtrar");
+            });
+            row.sized(Size::Cells(13), |button| {
+                button.button(
+                    ButtonOptions::new("r Atualizar").variant(ButtonVariant::Ghost),
+                    "notifications:refresh",
+                );
+            });
         });
     });
 }
