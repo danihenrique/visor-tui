@@ -13,3 +13,4 @@ pub mod settings;
 pub mod doctor;
 pub mod tags;
 pub mod notifications;
+pub mod connections;

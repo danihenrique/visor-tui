@@ -24,6 +24,7 @@ pub struct VisorApp {
     categories_screen: Rc<RefCell<screens::categories::CategoriesScreen>>,
     recurring_screen: Rc<RefCell<screens::recurring::RecurringScreen>>,
     notifications_screen: Rc<RefCell<screens::notifications::NotificationsScreen>>,
+    connections_screen: Rc<RefCell<screens::connections::ConnectionsScreen>>,
     settings_modal: screens::settings::SettingsModal,
     doctor_state: screens::doctor::DoctorState,
     doctor_needs_run: bool,
@@ -44,6 +45,7 @@ enum Screen {
     Payables,
     Tags,
     Notifications,
+    Connections,
     Settings,
     Doctor,
 }
@@ -64,6 +66,7 @@ impl Screen {
             Self::Payables => "Contas a pagar",
             Self::Tags => "Tags",
             Self::Notifications => "Notifica\u{e7}\u{f5}es",
+            Self::Connections => "Conex\u{f5}es",
             Self::Settings => "Configura\u{e7}\u{f5}es",
             Self::Doctor => "Diagn\u{f3}stico",
         }
@@ -84,12 +87,13 @@ impl Screen {
             Self::Payables => "-",
             Self::Tags => "t",
             Self::Notifications => "n",
+            Self::Connections => "x",
             Self::Settings => "=",
             Self::Doctor => "d",
         }
     }
 
-    fn all() -> [Screen; 15] {
+    fn all() -> [Screen; 16] {
         [
             Self::Overview,
             Self::Transactions,
@@ -104,6 +108,7 @@ impl Screen {
             Self::Payables,
             Self::Tags,
             Self::Notifications,
+            Self::Connections,
             Self::Settings,
             Self::Doctor,
         ]
@@ -196,6 +201,7 @@ impl VisorApp {
             categories_screen: Rc::new(RefCell::new(screens::categories::CategoriesScreen::new())),
             recurring_screen: Rc::new(RefCell::new(screens::recurring::RecurringScreen::new())),
             notifications_screen: Rc::new(RefCell::new(screens::notifications::NotificationsScreen::new())),
+            connections_screen: Rc::new(RefCell::new(screens::connections::ConnectionsScreen::new())),
             settings_modal: screens::settings::SettingsModal::None,
             doctor_state: screens::doctor::DoctorState::new(),
             doctor_needs_run: true,
@@ -368,6 +374,10 @@ impl VisorApp {
                             self.screen = Screen::Notifications;
                             return;
                         }
+                        "x" => {
+                            self.screen = Screen::Connections;
+                            return;
+                        }
                         "=" => {
                             self.screen = Screen::Settings;
                             return;
@@ -441,6 +451,13 @@ impl VisorApp {
             && let Some(ref api) = self.api
         {
             self.notifications_screen.borrow_mut().handle_input(&self.app, api, events);
+        }
+
+        // Dispatch input to the connections screen when it is active.
+        if self.screen == Screen::Connections
+            && let Some(ref api) = self.api
+        {
+            self.connections_screen.borrow_mut().handle_input(&self.app, api, events);
         }
 
         // Handle doctor screen re-run.
@@ -544,6 +561,7 @@ impl VisorApp {
         let categories_screen = self.categories_screen.clone();
         let recurring_screen = self.recurring_screen.clone();
         let notifications_screen = self.notifications_screen.clone();
+        let connections_screen = self.connections_screen.clone();
         let settings_modal = self.settings_modal;
         let doctor_state = self.doctor_state.clone();
 
@@ -605,6 +623,10 @@ impl VisorApp {
                             Screen::Notifications => {
                                 let mut notifs = notifications_screen.borrow_mut();
                                 screens::notifications::render_with_state(p, &mut notifs, &api);
+                            }
+                            Screen::Connections => {
+                                let mut conns = connections_screen.borrow_mut();
+                                screens::connections::render_with_state(p, &mut conns, &api);
                             }
                             Screen::Settings => screens::settings::render(p, &api, settings_modal),
                             Screen::Doctor => {
@@ -718,7 +740,7 @@ mod tests {
 
     #[test]
     fn test_screen_count() {
-        assert_eq!(Screen::all().len(), 15);
+        assert_eq!(Screen::all().len(), 16);
     }
 
     #[test]
