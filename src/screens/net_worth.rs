@@ -163,7 +163,7 @@ mod tests {
                     "Ok".into(),
                     false,
                     |content| {
-                        render_net_worth_data(content, &investments, Some(&summary), &mut selection)
+                        render_net_worth_data(content, &investments, Some(&summary), &mut selection);
                     },
                 );
             });
@@ -180,7 +180,7 @@ mod tests {
                     "Ok".into(),
                     false,
                     |content| {
-                        render_net_worth_data(content, &investments, Some(&summary), &mut selection)
+                        render_net_worth_data(content, &investments, Some(&summary), &mut selection);
                     },
                 );
             });

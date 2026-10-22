@@ -686,6 +686,11 @@ impl VisorApp {
         Ok(())
     }
 }
+fn pressed_key(events: &[InputEvent], name: &str) -> bool {
+    events.iter().any(
+        |event| matches!(event, InputEvent::Key(key) if key.name == name && !key.ctrl && !key.alt),
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -728,9 +733,4 @@ mod tests {
         assert!(parse_env_token("").is_none());
         assert!(parse_env_token("# no credential\nOTHER=value").is_none());
     }
-}
-fn pressed_key(events: &[InputEvent], name: &str) -> bool {
-    events.iter().any(
-        |event| matches!(event, InputEvent::Key(key) if key.name == name && !key.ctrl && !key.alt),
-    )
 }

@@ -143,12 +143,12 @@ mod tests {
         let data: Overview = serde_json::from_value(serde_json::json!({"bank_balance":"12345.67", "projection":{"projected_balance":"9876.54"}})).unwrap();
         let mut selection = TableSelection::default();
         let text = hqtui::testing::render_to_text(56, 10, "dark", |ui| {
-            draw_overview_data(ui, &data, &mut selection)
+            draw_overview_data(ui, &data, &mut selection);
         });
         assert!(text.contains("12.345,67 BRL"), "{text}");
         selection.move_by(isize::MAX);
         let text = hqtui::testing::render_to_text(56, 10, "dark", |ui| {
-            draw_overview_data(ui, &data, &mut selection)
+            draw_overview_data(ui, &data, &mut selection);
         });
         assert!(text.contains("Saldo projetado"));
         assert!(text.contains("9.876,54 BRL"), "{text}");

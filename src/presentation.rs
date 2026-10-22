@@ -136,6 +136,61 @@ pub fn shell<'a>(
     });
 }
 
+#[must_use]
+pub fn next_row(selected: Option<usize>, count: usize, direction: i8) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    Some(match selected {
+        None => 0,
+        Some(index) if direction < 0 => index.saturating_sub(1).min(count - 1),
+        Some(index) => index.saturating_add(1).min(count - 1),
+    })
+}
+
+#[must_use]
+pub fn modal_events(
+    events: &[hqtui::input::InputEvent],
+    size: hqtui::terminal::TerminalSize,
+    dialog: Option<&ModalOptions>,
+) -> Vec<hqtui::input::InputEvent> {
+    use hqtui::input::{InputEvent, KeyEvent, MouseAction, MouseButton};
+    let mut result = events.to_vec();
+    let Some(dialog) = dialog else { return result };
+    if dialog.buttons.is_empty() {
+        return result;
+    }
+    let width = dialog
+        .width
+        .unwrap_or(48)
+        .min(size.columns.saturating_sub(2));
+    let lines = dialog.message.as_deref().map_or(0, |message| {
+        hqtui::unicode::wrap(message, width.saturating_sub(4)).len()
+    });
+    let height = dialog
+        .height
+        .unwrap_or(lines + 5)
+        .min(size.rows.saturating_sub(2));
+    let left = size.columns.saturating_sub(width) / 2;
+    let top = size.rows.saturating_sub(height) / 2;
+    let widths: Vec<usize> = dialog
+        .buttons
+        .iter()
+        .map(|button| hqtui::unicode::string_width(&button.label) + 4)
+        .collect();
+    let total = widths.iter().sum::<usize>() + widths.len().saturating_sub(1) * 2;
+    let mut x = left + 1 + width.saturating_sub(2).saturating_sub(total) / 2;
+    let y = top + height.saturating_sub(3);
+    for (index, button_width) in widths.into_iter().enumerate() {
+        if events.iter().any(|event| matches!(event, InputEvent::Mouse(mouse) if mouse.action == MouseAction::Press && mouse.button == MouseButton::Left && mouse.y == y && mouse.x >= x && mouse.x < x + button_width)) {
+            let name = if index == 0 { "escape" } else { "enter" };
+            result.push(InputEvent::Key(KeyEvent { name: name.into(), key: name.into(), raw: String::new(), char: None, ctrl: false, alt: false, shift: false }));
+        }
+        x += button_width + 2;
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,6 +199,7 @@ mod tests {
     #[test]
     fn scrolling_reports_stop_at_boundaries_before_the_next_frame() {
         use crate::{api::ApiClient, auth::Credential, screens};
+        type View = fn(&mut Container<'_>, &ApiClient, &mut TableSelection);
 
         let mut server = mockito::Server::new();
         let responses = [
@@ -195,14 +251,13 @@ mod tests {
             "s",
         )
         .unwrap();
-        type View = fn(&mut Container<'_>, &ApiClient, &mut TableSelection);
         let views: [(&str, View); 6] = [
             ("overview", screens::overview::draw_overview_scrolled),
             ("cash_flow", screens::cash_flow::render_scrolled),
             ("projection", screens::projection::render_scrolled),
             ("net_worth", screens::net_worth::render_scrolled),
             ("accounts_cards", |ui, api, selection| {
-                screens::accounts_cards::render_scrolled(ui, api, false, selection)
+                screens::accounts_cards::render_scrolled(ui, api, false, selection);
             }),
             ("settings", |ui, api, selection| {
                 screens::settings::render_scrolled(
@@ -210,7 +265,7 @@ mod tests {
                     api,
                     screens::settings::SettingsModal::None,
                     selection,
-                )
+                );
             }),
         ];
         for (name, view) in views {
@@ -343,7 +398,7 @@ mod tests {
                     "Sincronizado".into(),
                     false,
                     |panel| {
-                        crate::screens::recurring::render_with_state(panel, &mut recurring, &api)
+                        crate::screens::recurring::render_with_state(panel, &mut recurring, &api);
                     },
                 );
             });
@@ -412,59 +467,4 @@ mod tests {
             assert!(text.contains("Ajuda"));
         }
     }
-}
-
-#[must_use]
-pub fn next_row(selected: Option<usize>, count: usize, direction: i8) -> Option<usize> {
-    if count == 0 {
-        return None;
-    }
-    Some(match selected {
-        None => 0,
-        Some(index) if direction < 0 => index.saturating_sub(1).min(count - 1),
-        Some(index) => index.saturating_add(1).min(count - 1),
-    })
-}
-
-#[must_use]
-pub fn modal_events(
-    events: &[hqtui::input::InputEvent],
-    size: hqtui::terminal::TerminalSize,
-    dialog: Option<&ModalOptions>,
-) -> Vec<hqtui::input::InputEvent> {
-    use hqtui::input::{InputEvent, KeyEvent, MouseAction, MouseButton};
-    let mut result = events.to_vec();
-    let Some(dialog) = dialog else { return result };
-    if dialog.buttons.is_empty() {
-        return result;
-    }
-    let width = dialog
-        .width
-        .unwrap_or(48)
-        .min(size.columns.saturating_sub(2));
-    let lines = dialog.message.as_deref().map_or(0, |message| {
-        hqtui::unicode::wrap(message, width.saturating_sub(4)).len()
-    });
-    let height = dialog
-        .height
-        .unwrap_or(lines + 5)
-        .min(size.rows.saturating_sub(2));
-    let left = size.columns.saturating_sub(width) / 2;
-    let top = size.rows.saturating_sub(height) / 2;
-    let widths: Vec<usize> = dialog
-        .buttons
-        .iter()
-        .map(|button| hqtui::unicode::string_width(&button.label) + 4)
-        .collect();
-    let total = widths.iter().sum::<usize>() + widths.len().saturating_sub(1) * 2;
-    let mut x = left + 1 + width.saturating_sub(2).saturating_sub(total) / 2;
-    let y = top + height.saturating_sub(3);
-    for (index, button_width) in widths.into_iter().enumerate() {
-        if events.iter().any(|event| matches!(event, InputEvent::Mouse(mouse) if mouse.action == MouseAction::Press && mouse.button == MouseButton::Left && mouse.y == y && mouse.x >= x && mouse.x < x + button_width)) {
-            let name = if index == 0 { "escape" } else { "enter" };
-            result.push(InputEvent::Key(KeyEvent { name: name.into(), key: name.into(), raw: String::new(), char: None, ctrl: false, alt: false, shift: false }));
-        }
-        x += button_width + 2;
-    }
-    result
 }

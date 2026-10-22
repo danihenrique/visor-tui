@@ -84,3 +84,6 @@ The smoke driver runs the real binary in 120×40, 80×24 and 60×18 terminals ag
 a loopback fixture, with temporary configuration and mock credentials. It exercises
 create/edit/delete, cancellation, filters, search, CSV export, refresh, modal input,
 space switching and idle behavior beyond the cache TTL. No real account is used.
+
+Verified: build, all-target Clippy with warnings denied, 101 Rust tests and the
+three-size terminal smoke run, including the 61-second idle check.

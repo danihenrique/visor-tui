@@ -131,13 +131,13 @@ mod tests {
         .unwrap();
         let mut selection = TableSelection::default();
         let first = hqtui::testing::render_to_text(56, 10, "dark", |ui| {
-            render_scrolled(ui, &api, SettingsModal::None, &mut selection)
+            render_scrolled(ui, &api, SettingsModal::None, &mut selection);
         });
         assert!(first.contains("Daniel"), "{first}");
         assert!(first.contains("daniel@example.test"), "{first}");
         selection.move_by(isize::MAX);
         let last = hqtui::testing::render_to_text(56, 10, "dark", |ui| {
-            render_scrolled(ui, &api, SettingsModal::None, &mut selection)
+            render_scrolled(ui, &api, SettingsModal::None, &mut selection);
         });
         assert!(last.contains("credentials.json"), "{last}");
         me.assert();

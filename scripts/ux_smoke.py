@@ -172,6 +172,13 @@ class Terminal:
     def text(self):
         return "\n".join(self.screen.display)
 
+    def body_cells(self):
+        return tuple(
+            self.screen.buffer[row][column]
+            for row in range(2, self.rows - 2)
+            for column in range(self.columns)
+        )
+
     def expect(self, text):
         assert text in self.text(), f"Missing {text!r} at {self.columns}x{self.rows}:\n{self.text()}"
 
@@ -329,6 +336,9 @@ def run(binary, captures, baseline=False, check_ttl=False):
                             terminal.expect(expected[key])
                             assert len(Fixture.requests) == request_count, "Scrolling made a request"
                             terminal.capture(captures, f"scrolled-{key.replace('=', 'settings')}")
+                            bottom = terminal.body_cells()
+                            terminal.send("k")
+                            assert terminal.body_cells() != bottom, "Repeated down keys prevented moving up from the last row"
                         if key == "0":
                             terminal.send("\x1b[C")
                             assert any("/cards/card-2/bills" in r[1] for r in Fixture.requests), "Arrow did not select next card"

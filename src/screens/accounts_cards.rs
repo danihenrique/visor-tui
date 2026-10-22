@@ -180,12 +180,12 @@ mod tests {
         let cards: Vec<Card> = serde_json::from_value(serde_json::json!([{"id":"c","name":"Cartão","credit_limit":"20000.00","current_bill_due_date":"2026-11-01"}])).unwrap();
         let mut selection = TableSelection::default();
         let text = hqtui::testing::render_to_text(56, 10, "dark", |ui| {
-            render_content(ui, &accounts, &cards, false, &mut selection)
+            render_content(ui, &accounts, &cards, false, &mut selection);
         });
         assert!(text.contains("12.345,67 BRL"), "{text}");
         selection.move_by(isize::MAX);
         let text = hqtui::testing::render_to_text(56, 10, "dark", |ui| {
-            render_content(ui, &accounts, &cards, false, &mut selection)
+            render_content(ui, &accounts, &cards, false, &mut selection);
         });
         assert!(text.contains("2026-11-01"), "{text}");
     }
