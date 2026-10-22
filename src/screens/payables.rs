@@ -1,122 +1,81 @@
-use hqtui::color::Color;
 use hqtui::prelude::*;
-use hqtui::unicode::Align;
-use hqtui::widgets::{ButtonOptions, ButtonVariant, TableColumn, TableOptions, TableRow};
 
-use crate::api::{ApiClient, ApiError};
+use crate::api::ApiClient;
 use crate::models::InstallmentPlan;
+use crate::presentation::{
+    Metric, TableSelection, Tone, format_currency, metric_strip, money_total,
+};
 
-const COLOR_NEGATIVE: Color = Color::rgb(239, 68, 68);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum Tab {
+    #[default]
     All,
     Active,
     Completed,
 }
 
-fn format_money(amount: Option<&str>, currency: Option<&str>) -> String {
-    crate::presentation::format_currency(amount, currency)
-}
+impl Tab {
+    fn accepts(self, plan: &InstallmentPlan) -> bool {
+        match self {
+            Self::All => true,
+            Self::Active => matches!(
+                plan.status.as_deref(),
+                Some("active" | "Active" | "ativo" | "Ativo")
+            ),
+            Self::Completed => matches!(
+                plan.status.as_deref(),
+                Some(
+                    "completed"
+                        | "Completed"
+                        | "concluído"
+                        | "Concluído"
+                        | "concluido"
+                        | "Concluido"
+                )
+            ),
+        }
+    }
 
-fn format_date(date: Option<&str>) -> String {
-    match date {
-        Some(d) if !d.is_empty() => d.to_string(),
-        _ => "—".to_string(),
+    fn next(self) -> Self {
+        match self {
+            Self::All => Self::Active,
+            Self::Active => Self::Completed,
+            Self::Completed => Self::All,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::All => Self::Completed,
+            Self::Active => Self::All,
+            Self::Completed => Self::Active,
+        }
     }
 }
 
-fn format_progress(paid: Option<u32>, total: Option<u32>) -> String {
-    match (paid, total) {
-        (Some(p), Some(t)) => format!("{p}/{t}"),
-        (Some(p), None) => format!("{p}/?"),
-        (None, Some(t)) => format!("?/{t}"),
-        (None, None) => "—".to_string(),
+fn progress(plan: &InstallmentPlan) -> String {
+    match (plan.paid_installments, plan.total_installments) {
+        (Some(paid), Some(total)) => format!("{paid}/{total}"),
+        (Some(paid), None) => format!("{paid}/?"),
+        (None, Some(total)) => format!("?/{total}"),
+        (None, None) => "—".into(),
     }
 }
 
-fn status_label(status: Option<&str>) -> String {
-    match status {
-        Some(s) if !s.is_empty() => s.to_string(),
-        _ => "—".to_string(),
+fn status_label(plan: &InstallmentPlan) -> &str {
+    if Tab::Active.accepts(plan) {
+        "Ativo"
+    } else if Tab::Completed.accepts(plan) {
+        "Concluído"
+    } else {
+        plan.status.as_deref().unwrap_or("—")
     }
-}
-
-#[derive(Clone)]
-struct PayableRowData {
-    description: String,
-    progress: String,
-    installment_amount: String,
-    total: String,
-    remaining: String,
-    next_due: String,
-    status: String,
-}
-
-fn build_row_data(items: &[InstallmentPlan]) -> Vec<PayableRowData> {
-    items
-        .iter()
-        .map(|item| {
-            let currency = item.currency_code.as_deref();
-            let description = item
-                .description
-                .clone()
-                .unwrap_or_else(|| "Sem descrição".to_string());
-            let progress = format_progress(item.paid_installments, item.total_installments);
-            let installment_amount = format_money(item.installment_amount.as_deref(), currency);
-            let total = format_money(item.total_amount.as_deref(), currency);
-            let remaining = format_money(item.remaining_amount.as_deref(), currency);
-            let next_due = format_date(item.next_due_date.as_deref());
-            let status = status_label(item.status.as_deref());
-            PayableRowData {
-                description,
-                progress,
-                installment_amount,
-                total,
-                remaining,
-                next_due,
-                status,
-            }
-        })
-        .collect()
-}
-
-fn table_columns() -> Vec<TableColumn> {
-    vec![
-        TableColumn::new("Descrição").width(Size::Fill),
-        TableColumn::new("Parcelas")
-            .width(Size::Cells(10))
-            .align(Align::Center),
-        TableColumn::new("Valor Parcela")
-            .width(Size::Cells(18))
-            .align(Align::Right),
-        TableColumn::new("Total")
-            .width(Size::Cells(18))
-            .align(Align::Right),
-        TableColumn::new("Restante")
-            .width(Size::Cells(18))
-            .align(Align::Right),
-        TableColumn::new("Próximo Vencimento")
-            .width(Size::Cells(18))
-            .align(Align::Right),
-        TableColumn::new("Status")
-            .width(Size::Cells(12))
-            .align(Align::Center),
-    ]
-}
-
-fn draw_error(ui: &mut Container<'_>, err: &ApiError) {
-    let err_msg = format!("Falha ao carregar contas a pagar: {err}");
-    ui.panel(Panel::new().title("Erro"), move |p| {
-        p.styled_text(&err_msg, TextStyle::new().fg(COLOR_NEGATIVE));
-        p.label("Verifique sua conexão e credenciais.");
-    });
 }
 
 #[derive(Default)]
 pub struct PayablesScreen {
-    tab: usize,
-    selected: Option<usize>,
+    tab: Tab,
+    selection: TableSelection,
 }
 
 impl PayablesScreen {
@@ -125,209 +84,322 @@ impl PayablesScreen {
             if let hqtui::input::InputEvent::Key(key) = event {
                 match key.name.as_str() {
                     "left" | "h" => {
-                        self.tab = (self.tab + 2) % 3;
-                        self.selected = None;
+                        self.tab = self.tab.previous();
+                        self.selection = TableSelection::default();
                     }
                     "right" | "l" => {
-                        self.tab = (self.tab + 1) % 3;
-                        self.selected = None;
+                        self.tab = self.tab.next();
+                        self.selection = TableSelection::default();
                     }
-                    "down" | "j" => {
-                        self.selected =
-                            Some(self.selected.map_or(0, |index| index.saturating_add(1)));
-                    }
-                    "up" | "k" => {
-                        self.selected = self.selected.map(|index| index.saturating_sub(1));
-                    }
+                    "down" | "j" => self.selection.move_by(1),
+                    "up" | "k" => self.selection.move_by(-1),
                     _ => {}
                 }
             }
         }
-        for (index, id) in ["tab_all", "tab_active", "tab_completed"]
-            .iter()
-            .enumerate()
-        {
+        for (tab, id) in [
+            (Tab::All, "tab_all"),
+            (Tab::Active, "tab_active"),
+            (Tab::Completed, "tab_completed"),
+        ] {
             if app.pressed(id) {
-                self.tab = index;
-                self.selected = None;
+                self.tab = tab;
+                self.selection = TableSelection::default();
             }
         }
     }
 }
 
 pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
-    render_with_state(ui, api, &PayablesScreen::default());
+    render_with_state(ui, api, &mut PayablesScreen::default());
 }
 
-pub fn render_with_state(ui: &mut Container<'_>, api: &ApiClient, screen: &PayablesScreen) {
-    let plans_result = api.installment_plans(None);
-
-    let plans = match plans_result {
-        Ok(data) => data,
-        Err(ref e) => {
-            draw_error(ui, e);
+pub fn render_with_state(ui: &mut Container<'_>, api: &ApiClient, screen: &mut PayablesScreen) {
+    let theme = ui.theme().clone();
+    let plans = match api.installment_plans(None) {
+        Ok(plans) => plans,
+        Err(error) => {
+            ui.panel(
+                Panel::new()
+                    .title("Contas a pagar")
+                    .border(BorderStyle::Rounded),
+                move |panel| {
+                    panel.styled_text(
+                        &format!("Não foi possível carregar os parcelamentos. {error}"),
+                        TextStyle::new().fg(theme.danger),
+                    );
+                    panel.label("Pressione r para tentar novamente.");
+                },
+            );
             return;
         }
     };
-
-    // Default tab
-    let active_tab = match screen.tab {
-        1 => Tab::Active,
-        2 => Tab::Completed,
-        _ => Tab::All,
-    };
-
-    // Pre-compute all row data before entering closures
-    let all_rows = build_row_data(&plans);
-
-    // Filter rows by tab
-    let active_rows: Vec<PayableRowData> = all_rows
+    let all_count = plans.len();
+    let active_count = plans
         .iter()
-        .filter(|r| {
-            r.status == "active"
-                || r.status == "Active"
-                || r.status == "ativo"
-                || r.status == "Ativo"
-        })
-        .cloned()
-        .collect();
-
-    let completed_rows: Vec<PayableRowData> = all_rows
+        .filter(|plan| Tab::Active.accepts(plan))
+        .count();
+    let completed_count = plans
         .iter()
-        .filter(|r| {
-            r.status == "completed"
-                || r.status == "Completed"
-                || r.status == "concluído"
-                || r.status == "Concluído"
-                || r.status == "concluido"
-                || r.status == "Concluido"
-        })
-        .cloned()
-        .collect();
-
-    let all_count = all_rows.len();
-    let active_count = active_rows.len();
-    let completed_count = completed_rows.len();
-
-    let columns = table_columns();
-
-    // Build table rows for each tab
-    let all_table_rows: Vec<TableRow> = all_rows
+        .filter(|plan| Tab::Completed.accepts(plan))
+        .count();
+    let current: Vec<_> = plans
         .iter()
-        .map(|r| {
-            TableRow::new([
-                r.description.clone(),
-                r.progress.clone(),
-                r.installment_amount.clone(),
-                r.total.clone(),
-                r.remaining.clone(),
-                r.next_due.clone(),
-                r.status.clone(),
-            ])
-        })
+        .filter(|plan| screen.tab.accepts(plan))
         .collect();
-
-    let active_table_rows: Vec<TableRow> = active_rows
-        .iter()
-        .map(|r| {
-            TableRow::new([
-                r.description.clone(),
-                r.progress.clone(),
-                r.installment_amount.clone(),
-                r.total.clone(),
-                r.remaining.clone(),
-                r.next_due.clone(),
-                r.status.clone(),
-            ])
-        })
-        .collect();
-
-    let completed_table_rows: Vec<TableRow> = completed_rows
-        .iter()
-        .map(|r| {
-            TableRow::new([
-                r.description.clone(),
-                r.progress.clone(),
-                r.installment_amount.clone(),
-                r.total.clone(),
-                r.remaining.clone(),
-                r.next_due.clone(),
-                r.status.clone(),
-            ])
-        })
-        .collect();
-
-    // Pre-compute tab labels with counts
-    let all_label = format!("Todos ({all_count})");
-    let active_label = format!("Ativos ({active_count})");
-    let completed_label = format!("Concluídos ({completed_count})");
-
-    // Determine button variants based on active tab
-    let all_variant = if active_tab == Tab::All {
-        ButtonVariant::Primary
-    } else {
-        ButtonVariant::Ghost
-    };
-    let active_variant = if active_tab == Tab::Active {
-        ButtonVariant::Primary
-    } else {
-        ButtonVariant::Ghost
-    };
-    let completed_variant = if active_tab == Tab::Completed {
-        ButtonVariant::Primary
-    } else {
-        ButtonVariant::Ghost
-    };
-
-    // Select the correct table rows and empty message based on active tab
-    let (current_table_rows, empty_msg) = match active_tab {
-        Tab::All => (all_table_rows, "Nenhum parcelamento encontrado."),
-        Tab::Active => (active_table_rows, "Nenhum parcelamento ativo encontrado."),
-        Tab::Completed => (
-            completed_table_rows,
-            "Nenhum parcelamento concluído encontrado.",
+    screen.selection.set_row_count(current.len());
+    let selected = screen.selection.selected();
+    let detail = selected
+        .and_then(|index| current.get(index))
+        .map(|plan| (*plan).clone());
+    let metrics = vec![
+        Metric::new(
+            "Saldo restante",
+            money_total(current.iter().map(|plan| {
+                (
+                    plan.remaining_amount.as_deref(),
+                    plan.currency_code.as_deref(),
+                )
+            })),
+            Tone::Negative,
         ),
-    };
-    let has_rows = !current_table_rows.is_empty();
-    let selected = screen
-        .selected
-        .map(|index| index.min(current_table_rows.len().saturating_sub(1)));
-
-    ui.column(Column::new().gap(1), move |col| {
-        // Tab buttons row
-        col.row(Row::new().size(Size::Cells(1)).gap(1), move |r| {
-            r.button(
-                ButtonOptions::new(all_label.clone()).variant(all_variant),
-                "tab_all",
-            );
-            r.button(
-                ButtonOptions::new(active_label.clone()).variant(active_variant),
-                "tab_active",
-            );
-            r.button(
-                ButtonOptions::new(completed_label.clone()).variant(completed_variant),
-                "tab_completed",
-            );
-        });
-
-        // Data panel
-        col.panel(Panel::new().title("Contas a Pagar"), move |p| {
-            if has_rows {
-                p.table(
-                    TableOptions {
-                        columns: columns.clone(),
-                        rows: current_table_rows.clone(),
-                        header: true,
-                        zebra: true,
-                        selected,
-                        follow_selection: true,
-                        ..Default::default()
-                    },
-                    "",
+        Metric::new(
+            "Total contratado",
+            money_total(
+                current
+                    .iter()
+                    .map(|plan| (plan.total_amount.as_deref(), plan.currency_code.as_deref())),
+            ),
+            Tone::Neutral,
+        ),
+        Metric::new("Parcelamentos", current.len().to_string(), Tone::Accent),
+    ];
+    let compact = ui.width() < 85;
+    let rows = current
+        .into_iter()
+        .map(|plan| {
+            let mut cells = vec![
+                plan.description
+                    .clone()
+                    .unwrap_or_else(|| "Sem descrição".into()),
+                progress(plan),
+                format_currency(
+                    plan.remaining_amount.as_deref(),
+                    plan.currency_code.as_deref(),
+                ),
+                plan.next_due_date.clone().unwrap_or_else(|| "—".into()),
+            ];
+            if !compact {
+                cells.push(status_label(plan).into());
+            }
+            let mut row = TableRow::new(cells);
+            row.cell_colors = vec![
+                None,
+                Some(theme.muted),
+                Some(theme.danger),
+                None,
+                Some(if Tab::Completed.accepts(plan) {
+                    theme.success
+                } else {
+                    theme.muted
+                }),
+            ];
+            row
+        })
+        .collect::<Vec<_>>();
+    let active_tab = screen.tab;
+    let show_detail = ui.height() >= 16;
+    let compact_detail = detail.as_ref().map(|plan| {
+        [
+            format!(
+                "Parcela {} · {}",
+                format_currency(
+                    plan.installment_amount.as_deref(),
+                    plan.currency_code.as_deref()
+                ),
+                status_label(plan)
+            ),
+            format!(
+                "Total {}",
+                format_currency(plan.total_amount.as_deref(), plan.currency_code.as_deref())
+            ),
+        ]
+    });
+    ui.column(Column::new().gap(usize::from(show_detail)), move |col| {
+        if show_detail {
+            metric_strip(col, metrics);
+        }
+        col.row(Row::new().size(Size::Cells(1)).gap(1), move |row| {
+            for (tab, id, label) in [
+                (Tab::All, "tab_all", format!("Todos {all_count}")),
+                (Tab::Active, "tab_active", format!("Ativos {active_count}")),
+                (
+                    Tab::Completed,
+                    "tab_completed",
+                    format!("Concluídos {completed_count}"),
+                ),
+            ] {
+                row.button(
+                    ButtonOptions::new(label).variant(if active_tab == tab {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Ghost
+                    }),
+                    id,
                 );
-            } else {
-                p.label(empty_msg);
             }
         });
+        col.panel(
+            Panel::new()
+                .title("Contas a pagar")
+                .border(BorderStyle::Rounded)
+                .footer("←/→ Status  j/k Selecionar  r Atualizar"),
+            move |panel| {
+                if rows.is_empty() {
+                    panel.text("Nenhum parcelamento neste filtro.");
+                    panel.label("Use ←/→ para consultar outros status.");
+                } else {
+                    let mut columns = vec![
+                        TableColumn::new("Descrição").width(Size::Fill),
+                        TableColumn::new("Pagas")
+                            .width(Size::Cells(7))
+                            .align(Align::Center),
+                        TableColumn::new("Restante")
+                            .width(Size::Cells(17))
+                            .align(Align::Right),
+                        TableColumn::new("Próxima").width(Size::Cells(10)),
+                    ];
+                    if !compact {
+                        columns.push(TableColumn::new("Status").width(Size::Cells(10)));
+                    }
+                    panel.table(
+                        TableOptions {
+                            columns,
+                            rows,
+                            selected,
+                            follow_selection: true,
+                            scrollbar: true,
+                            header_color: Some(theme.muted),
+                            ..Default::default()
+                        },
+                        "payables:table",
+                    );
+                }
+            },
+        );
+        if show_detail && let Some(plan) = detail {
+            col.panel(
+                Panel::new()
+                    .title(
+                        plan.description
+                            .clone()
+                            .unwrap_or_else(|| "Parcelamento selecionado".into()),
+                    )
+                    .border(BorderStyle::Rounded)
+                    .size(Size::Cells(4)),
+                move |panel| {
+                    if let (Some(paid), Some(total)) =
+                        (plan.paid_installments, plan.total_installments)
+                        && total > 0
+                    {
+                        panel.meter(MeterOptions {
+                            value: f64::from(paid) / f64::from(total),
+                            label: Some("Pagas".into()),
+                            text: Some(progress(&plan)),
+                            color: Some(theme.success),
+                            ..Default::default()
+                        });
+                    } else {
+                        panel.label("Progresso indisponível");
+                    }
+                    panel.label(&format!(
+                        "Parcela {} · Total {} · {}",
+                        format_currency(
+                            plan.installment_amount.as_deref(),
+                            plan.currency_code.as_deref()
+                        ),
+                        format_currency(
+                            plan.total_amount.as_deref(),
+                            plan.currency_code.as_deref()
+                        ),
+                        status_label(&plan)
+                    ));
+                },
+            );
+        }
+        if !show_detail && let Some(lines) = compact_detail {
+            col.sized(Size::Cells(2), move |details| {
+                details.column(Column::new(), move |body| {
+                    for line in lines {
+                        body.label(&line);
+                    }
+                });
+            });
+        }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_payables_keep_installment_total_and_status_visible() {
+        let mut server = mockito::Server::new();
+        let mock = server.mock("GET", "/v1/spaces/space/installment-plans").with_status(200).with_body(serde_json::json!({"data":[{"id":"p", "description":"Notebook", "installment_amount":"500", "total_amount":"5000", "remaining_amount":"3000", "paid_installments":4, "total_installments":10, "next_due_date":"2026-11-02", "status":"active"}]}).to_string()).create();
+        let api = ApiClient::for_test(
+            &server.url(),
+            crate::auth::Credential::PersonalToken {
+                token: "test-only".into(),
+            },
+            "space",
+        )
+        .unwrap();
+        let mut screen = PayablesScreen::default();
+        for (width, height) in [(56, 10), (60, 18), (80, 24)] {
+            let text = hqtui::testing::render_to_text(width, height, "dark", |ui| {
+                render_with_state(ui, &api, &mut screen);
+            });
+            for value in [
+                "Notebook",
+                "500,00 BRL",
+                "5.000,00 BRL",
+                "3.000,00 BRL",
+                "Ativo",
+                "2026-11-02",
+            ] {
+                assert!(
+                    text.contains(value),
+                    "Missing {value} at {width}x{height}\n{text}"
+                );
+            }
+        }
+        mock.assert();
+    }
+
+    #[test]
+    fn selection_moves_up_immediately_after_reaching_last_payable() {
+        let mut screen = PayablesScreen::default();
+        screen.selection.set_row_count(3);
+        for _ in 0..40 {
+            screen.selection.move_by(1);
+        }
+        assert_eq!(screen.selection.selected(), Some(2));
+        screen.selection.move_by(-1);
+        assert_eq!(screen.selection.selected(), Some(1));
+        screen.selection.set_row_count(0);
+        assert_eq!(screen.selection.selected(), None);
+    }
+
+    #[test]
+    fn status_tabs_and_unknown_installments_preserve_api_meaning() {
+        let plan: InstallmentPlan = serde_json::from_value(
+            serde_json::json!({"id":"p", "status":"completed", "total_installments":12}),
+        )
+        .unwrap();
+        assert!(Tab::Completed.accepts(&plan));
+        assert!(!Tab::Active.accepts(&plan));
+        assert_eq!(progress(&plan), "?/12");
+        assert_eq!(status_label(&plan), "Concluído");
+    }
 }

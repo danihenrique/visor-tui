@@ -583,7 +583,7 @@ impl VisorApp {
         let account_selection = &mut self.account_selection;
         let summary_selection = &mut self.summary_selection;
         let bills_screen = &self.bills_screen;
-        let payables_screen = &self.payables_screen;
+        let payables_screen = &mut self.payables_screen;
         self.app.draw(move |frame| {
             presentation::shell(frame.ui, current, space, status, modal_open, move |panel| {
                 match current {
