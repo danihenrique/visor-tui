@@ -143,45 +143,12 @@ fn status_display(status: Option<&str>, paused: bool, requires_reauth: bool) -> 
 }
 
 pub fn render_with_state(ui: &mut Container<'_>, screen: &mut ConnectionsScreen, api: &ApiClient) {
+    use crate::presentation::{Metric, Tone, metric_strip};
     screen.load(api);
-
-    let table_rows: Vec<TableRow> = screen
-        .connections
-        .iter()
-        .map(|c| {
-            let provider = c
-                .provider_name
-                .as_deref()
-                .unwrap_or("(desconhecido)")
-                .to_string();
-            let (status_text, _status_color) =
-                status_display(c.status.as_deref(), c.paused, c.requires_reauth);
-            let last_sync = format_date(c.last_successful_sync_at.as_deref());
-            let next_sync = format_date(c.next_auto_sync_at.as_deref());
-            let accounts_count = c.account_ids.len().to_string();
-            TableRow::new([provider, status_text, last_sync, next_sync, accounts_count])
-        })
-        .collect();
-
-    let columns = vec![
-        TableColumn::new("Provedor").width(Size::Fill),
-        TableColumn::new("Status")
-            .width(Size::Cells(16))
-            .align(Align::Left),
-        TableColumn::new("Última Sync")
-            .width(Size::Cells(18))
-            .align(Align::Center),
-        TableColumn::new("Próxima Sync")
-            .width(Size::Cells(18))
-            .align(Align::Center),
-        TableColumn::new("Contas")
-            .width(Size::Cells(8))
-            .align(Align::Center),
-    ];
-
-    let has_rows = !table_rows.is_empty();
-    let conn_count = screen.connections.len();
-    let active_count = screen
+    let wide = ui.width() >= 95;
+    let show_metrics = ui.height() >= 15;
+    let total = screen.connections.len();
+    let active = screen
         .connections
         .iter()
         .filter(|c| {
@@ -193,49 +160,135 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut ConnectionsScreen,
                 )
         })
         .count();
-    let header_label = format!("Conexões ({conn_count} total, {active_count} ativas)");
-    let error_msg = screen.error.clone();
-    let loading = screen.loading;
-    let selected = screen.selected_index;
-
-    ui.column(Column::new().gap(1), move |col| {
-        // Error display
-        if let Some(err) = error_msg {
-            col.panel(Panel::new().title("Erro"), move |p| {
-                p.styled_text(&err, TextStyle::new().fg(COLOR_NEGATIVE));
-            });
-        }
-
-        // Connections table
-        col.panel(Panel::new().title(header_label), move |p| {
-            if loading {
-                p.text("Carregando...");
-            } else if has_rows {
-                p.table(
-                    TableOptions {
-                        follow_selection: true,
-                        columns: columns.clone(),
-                        rows: table_rows.clone(),
-                        header: true,
-                        zebra: true,
-                        selected,
-                        ..Default::default()
-                    },
-                    "",
-                );
-            } else {
-                p.styled_text(
-                    "Nenhuma conexão encontrada.",
-                    TextStyle::new().fg(COLOR_NEUTRAL),
-                );
+    let attention = screen
+        .connections
+        .iter()
+        .filter(|c| c.requires_reauth || matches!(c.status.as_deref(), Some("error" | "failed")))
+        .count();
+    let accounts: usize = screen.connections.iter().map(|c| c.account_ids.len()).sum();
+    let rows = screen
+        .connections
+        .iter()
+        .map(|connection| {
+            let (status, color) = status_display(
+                connection.status.as_deref(),
+                connection.paused,
+                connection.requires_reauth,
+            );
+            let mut cells = vec![
+                connection
+                    .provider_name
+                    .clone()
+                    .unwrap_or_else(|| "Instituição não informada".into()),
+                status,
+                format_date(connection.last_successful_sync_at.as_deref()),
+            ];
+            if wide {
+                cells.push(format_date(connection.next_auto_sync_at.as_deref()));
             }
-        });
-
-        // Key hints
-        col.row(Row::new(), move |r| {
-            r.styled_text(
-                "↑↓/jk: Navegar | r: Atualizar",
-                TextStyle::new().fg(COLOR_NEUTRAL),
+            cells.push(connection.account_ids.len().to_string());
+            let mut colors = vec![None; cells.len()];
+            colors[1] = Some(color);
+            TableRow {
+                cells,
+                cell_colors: colors,
+                ..Default::default()
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut columns = vec![
+        TableColumn::new("Instituição").width(Size::Fill),
+        TableColumn::new("Situação").width(Size::Cells(15)),
+        TableColumn::new("Atualizada em").width(Size::Cells(17)),
+    ];
+    if wide {
+        columns.push(TableColumn::new("Próxima").width(Size::Cells(17)));
+    }
+    columns.push(
+        TableColumn::new("Contas")
+            .width(Size::Cells(6))
+            .align(Align::Right),
+    );
+    let selected = screen.selected_index;
+    let detail = selected.and_then(|i| screen.connections.get(i)).map(|c| {
+        let action = if c.requires_reauth {
+            "Renove a autorização no Visor para voltar a sincronizar."
+        } else if c.paused {
+            "Conexão pausada. Os dados exibidos são da última atualização."
+        } else {
+            "Atualização automática da instituição conectada."
+        };
+        (
+            c.provider_name.clone().unwrap_or_default(),
+            action.to_owned(),
+            format!(
+                "Próxima sincronização {}",
+                format_date(c.next_auto_sync_at.as_deref())
+            ),
+        )
+    });
+    let error = screen.error.clone();
+    let loading = screen.loading;
+    let muted = ui.theme().muted;
+    ui.column(Column::new().gap(1), move |col| {
+        if show_metrics {
+            metric_strip(
+                col,
+                vec![
+                    Metric::new("Ativas", format!("{active} de {total}"), Tone::Positive),
+                    Metric::new(
+                        "Precisam de atenção",
+                        attention.to_string(),
+                        if attention > 0 {
+                            Tone::Warning
+                        } else {
+                            Tone::Neutral
+                        },
+                    ),
+                    Metric::new("Contas vinculadas", accounts.to_string(), Tone::Accent),
+                ],
+            );
+        }
+        col.panel(
+            Panel::new().title("Instituições conectadas"),
+            move |panel| {
+                if loading {
+                    panel.label("Atualizando conexões…");
+                } else if let Some(error) = error {
+                    panel.styled_text(&error, TextStyle::new().fg(COLOR_NEGATIVE));
+                } else if rows.is_empty() {
+                    panel.text("Nenhuma instituição conectada.");
+                    panel.label("Conecte uma conta pelo Visor e pressione r para atualizar.");
+                } else {
+                    panel.table(
+                        TableOptions {
+                            columns,
+                            rows,
+                            selected,
+                            follow_selection: true,
+                            scrollbar: true,
+                            zebra: true,
+                            ..Default::default()
+                        },
+                        "connections:table",
+                    );
+                }
+            },
+        );
+        if let Some((provider, action, next)) = detail {
+            col.panel(
+                Panel::new().title(provider).size(Size::Cells(4)),
+                move |panel| {
+                    panel.styled_text(&action, TextStyle::new().fg(muted));
+                    panel.styled_text(&next, TextStyle::new().fg(muted));
+                },
+            );
+        }
+        col.row(Row::new().size(Size::Cells(1)), move |row| {
+            row.label("j/k Selecionar");
+            row.button(
+                ButtonOptions::new("r Atualizar").variant(ButtonVariant::Ghost),
+                "connections:refresh",
             );
         });
     });
