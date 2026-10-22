@@ -1,186 +1,181 @@
-use hqtui::color::Color;
 use hqtui::prelude::*;
-use hqtui::unicode::Align;
-use hqtui::widgets::{KeyValueOptions, KeyValueRow, TableColumn, TableOptions, TableRow};
+use hqtui::widgets::{TableColumn, TableOptions, TableRow};
 
 use crate::api::{ApiClient, ApiError};
 use crate::models::{Investment, InvestmentSummary};
 
-/// Finance palette: greens for positive balances, reds for negative, neutral for labels.
-const COLOR_POSITIVE: Color = Color::rgb(34, 197, 94); // green-500
-const COLOR_NEGATIVE: Color = Color::rgb(239, 68, 68); // red-500
-const COLOR_ACCENT: Color = Color::rgb(14, 165, 233); // sky-500
-
-fn format_money(amount: Option<&str>, currency: Option<&str>) -> String {
-    crate::presentation::format_currency(amount, currency)
+fn money(value: Option<&str>, currency: Option<&str>) -> String {
+    crate::presentation::format_currency(value, currency)
 }
 
-fn money_color(amount: Option<&str>) -> Option<Color> {
-    match amount {
-        Some(s) => match s.parse::<f64>() {
-            Ok(v) if v > 0.0 => Some(COLOR_POSITIVE),
-            Ok(v) if v < 0.0 => Some(COLOR_NEGATIVE),
-            _ => None,
-        },
-        None => None,
-    }
-}
-
-struct InvestmentRowData {
-    name: String,
-    investment_type: String,
-    category: String,
-    balance_fmt: String,
-    provider: String,
-}
-
-fn build_row_data(items: &[Investment]) -> Vec<InvestmentRowData> {
-    items
-        .iter()
-        .map(|inv| {
-            let currency = inv.currency_code.as_deref();
-            let balance_fmt = format_money(inv.balance.as_deref(), currency);
-            InvestmentRowData {
-                name: inv.name.clone(),
-                investment_type: inv
-                    .investment_type
-                    .clone()
-                    .unwrap_or_else(|| "—".to_string()),
-                category: inv.category.clone().unwrap_or_else(|| "—".to_string()),
-                balance_fmt,
-                provider: inv.provider_name.clone().unwrap_or_else(|| "—".to_string()),
-            }
-        })
-        .collect()
-}
-
-fn table_columns() -> Vec<TableColumn> {
-    vec![
-        TableColumn::new("Nome").width(Size::Fill),
-        TableColumn::new("Tipo")
-            .width(Size::Cells(16))
-            .align(Align::Left),
-        TableColumn::new("Categoria")
-            .width(Size::Cells(16))
-            .align(Align::Left),
-        TableColumn::new("Saldo")
-            .width(Size::Cells(20))
-            .align(Align::Right),
-        TableColumn::new("Provedor")
-            .width(Size::Cells(18))
-            .align(Align::Left),
-    ]
-}
-
-fn render_error(ui: &mut Container<'_>, err: &ApiError) {
-    let err_msg = format!("Falha ao carregar patrimônio: {err}");
-    ui.panel(Panel::new().title("Erro"), move |p| {
-        p.styled_text(&err_msg, TextStyle::new().fg(COLOR_NEGATIVE));
-        p.label("Verifique sua conexão e credenciais.");
-    });
-}
-
-#[allow(clippy::cast_possible_truncation)]
 pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
+    render_scrolled(ui, api, 0);
+}
+
+pub fn render_scrolled(ui: &mut Container<'_>, api: &ApiClient, selected: usize) {
     match api.investments() {
-        Ok((investments, summary)) => render_net_worth_data(ui, &investments, summary.as_ref()),
-        Err(e) => render_error(ui, &e),
+        Ok((investments, summary)) => {
+            render_net_worth_data(ui, &investments, summary.as_ref(), selected);
+        }
+        Err(error) => render_error(ui, &error),
     }
+}
+
+fn render_error(ui: &mut Container<'_>, error: &ApiError) {
+    let message = format!("Falha ao carregar patrimônio: {error}");
+    let danger = ui.theme().danger;
+    ui.panel(Panel::new().title("Erro"), move |panel| {
+        panel.styled_text(&message, TextStyle::new().fg(danger));
+        panel.label("Verifique sua conexão e credenciais.");
+    });
 }
 
 fn render_net_worth_data(
     ui: &mut Container<'_>,
     investments: &[Investment],
     summary: Option<&InvestmentSummary>,
+    selected: usize,
 ) {
-    // Pre-compute summary values before closures
+    let theme = ui.theme().clone();
     let currency = summary
-        .as_ref()
-        .and_then(|s| s.currency_code.clone())
-        .unwrap_or_else(|| "BRL".to_string());
-
-    let total_value_fmt = summary
-        .as_ref()
-        .and_then(|s| s.total_value.as_deref())
+        .and_then(|summary| summary.currency_code.as_deref())
+        .unwrap_or("BRL");
+    let total = summary
+        .and_then(|summary| summary.total_value.as_deref())
         .map_or_else(
             || "—".to_string(),
-            |v| format_money(Some(v), Some(&currency)),
+            |value| money(Some(value), Some(currency)),
         );
-
-    let total_value_color = summary
-        .as_ref()
-        .and_then(|s| s.total_value.as_deref())
-        .and_then(|v| money_color(Some(v)))
-        .unwrap_or(COLOR_ACCENT);
-
-    let investment_count = summary
-        .as_ref()
-        .and_then(|s| s.count)
+    let count = summary
+        .and_then(|summary| summary.count)
         .unwrap_or_else(|| investments.len().try_into().unwrap_or(u32::MAX));
-
-    let count_label = format!("{investment_count}");
-
-    // Pre-compute summary key-value rows
-    let summary_rows = vec![
-        KeyValueRow::new("Valor Total", total_value_fmt.clone()).color(total_value_color),
-        KeyValueRow::new("Investimentos", count_label),
+    let mut rows = vec![
+        TableRow::new(["Valor total", &total]).color(amount_color(
+            summary.and_then(|summary| summary.total_value.as_deref()),
+            &theme,
+        )),
+        TableRow::new(["Investimentos", &count.to_string()]),
     ];
 
-    // Pre-compute table row data
-    let row_data = build_row_data(investments);
-
-    // Build table rows — we cannot color individual cells via TableRow API,
-    // so we embed the formatted balance string directly.
-    let table_rows: Vec<TableRow> = row_data
-        .iter()
-        .map(|r| {
+    if investments.is_empty() {
+        rows.push(TableRow::new(["Investimentos", "Nenhum encontrado."]));
+    }
+    for (index, investment) in investments.iter().enumerate() {
+        rows.push(
             TableRow::new([
-                r.name.clone(),
-                r.investment_type.clone(),
-                r.category.clone(),
-                r.balance_fmt.clone(),
-                r.provider.clone(),
+                format!("INVESTIMENTO {}", index + 1),
+                investment.name.clone(),
             ])
-        })
-        .collect();
+            .color(theme.accent),
+        );
+        rows.push(TableRow::new([
+            "Tipo",
+            investment.investment_type.as_deref().unwrap_or("—"),
+        ]));
+        rows.push(TableRow::new([
+            "Categoria",
+            investment.category.as_deref().unwrap_or("—"),
+        ]));
+        rows.push(
+            TableRow::new([
+                "Saldo",
+                &money(
+                    investment.balance.as_deref(),
+                    investment.currency_code.as_deref(),
+                ),
+            ])
+            .color(amount_color(investment.balance.as_deref(), &theme)),
+        );
+        rows.push(TableRow::new([
+            "Provedor",
+            investment.provider_name.as_deref().unwrap_or("—"),
+        ]));
+    }
+    rows.push(
+        TableRow::new(["Patrimônio líquido", &total]).color(amount_color(
+            summary.and_then(|summary| summary.total_value.as_deref()),
+            &theme,
+        )),
+    );
 
-    let has_rows = !table_rows.is_empty();
-    let columns = table_columns();
-
-    // Pre-compute footer text
-    let footer_total_label = format!("Patrimônio Líquido: {total_value_fmt}");
-    let footer_color = total_value_color;
-
-    ui.column(Column::new().gap(1), move |col| {
-        // Summary panel at top
-        col.panel(Panel::new().title("Resumo do Patrimônio"), move |p| {
-            p.key_values(KeyValueOptions {
-                rows: summary_rows.clone(),
+    ui.panel(Panel::new().title("Patrimônio"), move |panel| {
+        panel.table(
+            TableOptions {
+                columns: vec![
+                    TableColumn::new("Campo").width(Size::Cells(18)),
+                    TableColumn::new("Valor").width(Size::Fill),
+                ],
+                selected: Some(selected.min(rows.len().saturating_sub(1))),
+                rows,
+                header: false,
+                follow_selection: true,
+                scrollbar: true,
+                zebra: true,
                 ..Default::default()
-            });
-        });
-
-        // Investments table
-        col.panel(Panel::new().title("Investimentos"), move |p| {
-            if has_rows {
-                p.table(
-                    TableOptions {
-                        columns: columns.clone(),
-                        rows: table_rows.clone(),
-                        header: true,
-                        zebra: true,
-                        ..Default::default()
-                    },
-                    "",
-                );
-            } else {
-                p.label("Nenhum investimento encontrado.");
-            }
-        });
-
-        // Footer with total
-        col.panel(Panel::new().title("Total"), move |p| {
-            p.styled_text(&footer_total_label, TextStyle::new().fg(footer_color));
-        });
+            },
+            "net_worth_facts",
+        );
     });
+}
+
+fn amount_color(value: Option<&str>, theme: &Theme) -> Color {
+    match value.and_then(|value| value.parse::<f64>().ok()) {
+        Some(amount) if amount > 0.0 => theme.success,
+        Some(amount) if amount < 0.0 => theme.danger,
+        _ => theme.foreground,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hqtui::testing::render_to_text;
+
+    #[test]
+    fn last_investment_details_remain_reachable() {
+        let investments: Vec<Investment> = (0..4)
+            .map(|index| {
+                serde_json::from_value(serde_json::json!({
+                    "id": index.to_string(), "name": format!("Fundo {index}"), "type": "Fundo",
+                    "category": "Renda fixa", "balance": ((index + 1) * 1111).to_string(), "currency_code": "BRL",
+                    "provider_name": format!("Corretora {index}")
+                }))
+                .unwrap()
+            })
+            .collect();
+        let summary: InvestmentSummary = serde_json::from_value(serde_json::json!({
+            "total_value": "11110", "currency_code": "BRL", "count": 4
+        }))
+        .unwrap();
+        for (width, height) in [(60, 18), (80, 24)] {
+            let first = render_to_text(width, height, "dark", |ui| {
+                crate::presentation::shell(
+                    ui,
+                    crate::keymap::Screen::NetWorth,
+                    "Pessoal".into(),
+                    "Ok".into(),
+                    false,
+                    |content| render_net_worth_data(content, &investments, Some(&summary), 0),
+                );
+            });
+            assert!(
+                first.contains("Valor total") && first.contains("11.110,00 BRL"),
+                "{width}x{height}\n{first}"
+            );
+            let last = render_to_text(width, height, "dark", |ui| {
+                crate::presentation::shell(
+                    ui,
+                    crate::keymap::Screen::NetWorth,
+                    "Pessoal".into(),
+                    "Ok".into(),
+                    false,
+                    |content| render_net_worth_data(content, &investments, Some(&summary), 21),
+                );
+            });
+            assert!(
+                last.contains("Corretora 3") && last.contains("4.444,00 BRL"),
+                "{width}x{height}\n{last}"
+            );
+        }
+    }
 }

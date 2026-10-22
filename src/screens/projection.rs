@@ -1,139 +1,174 @@
-use crate::api::ApiClient;
-use hqtui::color::Color;
 use hqtui::prelude::*;
-use hqtui::widgets::{KeyValueOptions, KeyValueRow};
+use hqtui::widgets::{TableColumn, TableOptions, TableRow};
+
+use crate::api::ApiClient;
+use crate::models::OverviewProjection;
+
+fn money(value: Option<&str>, currency: &str) -> String {
+    crate::presentation::format_currency(value, Some(currency))
+}
 
 pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
-    let overview_result = api.overview();
+    render_scrolled(ui, api, 0);
+}
 
-    match overview_result {
+pub fn render_scrolled(ui: &mut Container<'_>, api: &ApiClient, selected: usize) {
+    match api.overview() {
         Ok(overview) => {
-            let currency_code = overview
-                .currency_code
-                .clone()
-                .unwrap_or_else(|| "BRL".to_string());
-
-            if let Some(projection) = overview.projection {
-                // Pre-compute all display strings and colors before entering closures
-                let current_balance_str =
-                    format_money(projection.current_balance.as_deref(), &currency_code);
-                let current_balance_color =
-                    get_color_for_amount(projection.current_balance.as_deref());
-
-                let expected_income_str =
-                    format_money(projection.expected_income.as_deref(), &currency_code);
-                let income_color = Color::rgb(0, 200, 0);
-
-                let (bills_str, installments_str, subscriptions_str, scheduled_str) =
-                    if let Some(ref outflows) = projection.committed_outflows {
-                        (
-                            format_money(outflows.bills.as_deref(), &currency_code),
-                            format_money(outflows.installments.as_deref(), &currency_code),
-                            format_money(outflows.subscriptions.as_deref(), &currency_code),
-                            format_money(outflows.scheduled.as_deref(), &currency_code),
-                        )
-                    } else {
-                        (
-                            String::from("N/A"),
-                            String::from("N/A"),
-                            String::from("N/A"),
-                            String::from("N/A"),
-                        )
-                    };
-
-                let estimated_day_to_day_str =
-                    format_money(projection.estimated_day_to_day.as_deref(), &currency_code);
-                let estimated_day_to_day_color =
-                    get_color_for_amount(projection.estimated_day_to_day.as_deref());
-
-                let projected_balance_str =
-                    format_money(projection.projected_balance.as_deref(), &currency_code);
-                let projected_balance_color =
-                    get_color_for_amount(projection.projected_balance.as_deref());
-
-                let outflow_color = Color::rgb(200, 0, 0);
-
-                // Render the projection UI with move closures
-                ui.column(Column::new().gap(1), move |col| {
-                    col.panel(Panel::new().title("Projeção"), move |p| {
-                        p.key_values(KeyValueOptions {
-                            rows: vec![
-                                KeyValueRow::new("Saldo Atual", current_balance_str)
-                                    .color(current_balance_color),
-                                KeyValueRow::new("Receita Esperada", expected_income_str)
-                                    .color(income_color),
-                            ],
-                            ..Default::default()
-                        });
-
-                        p.divider(DividerOptions::default());
-
-                        p.label("Saídas Comprometidas:");
-                        p.key_values(KeyValueOptions {
-                            rows: vec![
-                                KeyValueRow::new("Contas", bills_str).color(outflow_color),
-                                KeyValueRow::new("Parcelas", installments_str).color(outflow_color),
-                                KeyValueRow::new("Assinaturas", subscriptions_str)
-                                    .color(outflow_color),
-                                KeyValueRow::new("Agendadas", scheduled_str).color(outflow_color),
-                            ],
-                            ..Default::default()
-                        });
-
-                        p.divider(DividerOptions::default());
-
-                        p.key_values(KeyValueOptions {
-                            rows: vec![
-                                KeyValueRow::new("Dia a Dia Estimado", estimated_day_to_day_str)
-                                    .color(estimated_day_to_day_color),
-                                KeyValueRow::new("Saldo Projetado", projected_balance_str)
-                                    .color(projected_balance_color),
-                            ],
-                            ..Default::default()
-                        });
-                    });
-                });
+            if let Some(projection) = &overview.projection {
+                render_projection_data(
+                    ui,
+                    projection,
+                    overview.currency_code.as_deref().unwrap_or("BRL"),
+                    selected,
+                );
             } else {
-                // No projection data available
-                let no_data_msg = "Sem dados de projeção";
-                ui.column(Column::new().gap(1), move |col| {
-                    col.panel(Panel::new().title("Projeção"), move |p| {
-                        p.text(no_data_msg);
-                    });
+                ui.panel(Panel::new().title("Projeção"), |panel| {
+                    panel.text("Sem dados de projeção");
                 });
             }
         }
         Err(error) => {
-            // Handle API errors gracefully
-            let error_msg = format!("Erro ao carregar dados: {error}");
-            let error_color = Color::rgb(200, 0, 0);
-            ui.column(Column::new().gap(1), move |col| {
-                col.panel(Panel::new().title("Erro"), move |p| {
-                    p.styled_text(&error_msg, TextStyle::new().fg(error_color));
-                });
+            let message = format!("Erro ao carregar dados: {error}");
+            let danger = ui.theme().danger;
+            ui.panel(Panel::new().title("Erro"), move |panel| {
+                panel.styled_text(&message, TextStyle::new().fg(danger));
             });
         }
     }
 }
 
-fn format_money(value: Option<&str>, currency_code: &str) -> String {
-    crate::presentation::format_currency(value, Some(currency_code))
+fn render_projection_data(
+    ui: &mut Container<'_>,
+    projection: &OverviewProjection,
+    currency: &str,
+    selected: usize,
+) {
+    let theme = ui.theme().clone();
+    let mut rows = vec![
+        TableRow::new([
+            "Saldo atual",
+            &money(projection.current_balance.as_deref(), currency),
+        ])
+        .color(amount_color(projection.current_balance.as_deref(), &theme)),
+        TableRow::new([
+            "Receita esperada",
+            &money(projection.expected_income.as_deref(), currency),
+        ])
+        .color(theme.success),
+        TableRow::new(["SAÍDAS COMPROMETIDAS", ""]).color(theme.accent),
+    ];
+    let outflows = projection.committed_outflows.as_ref();
+    for (label, value) in [
+        (
+            "Contas",
+            outflows.and_then(|outflows| outflows.bills.as_deref()),
+        ),
+        (
+            "Parcelas",
+            outflows.and_then(|outflows| outflows.installments.as_deref()),
+        ),
+        (
+            "Assinaturas",
+            outflows.and_then(|outflows| outflows.subscriptions.as_deref()),
+        ),
+        (
+            "Agendadas",
+            outflows.and_then(|outflows| outflows.scheduled.as_deref()),
+        ),
+    ] {
+        rows.push(TableRow::new([label, &money(value, currency)]).color(theme.danger));
+    }
+    rows.push(
+        TableRow::new([
+            "Dia a dia estimado",
+            &money(projection.estimated_day_to_day.as_deref(), currency),
+        ])
+        .color(amount_color(
+            projection.estimated_day_to_day.as_deref(),
+            &theme,
+        )),
+    );
+    rows.push(
+        TableRow::new([
+            "Saldo projetado",
+            &money(projection.projected_balance.as_deref(), currency),
+        ])
+        .color(amount_color(
+            projection.projected_balance.as_deref(),
+            &theme,
+        )),
+    );
+
+    ui.panel(Panel::new().title("Projeção"), move |panel| {
+        panel.table(
+            TableOptions {
+                columns: vec![
+                    TableColumn::new("Campo").width(Size::Cells(22)),
+                    TableColumn::new("Valor").width(Size::Fill),
+                ],
+                selected: Some(selected.min(rows.len().saturating_sub(1))),
+                rows,
+                header: false,
+                follow_selection: true,
+                scrollbar: true,
+                zebra: true,
+                ..Default::default()
+            },
+            "projection_facts",
+        );
+    });
 }
 
-/// Determine color based on amount value (green for positive, red for negative)
-fn get_color_for_amount(value: Option<&str>) -> Color {
-    match value {
-        Some(v) => {
-            if let Ok(amount) = v.parse::<f64>() {
-                if amount >= 0.0 {
-                    Color::rgb(0, 200, 0)
-                } else {
-                    Color::rgb(200, 0, 0)
-                }
-            } else {
-                Color::rgb(200, 200, 200) // default gray for invalid values
-            }
+fn amount_color(value: Option<&str>, theme: &Theme) -> Color {
+    match value.and_then(|value| value.parse::<f64>().ok()) {
+        Some(amount) if amount >= 0.0 => theme.success,
+        Some(_) => theme.danger,
+        None => theme.foreground,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hqtui::testing::render_to_text;
+
+    #[test]
+    fn outflows_and_final_balance_remain_reachable() {
+        let projection: OverviewProjection = serde_json::from_value(serde_json::json!({
+            "current_balance": "1200", "expected_income": "300",
+            "committed_outflows": {"bills": "50", "installments": "60", "subscriptions": "70", "scheduled": "80"},
+            "estimated_day_to_day": "-90", "projected_balance": "1150"
+        })).unwrap();
+        for (width, height) in [(60, 18), (80, 24)] {
+            let first = render_to_text(width, height, "dark", |ui| {
+                crate::presentation::shell(
+                    ui,
+                    crate::keymap::Screen::Projection,
+                    "Pessoal".into(),
+                    "Ok".into(),
+                    false,
+                    |content| render_projection_data(content, &projection, "BRL", 0),
+                );
+            });
+            assert!(
+                first.contains("Contas") && first.contains("50,00 BRL"),
+                "{width}x{height}\n{first}"
+            );
+            let last = render_to_text(width, height, "dark", |ui| {
+                crate::presentation::shell(
+                    ui,
+                    crate::keymap::Screen::Projection,
+                    "Pessoal".into(),
+                    "Ok".into(),
+                    false,
+                    |content| render_projection_data(content, &projection, "BRL", usize::MAX),
+                );
+            });
+            assert!(
+                last.contains("Saldo projetado") && last.contains("1.150,00 BRL"),
+                "{width}x{height}\n{last}"
+            );
         }
-        None => Color::rgb(200, 200, 200),
     }
 }
