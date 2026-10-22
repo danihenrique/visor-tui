@@ -7,7 +7,9 @@ Use `--visual-only --screens accounts,goals --sizes 120x40,80x24
 """
 
 import argparse
+import calendar
 import codecs
+from datetime import date, datetime, timedelta, timezone
 import fcntl
 import http.server
 import json
@@ -29,6 +31,9 @@ import pyte
 
 
 ROOT = Path(__file__).resolve().parents[1]
+BRASILIA = timezone(timedelta(hours=-3))
+MONTHS = ("Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro")
+OCTOBER = ("2026-10-01", "2026-10-31")
 TRANSACTION = {
     "id": "tx-1", "account_id": "account-1", "category_id": "category-1",
     "tag_ids": ["tag-1"], "amount": "1234.56", "type": "debit",
@@ -93,6 +98,15 @@ EXTRA_TRANSACTIONS = [
     {**TRANSACTION, "id": "tx-6", "description": "Projeto de design", "category_id": "category-7", "amount": "2500.00", "type": "credit", "tag_ids": [], "transacted_at": "2026-10-17T12:00:00Z"},
     {**TRANSACTION, "id": "tx-7", "description": "Cinema com a família", "category_id": "category-5", "amount": "98.00", "tag_ids": ["tag-4"], "transacted_at": "2026-10-16T12:00:00Z"},
     {**TRANSACTION, "id": "tx-8", "description": "Estorno de compra", "amount": "129.90", "type": "credit", "ignored": True, "transacted_at": "2026-10-15T12:00:00Z"},
+    {**TRANSACTION, "id": "tx-9", "description": "Café no mesmo dia", "amount": "10.44"},
+    {**TRANSACTION, "id": "tx-10", "description": "Último dia setembro", "amount": "99.00", "transacted_at": "2026-09-30T23:59:59-03:00"},
+    {**TRANSACTION, "id": "tx-11", "description": "Ainda setembro UTC", "amount": "77.00", "transacted_at": "2026-10-01T02:59:59Z"},
+    {**TRANSACTION, "id": "tx-12", "description": "Primeiro dia outubro", "amount": "100.00", "transacted_at": "2026-10-01T03:00:00Z"},
+    {**TRANSACTION, "id": "tx-13", "description": "Último dia outubro", "amount": "200.00", "type": "credit", "transacted_at": "2026-11-01T02:59:59Z"},
+    {**TRANSACTION, "id": "tx-14", "description": "Primeiro dia novembro", "amount": "88.00", "transacted_at": "2026-11-01T03:00:00Z"},
+    {**TRANSACTION, "id": "tx-15", "description": "Compra em dólares", "amount": "12.50", "currency_code": "USD"},
+    {**TRANSACTION, "id": "tx-16", "description": "Data sem horário", "amount": "2.50", "transacted_at": "2026-10-22"},
+    {**TRANSACTION, "id": "tx-17", "description": "Receita em dólares", "amount": "20.00", "type": "credit", "currency_code": "USD"},
 ]
 OVERVIEW = {
     "currency_code": "BRL", "period_start": "2026-10-01", "period_end": "2026-10-31",
@@ -102,7 +116,7 @@ OVERVIEW = {
         {"account_id": "account-2", "description": "Condomínio", "amount": "680.00", "due_date": "2026-11-05"},
         {"account_id": "account-1", "description": "Energia elétrica", "amount": "120.00", "due_date": "2026-11-06", "amount_is_estimate": True},
     ],
-    "period": {"income": "11000.00", "expenses": "3962.26", "result": "7037.74"},
+    "period": {"income": "99000.00", "expenses": "98000.00", "result": "1000.00"},
     "projection": {
         "current_balance": "30206.17", "expected_income": "1500.00", "estimated_day_to_day": "800.00", "projected_balance": "26596.17",
         "committed_outflows": {"bills": "3250.00", "installments": "650.00", "subscriptions": "289.90", "scheduled": "120.10"},
@@ -112,6 +126,8 @@ BILLS = [
     {"id": "bill-1", "status": "open", "close_date": "2026-10-25", "due_date": "2026-11-02", "total_amount": "2450.00", "paid_amount": "0.00", "minimum_payment": "367.50", "currency_code": "BRL"},
     {"id": "bill-2", "status": "paid", "close_date": "2026-09-25", "due_date": "2026-10-02", "total_amount": "1890.40", "paid_amount": "1890.40", "currency_code": "BRL"},
     {"id": "bill-3", "status": "paid", "close_date": "2026-08-25", "due_date": "2026-09-02", "total_amount": "2120.00", "paid_amount": "2120.00", "currency_code": "BRL"},
+    {"id": "bill-4", "status": "open", "close_date": "2026-10-10", "due_date": "2026-10-18", "total_amount": "520.00", "paid_amount": "0.00", "currency_code": "BRL"},
+    {"id": "bill-5", "status": "open", "close_date": "2026-10-20", "due_date": "2026-10-31", "total_amount": "360.00", "paid_amount": "0.00", "currency_code": "BRL"},
 ]
 INVESTMENTS = [
     {"id": "investment-1", "name": "Tesouro Selic 2029", "balance": "18765.43", "type": "fixed_income", "source": "connected", "provider_name": "XP Investimentos", "contributes_to_net_worth": True},
@@ -139,6 +155,9 @@ INSTALLMENTS = [
     {"id": "installment-1", "description": "Notebook", "installment_amount": "500.00", "total_amount": "5000.00", "remaining_amount": "3000.00", "total_installments": 10, "paid_installments": 4, "status": "active", "next_due_date": "2026-11-02"},
     {"id": "installment-2", "description": "Passagens para Salvador", "installment_amount": "150.00", "total_amount": "1800.00", "remaining_amount": "1200.00", "total_installments": 12, "paid_installments": 4, "status": "active", "next_due_date": "2026-11-05"},
     {"id": "installment-3", "description": "Sofá da sala", "installment_amount": "320.00", "total_amount": "3200.00", "remaining_amount": "0.00", "total_installments": 10, "paid_installments": 10, "status": "completed", "next_due_date": "2026-10-10"},
+    {"id": "installment-4", "description": "Bicicleta", "installment_amount": "200.00", "total_amount": "2000.00", "remaining_amount": "1400.00", "total_installments": 10, "paid_installments": 3, "status": "active", "next_due_date": "2026-10-22"},
+    {"id": "installment-5", "description": "Curso de idiomas", "installment_amount": "250.00", "total_amount": "3000.00", "remaining_amount": "2000.00", "total_installments": 12, "paid_installments": 4, "status": "active", "next_due_date": "2026-10-31"},
+    {"id": "installment-6", "description": "Vencimento desconhecido", "installment_amount": "10.00", "status": "active"},
 ]
 CONNECTIONS = [
     {"id": "connection-1", "provider_name": "Nubank", "status": "connected", "last_successful_sync_at": "2026-10-22T12:00:00Z", "next_auto_sync_at": "2026-10-22T18:00:00Z", "account_ids": ["account-1"]},
@@ -152,9 +171,44 @@ NOTIFICATIONS = [
 ]
 
 
+def transaction_day(transaction):
+    value = transaction["transacted_at"]
+    if len(value) == 10:
+        return date.fromisoformat(value)
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(BRASILIA).date()
+
+
 class Fixture(http.server.BaseHTTPRequestHandler):
     requests = []
-    transaction = dict(TRANSACTION)
+    errors = []
+    transactions = {}
+    transaction_delay = 0
+
+    @classmethod
+    def reset(cls):
+        cls.requests.clear()
+        cls.errors.clear()
+        cls.transactions = {item["id"]: dict(item) for item in [TRANSACTION, *EXTRA_TRANSACTIONS]}
+        cls.transaction_delay = 0
+
+    def transaction_page(self, query):
+        start = date.fromisoformat(query["from_date"][0])
+        end = date.fromisoformat(query["to_date"][0])
+        data = [item for item in self.transactions.values() if start <= transaction_day(item) <= end]
+        for field in ("account_id", "category_id", "type"):
+            if field in query:
+                data = [item for item in data if item.get(field) == query[field][0]]
+        if "tag_id" in query:
+            data = [item for item in data if query["tag_id"][0] in item.get("tag_ids", [])]
+        if "ignored" in query:
+            data = [item for item in data if item["ignored"] == (query["ignored"] == ["true"])]
+        if "search" in query:
+            data = [item for item in data if query["search"][0].casefold() in item["description"].casefold()]
+        data.sort(key=lambda item: (transaction_day(item), item["id"]), reverse=True)
+        offset = int(query["after"][0].split(":")[1].split("+")[0]) if "after" in query else 0
+        page = data[offset:offset + 3]
+        cursor = f"page:{offset + 3}+cursor" if offset + 3 < len(data) else None
+        return {"data": page, "next_cursor": cursor}
 
     def log_message(self, *_args):
         pass
@@ -169,7 +223,15 @@ class Fixture(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
+        query = parse_qs(urlsplit(self.path).query)
         self.requests.append(("GET", self.path, None))
+        if path.endswith("/transactions"):
+            try:
+                assert date.fromisoformat(query["from_date"][0]) <= date.fromisoformat(query["to_date"][0])
+            except (KeyError, ValueError, AssertionError):
+                self.errors.append(f"Transaction query requires an inclusive date range: {self.path}")
+                self.respond({"error": {"message": "from_date and to_date are required"}}, 400)
+                return
         if self.headers.get("Accept") == "text/csv":
             data = b"description,amount\nMock transaction,18.90\n"
             self.send_response(200)
@@ -196,7 +258,11 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         elif path.endswith("/cards"):
             data = CARDS
         elif path.endswith("/bills"):
-            data = BILLS
+            if "from" not in query or "to" not in query:
+                self.errors.append(f"Bill query requires due-date range: {self.path}")
+                self.respond({"error": {"message": "from and to are required"}}, 400)
+                return
+            data = [item for item in BILLS if query["from"][0] <= item["due_date"] <= query["to"][0]]
         elif path.endswith("/investments"):
             data = INVESTMENTS
         elif path.endswith("/goals"):
@@ -214,9 +280,11 @@ class Fixture(http.server.BaseHTTPRequestHandler):
             unread = parse_qs(urlsplit(self.path).query).get("unread") == ["true"]
             data = [item for item in NOTIFICATIONS if not unread or not item["read"]]
         elif path.endswith("/transactions"):
-            data = [dict(self.transaction), *EXTRA_TRANSACTIONS]
+            time.sleep(self.transaction_delay)
+            self.respond(self.transaction_page(query))
+            return
         elif "/transactions/" in path:
-            data = dict(self.transaction)
+            data = self.transactions[path.rsplit("/", 1)[1]]
         else:
             data = []
         self.respond({"data": data, "next_cursor": None})
@@ -225,9 +293,17 @@ class Fixture(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         payload = json.loads(body) if body else None
         self.requests.append((self.command, self.path, payload))
-        if payload:
-            self.transaction.update(payload)
-        self.respond({"data": dict(self.transaction)})
+        transaction_id = urlsplit(self.path).path.rsplit("/", 1)[1]
+        if self.command == "POST":
+            transaction_id = "tx-created"
+            self.transactions[transaction_id] = {**TRANSACTION, "id": transaction_id, **payload}
+        elif self.command == "DELETE":
+            self.transactions.pop(transaction_id)
+            self.respond({"data": None})
+            return
+        else:
+            self.transactions[transaction_id].update(payload)
+        self.respond({"data": self.transactions[transaction_id]})
 
     do_POST = mutate
     do_PATCH = mutate
@@ -274,6 +350,12 @@ class Terminal:
                 if not data:
                     break
                 self.stream.feed(self.decoder.decode(data))
+
+    def wait_until(self, predicate, message, timeout=5):
+        deadline = time.monotonic() + timeout
+        while not predicate() and time.monotonic() < deadline:
+            self.read(0.05)
+        assert predicate(), f"{message} at {self.columns}x{self.rows}:\n{self.text()}"
 
     def send(self, keys):
         os.write(self.master, keys.encode())
@@ -357,6 +439,149 @@ class Terminal:
         os.close(self.master)
 
 
+def transaction_requests(space=None):
+    return [
+        request for request in Fixture.requests
+        if urlsplit(request[1]).path.endswith("/transactions")
+        and request[0] == "GET"
+        and (space is None or f"/spaces/{space}/" in request[1])
+    ]
+
+
+def expect_last_range(expected, space=None):
+    query = parse_qs(urlsplit(transaction_requests(space)[-1][1]).query)
+    actual = query["from_date"][0], query["to_date"][0]
+    assert actual == expected, (actual, expected)
+
+
+def choose_preset(terminal, index):
+    terminal.send("p")
+    terminal.expect("Personalizado")
+    terminal.send("k" * 5 + "j" * index + "\r")
+
+
+def custom_period(terminal, start, end):
+    choose_preset(terminal, 4)
+    terminal.send(f"\x01{start}\t\x01{end}\r")
+
+
+def october(terminal):
+    custom_period(terminal, *OCTOBER)
+    terminal.send("[")
+    terminal.send("]")
+    terminal.expect("Outubro 2026")
+
+
+def check_periods(terminal, captures):
+    today = datetime.now(BRASILIA).date()
+    current = (today.replace(day=1).isoformat(), today.replace(day=calendar.monthrange(today.year, today.month)[1]).isoformat())
+    expect_last_range(current)
+    terminal.expect(f"{MONTHS[today.month - 1]} {today.year}")
+    terminal.send("2")
+    custom_period(terminal, "01/10/2026", "31/10/2026")
+    terminal.wait_until(lambda: "14 lançamentos" in terminal.text(), "Selected period did not load every page")
+    for text in ("Receitas", "Despesas", "Saldo", "11.200,00", "4.075,20", "7.124,80", "USD"):
+        terminal.expect(text)
+    assert "Várias moedas" not in terminal.text(), terminal.text()
+    if terminal.columns >= 120:
+        for text in ("Categoria", "Conta", "31/10", "22/10"):
+            terminal.expect(text)
+    terminal.capture(captures, "transactions-period")
+    queries = [parse_qs(urlsplit(request[1]).query) for request in transaction_requests()]
+    october_pages = [query for query in queries if query.get("from_date") == [OCTOBER[0]] and query.get("to_date") == [OCTOBER[1]]]
+    assert {query.get("after", [None])[0] for query in october_pages} >= {None, "page:3+cursor", "page:6+cursor", "page:9+cursor", "page:12+cursor"}, october_pages
+    terminal.send("[")
+    terminal.expect("Setembro 2026")
+    terminal.expect("2 lançamentos")
+    expect_last_range(("2026-09-01", "2026-09-30"))
+    count = len(transaction_requests())
+    terminal.send("]")
+    terminal.expect("Outubro 2026")
+    terminal.expect("14 lançamentos")
+    assert len(transaction_requests()) == count, "Returning to a complete month refetched its pages"
+    terminal.send("]")
+    terminal.expect("Novembro 2026")
+    terminal.expect("Primeiro dia novembro")
+    expect_last_range(("2026-11-01", "2026-11-30"))
+    terminal.send("[")
+    for previous, following in (("h", "l"), ("\x1b[D", "\x1b[C")):
+        terminal.send(previous)
+        terminal.expect("Setembro 2026")
+        terminal.send(following)
+        terminal.expect("Outubro 2026")
+    count = len(Fixture.requests)
+    terminal.send("m")
+    assert len(Fixture.requests) == count, "Removed load-more key made a request"
+    assert "carrega mais" not in terminal.text(), terminal.text()
+    terminal.send("p")
+    terminal.capture(captures, "period-picker")
+    for name in ("Mês", "Semana", "Trimestre", "Ano", "Personalizado"):
+        terminal.expect(name)
+    terminal.send("\x1b")
+    assert len(Fixture.requests) == count, "Cancelling the period picker made a request"
+    for start, end in (("32/13/2026", "31/10/2026"), ("2026-10-31", "2026-10-01"), ("[]Tp", "2026-10-31")):
+        custom_period(terminal, start, end)
+        assert len(Fixture.requests) == count, "Invalid range or picker typing escaped into navigation"
+        terminal.capture(captures, "period-invalid")
+        terminal.send("\x1b")
+        terminal.expect("Outubro 2026")
+    for index, expected in ((1, ("2026-09-28", "2026-10-04")), (2, ("2026-10-01", "2026-12-31")), (3, ("2026-01-01", "2026-12-31"))):
+        october(terminal)
+        choose_preset(terminal, index)
+        expect_last_range(expected)
+    custom_period(terminal, *OCTOBER)
+    choose_preset(terminal, 0)
+    terminal.expect("Outubro 2026")
+    terminal.send("T")
+    terminal.expect(f"{MONTHS[today.month - 1]} {today.year}")
+    october(terminal)
+    count = len(Fixture.requests)
+    terminal.send("/[]Tp")
+    terminal.expect("[]Tp")
+    terminal.send("\x1b")
+    assert len(Fixture.requests) == count, "Search typing changed the period"
+    terminal.expect("Outubro 2026")
+    terminal.send("/Café\r")
+    terminal.expect("1 lançamentos")
+    terminal.send("1")
+    for value in ("11.200,00", "4.075,20", "7.124,80"):
+        terminal.expect(value)
+    terminal.send("2")
+    terminal.expect("1 lançamentos")
+    terminal.send("c")
+    terminal.expect("14 lançamentos")
+    terminal.expect("Outubro 2026")
+    for name in ("overview", "cash-flow", "categories", "bills", "payables"):
+        key, title = SCREENS[name]
+        terminal.send(key)
+        terminal.expect(title)
+        terminal.expect("Outubro 2026")
+        terminal.capture(captures, f"period-{name}")
+        if name in {"overview", "cash-flow"}:
+            for value in ("11.200,00", "4.075,20", "7.124,80"):
+                terminal.expect(value)
+        if name == "bills":
+            query = parse_qs(urlsplit(next(request[1] for request in reversed(Fixture.requests) if "/cards/" in request[1] and "/bills?" in request[1])).query)
+            assert query.get("from") == [OCTOBER[0]] and query.get("to") == [OCTOBER[1]], query
+        if name == "payables":
+            terminal.expect("Bicicleta")
+            assert "Notebook" not in terminal.text(), "Payables included a November due date in October"
+    terminal.send("=s")
+    terminal.expect("espaço")
+    terminal.send("j\r")
+    terminal.send("2")
+    expect_last_range(OCTOBER, "smoke-alt")
+    terminal.expect("Outubro 2026")
+    terminal.expect("14 lançamentos")
+    terminal.capture(captures, "period-switched-space")
+    terminal.send("=s")
+    terminal.send("k\r")
+    terminal.send("2")
+    terminal.expect("Outubro 2026")
+    assert not Fixture.errors, Fixture.errors
+    assert all(request[0] == "GET" for request in Fixture.requests), "Period checks made a write"
+
+
 def capture_screens(terminal, captures, screens, verify_navigation=True):
     if terminal.columns >= 110:
         terminal.click("5 Contas")
@@ -401,18 +626,19 @@ def run(binary, captures, baseline=False, check_ttl=False, visual_only=False, sc
     thread.start()
     try:
         for columns, rows in sizes or [(120, 40), (80, 24), (60, 18)]:
-            Fixture.requests.clear()
-            Fixture.transaction = dict(TRANSACTION)
+            Fixture.reset()
             with tempfile.TemporaryDirectory(prefix="visor-ux-") as config:
                 terminal = Terminal(binary, config, server, columns, rows)
                 try:
+                    if not baseline:
+                        check_periods(terminal, captures)
                     if visual_only:
                         capture_screens(terminal, captures, screens or SCREENS, verify_navigation=not baseline)
                         assert all(request[0] == "GET" for request in Fixture.requests), "Visual review made a write"
                         terminal.send("q")
                         terminal.process.wait(timeout=3)
                         assert terminal.process.returncode == 0
-                        checks = "baseline captures" if baseline else "keyboard navigation"
+                        checks = "baseline captures" if baseline else "period controls, complete ranges, keyboard navigation"
                         print(f"PASS {columns}x{rows}: rendered {len(screens or SCREENS)} screens, {checks}, no writes", flush=True)
                         continue
                     terminal.capture(captures, "overview")
@@ -461,12 +687,15 @@ def run(binary, captures, baseline=False, check_ttl=False, visual_only=False, sc
                     assert payload["notes"] == "Nota de teste", payload
                     assert payload["transacted_at"].startswith("2026-10-22T"), payload
                     assert payload["ignored"] is True, payload
+                    terminal.send("/Conta qn?12\r")
                     terminal.send("e")
                     terminal.expect("Editar")
                     terminal.send("\x1525,10\x13")
                     writes = [r for r in Fixture.requests if r[0] == "PATCH"]
                     assert len(writes) == 1 and writes[0][2]["amount"] == "25.10", writes
+                    assert urlsplit(writes[0][1]).path.endswith("/transactions/tx-created"), writes
                     assert not list(Path(config).glob("transactions_*.csv")), "e also exported"
+                    terminal.send("c")
                     terminal.send("/")
                     query = "mercado & café + #"
                     terminal.send(query)
@@ -474,14 +703,7 @@ def run(binary, captures, baseline=False, check_ttl=False, visual_only=False, sc
                     searches = [parse_qs(urlsplit(r[1]).query).get("search") for r in Fixture.requests]
                     assert [query] in searches, searches
                     terminal.send("c")
-                    terminal.send("f")
-                    request_count = len(Fixture.requests)
-                    terminal.send("32/13/2026\x13")
-                    assert len(Fixture.requests) == request_count, "Invalid filter made a request"
-                    terminal.send("\x152026-10-01\t2026-10-31\x13")
-                    queries = [parse_qs(urlsplit(r[1]).query) for r in Fixture.requests]
-                    assert any(q.get("from_date") == ["2026-10-01"] and q.get("to_date") == ["2026-10-31"] for q in queries), queries
-                    terminal.send("f\t\t\rConta\r\t\rTrans\r\t\rViagem\r\t\r\t\r\tcoffee & tea\x13")
+                    terminal.send("f\rConta\r\t\rTrans\r\t\rViagem\r\t\r\t\r\tcoffee & tea\x13")
                     filtered = next(parse_qs(urlsplit(r[1]).query) for r in reversed(Fixture.requests) if "/transactions?" in r[1])
                     for key, value in {"account_id": "account-1", "category_id": "category-2", "tag_id": "tag-1", "type": "credit", "ignored": "true", "search": "coffee & tea"}.items():
                         assert filtered.get(key) == [value], (key, filtered)
@@ -490,7 +712,7 @@ def run(binary, captures, baseline=False, check_ttl=False, visual_only=False, sc
                     exports = list(Path(config).glob("transactions_*.csv"))
                     assert len(exports) == 1 and "Mock transaction,18.90" in exports[0].read_text(), "CSV export failed"
                     export_query = parse_qs(urlsplit(Fixture.requests[-1][1]).query)
-                    assert export_query == {k: v for k, v in filtered.items() if k != "limit"}, "CSV lost active filters"
+                    assert export_query == {k: v for k, v in filtered.items() if k not in {"limit", "after"}}, "CSV lost active filters"
                     terminal.send("\x1b")
                     terminal.send("c")
                     terminal.send("d")
@@ -513,7 +735,7 @@ def run(binary, captures, baseline=False, check_ttl=False, visual_only=False, sc
                         request_count = len(Fixture.requests)
                         terminal.send("n")
                         terminal.capture(captures, title.lower() + "-form")
-                        terminal.send("qn?123")
+                        terminal.send("qn?123[]Tp")
                         terminal.send("\t\x1b")
                         assert len(Fixture.requests) == request_count, f"Typing in {title} leaked into navigation"
                         terminal.capture(captures, title.lower())
@@ -553,7 +775,8 @@ def run(binary, captures, baseline=False, check_ttl=False, visual_only=False, sc
                     terminal.send("q")
                     terminal.process.wait(timeout=3)
                     assert terminal.process.returncode == 0
-                    print(f"PASS {columns}x{rows}: forms, filters, CSV, confirmation, refresh, idle, scrolling, space switch", flush=True)
+                    assert not Fixture.errors, Fixture.errors
+                    print(f"PASS {columns}x{rows}: periods, complete ranges, forms, filters, CSV, confirmation, refresh, idle, scrolling, space switch", flush=True)
                 finally:
                     terminal.close()
     finally:
