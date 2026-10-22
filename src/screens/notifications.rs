@@ -1,8 +1,8 @@
-use hqtui::prelude::*;
 use hqtui::color::Color;
 use hqtui::input::InputEvent;
-use hqtui::widgets::{TableOptions, TableColumn, TableRow, TextStyle};
+use hqtui::prelude::*;
 use hqtui::unicode::Align;
+use hqtui::widgets::{TableColumn, TableOptions, TableRow, TextStyle};
 
 use crate::api::ApiClient;
 use crate::models::Notification;
@@ -95,17 +95,18 @@ impl NotificationsScreen {
                 }
                 if k.name == "m" || k.name == "enter" {
                     if let Some(idx) = self.selected_index
-                        && idx < self.notifications.len() {
-                            let id = self.notifications[idx].id.clone();
-                            match api.mark_notification_read(&id) {
-                                Ok(()) => {
-                                    self.notifications[idx].read = true;
-                                }
-                                Err(e) => {
-                                    self.error = Some(format!("Erro ao marcar como lida: {e}"));
-                                }
+                        && idx < self.notifications.len()
+                    {
+                        let id = self.notifications[idx].id.clone();
+                        match api.mark_notification_read(&id) {
+                            Ok(()) => {
+                                self.notifications[idx].read = true;
+                            }
+                            Err(e) => {
+                                self.error = Some(format!("Erro ao marcar como lida: {e}"));
                             }
                         }
+                    }
                     return;
                 }
                 if k.name == "r" {
@@ -142,7 +143,11 @@ fn format_date(date_str: Option<&str>) -> String {
     }
 }
 
-pub fn render_with_state(ui: &mut Container<'_>, screen: &mut NotificationsScreen, api: &ApiClient) {
+pub fn render_with_state(
+    ui: &mut Container<'_>,
+    screen: &mut NotificationsScreen,
+    api: &ApiClient,
+) {
     screen.load(api);
 
     let table_rows: Vec<TableRow> = screen
@@ -159,9 +164,15 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut NotificationsScree
 
     let columns = vec![
         TableColumn::new("Título").width(Size::Fill),
-        TableColumn::new("Tópico").width(Size::Cells(20)).align(Align::Left),
-        TableColumn::new("Data").width(Size::Cells(12)).align(Align::Center),
-        TableColumn::new("Lida").width(Size::Cells(6)).align(Align::Center),
+        TableColumn::new("Tópico")
+            .width(Size::Cells(20))
+            .align(Align::Left),
+        TableColumn::new("Data")
+            .width(Size::Cells(12))
+            .align(Align::Center),
+        TableColumn::new("Lida")
+            .width(Size::Cells(6))
+            .align(Align::Center),
     ];
 
     let has_rows = !table_rows.is_empty();
@@ -179,7 +190,7 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut NotificationsScree
 
     ui.column(Column::new().gap(1), move |col| {
         // Filter indicator and action buttons
-        col.row(Row::new().gap(1), move |r| {
+        col.row(Row::new().size(Size::Cells(1)).gap(1), move |r| {
             if unread_filter {
                 r.styled_text(
                     " Filtro ativo: somente não lidas ",
@@ -202,6 +213,7 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut NotificationsScree
             } else if has_rows {
                 p.table(
                     TableOptions {
+                        follow_selection: true,
                         columns: columns.clone(),
                         rows: table_rows.clone(),
                         header: true,

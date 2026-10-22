@@ -1,14 +1,9 @@
-use hqtui::prelude::*;
-use hqtui::color::Color;
 use hqtui::input::InputEvent;
-use hqtui::widgets::{
-    ButtonOptions, ButtonVariant, ModalButton, ModalOptions, TextStyle,
-};
+use hqtui::prelude::*;
+use hqtui::widgets::{ButtonOptions, ButtonVariant, ModalButton, ModalOptions};
 
 use crate::api::ApiClient;
 use crate::models::RecurringExpense;
-
-const COLOR_NEGATIVE: Color = Color::rgb(239, 68, 68);
 
 const FREQUENCY_OPTIONS: &[&str] = &["monthly", "yearly", "weekly", "biweekly"];
 
@@ -105,6 +100,7 @@ pub struct RecurringScreen {
     pub delete_target_id: Option<String>,
     pub delete_target_name: Option<String>,
     pub loaded: bool,
+    dialog: Option<ModalOptions>,
 }
 
 impl RecurringScreen {
@@ -130,6 +126,7 @@ impl RecurringScreen {
             delete_target_id: None,
             delete_target_name: None,
             loaded: false,
+            dialog: None,
         }
     }
 
@@ -157,6 +154,11 @@ impl RecurringScreen {
         match api.fixed_bills() {
             Ok(bills) => {
                 self.fixed_bills = bills;
+                self.selected_index = (!self.current_items().is_empty()).then_some(
+                    self.selected_index
+                        .unwrap_or(0)
+                        .min(self.current_items().len().saturating_sub(1)),
+                );
                 self.loading = false;
             }
             Err(e) => {
@@ -179,7 +181,12 @@ impl RecurringScreen {
 
     pub fn handle_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
         if self.modal_state != RecurringModalState::None {
-            self.handle_modal_input(app, api, events);
+            let modal_events = crate::presentation::modal_events(
+                events,
+                app.terminal.size(),
+                self.dialog.as_ref(),
+            );
+            self.handle_modal_input(app, api, &modal_events);
             return;
         }
 
@@ -227,52 +234,54 @@ impl RecurringScreen {
                 }
                 if k.name == "e" {
                     if let Some(idx) = self.selected_index
-                        && idx < self.current_items().len() {
-                            self.populate_edit_form(idx);
-                        }
+                        && idx < self.current_items().len()
+                    {
+                        self.populate_edit_form(idx);
+                    }
                     return;
                 }
                 if k.name == "d" || k.name == "delete" {
                     if let Some(idx) = self.selected_index
-                        && idx < self.current_items().len() {
-                            let id = self.current_items()[idx].id.clone();
-                            let name = self.current_items()[idx].name.clone();
-                            self.delete_target_id = Some(id);
-                            self.delete_target_name = Some(name);
-                            self.modal_state = RecurringModalState::DeleteConfirm;
-                        }
+                        && idx < self.current_items().len()
+                    {
+                        let id = self.current_items()[idx].id.clone();
+                        let name = self.current_items()[idx].name.clone();
+                        self.delete_target_id = Some(id);
+                        self.delete_target_name = Some(name);
+                        self.modal_state = RecurringModalState::DeleteConfirm;
+                    }
                     return;
                 }
             }
         }
 
-        if app.pressed("tab_subscriptions")
-            && self.active_tab != Tab::Subscriptions {
-                self.active_tab = Tab::Subscriptions;
-                self.selected_index = None;
-            }
-        if app.pressed("tab_fixed_bills")
-            && self.active_tab != Tab::FixedBills {
-                self.active_tab = Tab::FixedBills;
-                self.selected_index = None;
-            }
+        if app.pressed("tab_subscriptions") && self.active_tab != Tab::Subscriptions {
+            self.active_tab = Tab::Subscriptions;
+            self.selected_index = None;
+        }
+        if app.pressed("tab_fixed_bills") && self.active_tab != Tab::FixedBills {
+            self.active_tab = Tab::FixedBills;
+            self.selected_index = None;
+        }
         if app.pressed("recurring:new") {
             self.open_create_modal();
         }
         if app.pressed("recurring:edit")
             && let Some(idx) = self.selected_index
-                && idx < self.current_items().len() {
-                    self.populate_edit_form(idx);
-                }
+            && idx < self.current_items().len()
+        {
+            self.populate_edit_form(idx);
+        }
         if app.pressed("recurring:delete")
             && let Some(idx) = self.selected_index
-                && idx < self.current_items().len() {
-                    let id = self.current_items()[idx].id.clone();
-                    let name = self.current_items()[idx].name.clone();
-                    self.delete_target_id = Some(id);
-                    self.delete_target_name = Some(name);
-                    self.modal_state = RecurringModalState::DeleteConfirm;
-                }
+            && idx < self.current_items().len()
+        {
+            let id = self.current_items()[idx].id.clone();
+            let name = self.current_items()[idx].name.clone();
+            self.delete_target_id = Some(id);
+            self.delete_target_name = Some(name);
+            self.modal_state = RecurringModalState::DeleteConfirm;
+        }
     }
 
     fn open_create_modal(&mut self) {
@@ -334,7 +343,7 @@ impl RecurringScreen {
                             self.form_field = self.form_field.prev(is_sub);
                             return;
                         }
-                        if k.name == "enter" {
+                        if k.name == "enter" || k.key == "ctrl+s" {
                             self.submit_form(api);
                             return;
                         }
@@ -354,43 +363,76 @@ impl RecurringScreen {
                             }
                         }
                         if self.form_field == RecurringFormField::Active
-                            && (k.name == "space" || k.name == "right" || k.name == "left") {
-                                self.form_active = !self.form_active;
-                                return;
-                            }
+                            && (k.name == "space" || k.name == "right" || k.name == "left")
+                        {
+                            self.form_active = !self.form_active;
+                            return;
+                        }
                         if k.key == "backspace" {
                             match self.form_field {
-                                RecurringFormField::Name => { self.form_name.pop(); }
-                                RecurringFormField::Amount => { self.form_amount.pop(); }
-                                RecurringFormField::AccountId => { self.form_account_id.pop(); }
-                                RecurringFormField::CategoryId => { self.form_category_id.pop(); }
-                                RecurringFormField::ServiceName => { self.form_service_name.pop(); }
+                                RecurringFormField::Name => {
+                                    self.form_name.pop();
+                                }
+                                RecurringFormField::Amount => {
+                                    self.form_amount.pop();
+                                }
+                                RecurringFormField::AccountId => {
+                                    self.form_account_id.pop();
+                                }
+                                RecurringFormField::CategoryId => {
+                                    self.form_category_id.pop();
+                                }
+                                RecurringFormField::ServiceName => {
+                                    self.form_service_name.pop();
+                                }
                                 _ => {}
                             }
                             return;
                         }
                         if k.key == "ctrl+u" {
                             match self.form_field {
-                                RecurringFormField::Name => { self.form_name.clear(); }
-                                RecurringFormField::Amount => { self.form_amount.clear(); }
-                                RecurringFormField::AccountId => { self.form_account_id.clear(); }
-                                RecurringFormField::CategoryId => { self.form_category_id.clear(); }
-                                RecurringFormField::ServiceName => { self.form_service_name.clear(); }
+                                RecurringFormField::Name => {
+                                    self.form_name.clear();
+                                }
+                                RecurringFormField::Amount => {
+                                    self.form_amount.clear();
+                                }
+                                RecurringFormField::AccountId => {
+                                    self.form_account_id.clear();
+                                }
+                                RecurringFormField::CategoryId => {
+                                    self.form_category_id.clear();
+                                }
+                                RecurringFormField::ServiceName => {
+                                    self.form_service_name.clear();
+                                }
                                 _ => {}
                             }
                             return;
                         }
                         if let Some(ch) = &k.char
-                            && !k.ctrl && !k.alt {
-                                match self.form_field {
-                                    RecurringFormField::Name => { self.form_name.push_str(ch); }
-                                    RecurringFormField::Amount => { self.form_amount.push_str(ch); }
-                                    RecurringFormField::AccountId => { self.form_account_id.push_str(ch); }
-                                    RecurringFormField::CategoryId => { self.form_category_id.push_str(ch); }
-                                    RecurringFormField::ServiceName => { self.form_service_name.push_str(ch); }
-                                    _ => {}
+                            && !k.ctrl
+                            && !k.alt
+                        {
+                            match self.form_field {
+                                RecurringFormField::Name => {
+                                    self.form_name.push_str(ch);
                                 }
+                                RecurringFormField::Amount => {
+                                    self.form_amount.push_str(ch);
+                                }
+                                RecurringFormField::AccountId => {
+                                    self.form_account_id.push_str(ch);
+                                }
+                                RecurringFormField::CategoryId => {
+                                    self.form_category_id.push_str(ch);
+                                }
+                                RecurringFormField::ServiceName => {
+                                    self.form_service_name.push_str(ch);
+                                }
+                                _ => {}
                             }
+                        }
                     }
                 }
                 if app.pressed("recurring_form_cancel") {
@@ -417,8 +459,12 @@ impl RecurringScreen {
                                     api.delete_fixed_bill(id)
                                 };
                                 match result {
-                                    Ok(()) => { self.fetch_data(api); }
-                                    Err(e) => { self.form_error = Some(format!("Erro ao excluir: {e}")); }
+                                    Ok(()) => {
+                                        self.fetch_data(api);
+                                    }
+                                    Err(e) => {
+                                        self.form_error = Some(format!("Erro ao excluir: {e}"));
+                                    }
                                 }
                             }
                             self.modal_state = RecurringModalState::None;
@@ -441,8 +487,12 @@ impl RecurringScreen {
                             api.delete_fixed_bill(id)
                         };
                         match result {
-                            Ok(()) => { self.fetch_data(api); }
-                            Err(e) => { self.form_error = Some(format!("Erro ao excluir: {e}")); }
+                            Ok(()) => {
+                                self.fetch_data(api);
+                            }
+                            Err(e) => {
+                                self.form_error = Some(format!("Erro ao excluir: {e}"));
+                            }
                         }
                     }
                     self.modal_state = RecurringModalState::None;
@@ -465,7 +515,10 @@ impl RecurringScreen {
             self.form_error = Some("Valor \u{e9} obrigat\u{f3}rio.".to_string());
             return;
         }
-        let frequency = FREQUENCY_OPTIONS.get(self.form_frequency_index).copied().unwrap_or("monthly");
+        let frequency = FREQUENCY_OPTIONS
+            .get(self.form_frequency_index)
+            .copied()
+            .unwrap_or("monthly");
         let account_id = {
             let v = self.form_account_id.trim();
             if v.is_empty() { None } else { Some(v) }
@@ -482,8 +535,15 @@ impl RecurringScreen {
                         let v = self.form_service_name.trim();
                         if v.is_empty() { None } else { Some(v) }
                     };
-                    api.create_subscription(name, amount, frequency, account_id, category_id, service_name)
-                        .map(|_| ())
+                    api.create_subscription(
+                        name,
+                        amount,
+                        frequency,
+                        account_id,
+                        category_id,
+                        service_name,
+                    )
+                    .map(|_| ())
                 } else {
                     api.create_fixed_bill(name, amount, frequency, account_id, category_id)
                         .map(|_| ())
@@ -494,11 +554,23 @@ impl RecurringScreen {
                     if idx < self.current_items().len() {
                         let item_id = self.current_items()[idx].id.clone();
                         if self.is_subscription_tab() {
-                            api.update_subscription(&item_id, Some(name), Some(amount), Some(frequency), Some(self.form_active))
-                                .map(|_| ())
+                            api.update_subscription(
+                                &item_id,
+                                Some(name),
+                                Some(amount),
+                                Some(frequency),
+                                Some(self.form_active),
+                            )
+                            .map(|_| ())
                         } else {
-                            api.update_fixed_bill(&item_id, Some(name), Some(amount), Some(frequency), Some(self.form_active))
-                                .map(|_| ())
+                            api.update_fixed_bill(
+                                &item_id,
+                                Some(name),
+                                Some(amount),
+                                Some(frequency),
+                                Some(self.form_active),
+                            )
+                            .map(|_| ())
                         }
                     } else {
                         self.form_error = Some("Item n\u{e3}o encontrado.".to_string());
@@ -531,8 +603,7 @@ impl Default for RecurringScreen {
 
 fn format_money(amount_str: &str) -> String {
     let amount_str = amount_str.trim();
-    let clean_str = amount_str
-        .replace(['.', ',', ' '], "");
+    let clean_str = amount_str.replace(['.', ',', ' '], "");
     if let Ok(amount) = clean_str.parse::<f64>() {
         let formatted = format!("{amount:.2}");
         let parts: Vec<&str> = formatted.split('.').collect();
@@ -574,11 +645,7 @@ fn format_date(date_str: Option<&str>) -> String {
     }
 }
 
-pub fn render_with_state(
-    ui: &mut Container<'_>,
-    screen: &mut RecurringScreen,
-    api: &ApiClient,
-) {
+pub fn render_with_state(ui: &mut Container<'_>, screen: &mut RecurringScreen, api: &ApiClient) {
     use std::fmt::Write;
 
     screen.load_initial(api);
@@ -599,24 +666,30 @@ pub fn render_with_state(
     let form_error = screen.form_error.clone();
     let delete_target_name = screen.delete_target_name.clone();
 
-    let items: Vec<_> = screen
+    let items: Vec<TableRow> = screen
         .current_items()
         .iter()
-        .enumerate()
-        .map(|(i, item)| {
-            let is_selected = selected == Some(i);
-            let name = item.name.clone();
-            let amount_display = item
-                .amount
-                .as_ref().map_or_else(|| "N/A".to_string(), |a| format_money(a));
-            let freq = format_frequency(item.frequency.as_deref());
-            let next_due = format_date(item.next_due_date.as_deref());
-            let last_paid = format_date(item.last_paid_date.as_deref());
-            let active_text = if item.active { "Sim" } else { "N\u{e3}o" };
-            let service = item.service_name.clone().unwrap_or_else(|| "-".to_string());
-            (is_selected, name, amount_display, freq, next_due, last_paid, active_text, service)
+        .map(|item| {
+            TableRow::new([
+                item.name.clone(),
+                item.amount
+                    .as_deref()
+                    .map_or_else(|| "—".into(), format_money),
+                format_frequency(item.frequency.as_deref()),
+                format_date(item.next_due_date.as_deref()),
+            ])
         })
         .collect();
+    let detail = selected
+        .and_then(|index| screen.current_items().get(index))
+        .map(|item| {
+            format!(
+                "{} | Último pgto {} | {}",
+                if item.active { "Ativo" } else { "Inativo" },
+                format_date(item.last_paid_date.as_deref()),
+                item.service_name.as_deref().unwrap_or("Sem serviço")
+            )
+        });
 
     let tab_label = match active_tab {
         Tab::Subscriptions => "Assinaturas",
@@ -631,69 +704,63 @@ pub fn render_with_state(
     let is_sub_tab = active_tab == Tab::Subscriptions;
 
     ui.column(Column::new().gap(1), move |col| {
-        col.panel(Panel::new().title(&panel_title), move |p| {
-            // Tab bar
-            let sub_marker = if active_tab == Tab::Subscriptions { "[Assinaturas]" } else { " Assinaturas " };
-            let fb_marker = if active_tab == Tab::FixedBills { "[Contas Fixas]" } else { " Contas Fixas " };
-            p.text(&format!("{sub_marker}  {fb_marker}  (\u{2190}/\u{2192} para trocar)"));
-            p.button(
-                ButtonOptions::new("").variant(ButtonVariant::Ghost),
+        col.row(Row::new().size(Size::Cells(1)).gap(1), move |row| {
+            row.button(
+                ButtonOptions::new("Assinaturas ←").variant(if is_sub_tab {
+                    ButtonVariant::Primary
+                } else {
+                    ButtonVariant::Ghost
+                }),
                 "tab_subscriptions",
             );
-            p.button(
-                ButtonOptions::new("").variant(ButtonVariant::Ghost),
+            row.button(
+                ButtonOptions::new("Contas fixas →").variant(if is_sub_tab {
+                    ButtonVariant::Ghost
+                } else {
+                    ButtonVariant::Primary
+                }),
                 "tab_fixed_bills",
             );
-            p.divider(DividerOptions::default());
-
-            if loading {
-                p.text("Carregando...");
-                return;
-            }
-            if let Some(ref err) = error_msg {
-                p.styled_text(err, TextStyle::new().fg(COLOR_NEGATIVE));
-                return;
-            }
-            if items.is_empty() {
-                p.text("Nenhum item encontrado.");
-                p.text(&format!("Pressione 'n' para criar um novo {}.", tab_label.to_lowercase()));
-                return;
-            }
-
-            p.text("n: Nova | e: Editar | d: Excluir | \u{2191}/\u{2193}: Navegar");
-            p.divider(DividerOptions::default());
-
-            for (is_selected, name, amount_display, freq, next_due, last_paid, active_text, service) in items.clone() {
-                if is_selected {
-                    p.styled_text(&format!("> {name}"), TextStyle::new().bold());
-                } else {
-                    p.text(&format!("  {name}"));
-                }
-                p.key_values(hqtui::widgets::KeyValueOptions {
-                    rows: vec![
-                        hqtui::widgets::KeyValueRow::new("Valor", &amount_display),
-                        hqtui::widgets::KeyValueRow::new("Frequ\u{ea}ncia", &freq),
-                        hqtui::widgets::KeyValueRow::new("Pr\u{f3}xima cobran\u{e7}a", &next_due),
-                        hqtui::widgets::KeyValueRow::new("\u{da}ltimo pagamento", &last_paid),
-                        hqtui::widgets::KeyValueRow::new("Ativo", active_text),
-                    ],
-                    ..Default::default()
-                });
-                if is_sub_tab {
-                    p.key_values(hqtui::widgets::KeyValueOptions {
-                        rows: vec![
-                            hqtui::widgets::KeyValueRow::new("Servi\u{e7}o", &service),
-                        ],
-                        ..Default::default()
-                    });
-                }
-                p.divider(DividerOptions::default());
-            }
+            row.button(
+                ButtonOptions::new(create_label).variant(ButtonVariant::Primary),
+                "recurring:new",
+            );
         });
-
-        col.button(
-            ButtonOptions::new(create_label).variant(ButtonVariant::Primary),
-            "recurring:new",
+        col.panel(
+            Panel::new()
+                .title(panel_title)
+                .footer("n Nova  e Editar  d Excluir  j/k Selecionar"),
+            move |panel| {
+                if loading {
+                    panel.text("Carregando…");
+                } else if let Some(error) = error_msg {
+                    panel.text(&error);
+                } else if items.is_empty() {
+                    panel.text("Nenhum item. Pressione n para criar.");
+                } else {
+                    panel.table(
+                        TableOptions {
+                            columns: vec![
+                                TableColumn::new("Nome").width(Size::Fill),
+                                TableColumn::new("Valor")
+                                    .width(Size::Cells(16))
+                                    .align(Align::Right),
+                                TableColumn::new("Frequência").width(Size::Cells(12)),
+                                TableColumn::new("Próxima").width(Size::Cells(10)),
+                            ],
+                            rows: items,
+                            selected,
+                            zebra: true,
+                            follow_selection: true,
+                            ..Default::default()
+                        },
+                        "recurring:table",
+                    );
+                    if let Some(detail) = detail {
+                        panel.text(&detail);
+                    }
+                }
+            },
         );
     });
 
@@ -702,9 +769,17 @@ pub fn render_with_state(
         RecurringModalState::CreateSubscription | RecurringModalState::EditSubscription => {
             let is_create = modal_state == RecurringModalState::CreateSubscription;
             let title = if is_create {
-                if is_sub_tab { "Nova Assinatura" } else { "Nova Conta Fixa" }
+                if is_sub_tab {
+                    "Nova Assinatura"
+                } else {
+                    "Nova Conta Fixa"
+                }
             } else {
-                if is_sub_tab { "Editar Assinatura" } else { "Editar Conta Fixa" }
+                if is_sub_tab {
+                    "Editar Assinatura"
+                } else {
+                    "Editar Conta Fixa"
+                }
             };
 
             let name_display = if form_field == RecurringFormField::Name {
@@ -717,7 +792,10 @@ pub fn render_with_state(
             } else {
                 form_amount.clone()
             };
-            let freq_label = FREQUENCY_OPTIONS.get(form_frequency_index).copied().unwrap_or("monthly");
+            let freq_label = FREQUENCY_OPTIONS
+                .get(form_frequency_index)
+                .copied()
+                .unwrap_or("monthly");
             let freq_display = if form_field == RecurringFormField::Frequency {
                 format!("< {freq_label} >")
             } else {
@@ -758,29 +836,31 @@ pub fn render_with_state(
                 let _ = write!(msg, "\n\n{err}");
             }
 
-            ui.modal(ModalOptions {
+            let options = ModalOptions {
                 title: Some(title.to_string()),
                 message: Some(msg),
-                buttons: vec![
-                    ModalButton::new("Cancelar"),
-                    ModalButton::new("Salvar"),
-                ],
+                buttons: vec![ModalButton::new("Cancelar"), ModalButton::new("Salvar")],
+                width: Some(68),
+                align: Some(Align::Left),
                 ..Default::default()
-            });
+            };
+            screen.dialog = Some(options.clone());
+            ui.modal(options);
         }
         RecurringModalState::DeleteConfirm => {
             let target = delete_target_name.unwrap_or_default();
-            ui.modal(ModalOptions {
+            let options = ModalOptions {
                 title: Some("Confirmar Exclus\u{e3}o".to_string()),
                 message: Some(format!(
                     "Tem certeza que deseja excluir \"{target}\"?\n\nEsta a\u{e7}\u{e3}o n\u{e3}o pode ser desfeita."
                 )),
-                buttons: vec![
-                    ModalButton::new("Cancelar"),
-                    ModalButton::new("Excluir"),
-                ],
+                buttons: vec![ModalButton::new("Cancelar"), ModalButton::new("Excluir")],
+                width: Some(68),
+                align: Some(Align::Left),
                 ..Default::default()
-            });
+            };
+            screen.dialog = Some(options.clone());
+            ui.modal(options);
         }
         RecurringModalState::None => {}
     }

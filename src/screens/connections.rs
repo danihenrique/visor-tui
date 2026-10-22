@@ -1,8 +1,8 @@
-use hqtui::prelude::*;
 use hqtui::color::Color;
 use hqtui::input::InputEvent;
-use hqtui::widgets::{TableOptions, TableColumn, TableRow, TextStyle};
+use hqtui::prelude::*;
 use hqtui::unicode::Align;
+use hqtui::widgets::{TableColumn, TableOptions, TableRow, TextStyle};
 
 use crate::api::ApiClient;
 use crate::models::Connection;
@@ -48,6 +48,11 @@ impl ConnectionsScreen {
         match api.connections() {
             Ok(connections) => {
                 self.connections = connections;
+                self.selected_index = (!self.connections.is_empty()).then_some(
+                    self.selected_index
+                        .unwrap_or(0)
+                        .min(self.connections.len().saturating_sub(1)),
+                );
                 self.selected_index = if self.connections.is_empty() {
                     None
                 } else {
@@ -129,15 +134,9 @@ fn status_display(status: Option<&str>, paused: bool, requires_reauth: bool) -> 
         return ("● Pausado".to_string(), COLOR_WARNING);
     }
     match status {
-        Some("connected" | "active" | "syncing") => {
-            ("● Ativo".to_string(), COLOR_SUCCESS)
-        }
-        Some("error" | "failed") => {
-            ("● Erro".to_string(), COLOR_NEGATIVE)
-        }
-        Some(other) => {
-            (format!("● {other}"), COLOR_NEUTRAL)
-        }
+        Some("connected" | "active" | "syncing") => ("● Ativo".to_string(), COLOR_SUCCESS),
+        Some("error" | "failed") => ("● Erro".to_string(), COLOR_NEGATIVE),
+        Some(other) => (format!("● {other}"), COLOR_NEUTRAL),
         None => ("● —".to_string(), COLOR_NEUTRAL),
     }
 }
@@ -149,8 +148,13 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut ConnectionsScreen,
         .connections
         .iter()
         .map(|c| {
-            let provider = c.provider_name.as_deref().unwrap_or("(desconhecido)").to_string();
-            let (status_text, _status_color) = status_display(c.status.as_deref(), c.paused, c.requires_reauth);
+            let provider = c
+                .provider_name
+                .as_deref()
+                .unwrap_or("(desconhecido)")
+                .to_string();
+            let (status_text, _status_color) =
+                status_display(c.status.as_deref(), c.paused, c.requires_reauth);
             let last_sync = format_date(c.last_successful_sync_at.as_deref());
             let next_sync = format_date(c.next_auto_sync_at.as_deref());
             let accounts_count = c.account_ids.len().to_string();
@@ -160,17 +164,34 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut ConnectionsScreen,
 
     let columns = vec![
         TableColumn::new("Provedor").width(Size::Fill),
-        TableColumn::new("Status").width(Size::Cells(16)).align(Align::Left),
-        TableColumn::new("Última Sync").width(Size::Cells(18)).align(Align::Center),
-        TableColumn::new("Próxima Sync").width(Size::Cells(18)).align(Align::Center),
-        TableColumn::new("Contas").width(Size::Cells(8)).align(Align::Center),
+        TableColumn::new("Status")
+            .width(Size::Cells(16))
+            .align(Align::Left),
+        TableColumn::new("Última Sync")
+            .width(Size::Cells(18))
+            .align(Align::Center),
+        TableColumn::new("Próxima Sync")
+            .width(Size::Cells(18))
+            .align(Align::Center),
+        TableColumn::new("Contas")
+            .width(Size::Cells(8))
+            .align(Align::Center),
     ];
 
     let has_rows = !table_rows.is_empty();
     let conn_count = screen.connections.len();
-    let active_count = screen.connections.iter().filter(|c| {
-        !c.paused && !c.requires_reauth && matches!(c.status.as_deref(), Some("connected" | "active" | "syncing"))
-    }).count();
+    let active_count = screen
+        .connections
+        .iter()
+        .filter(|c| {
+            !c.paused
+                && !c.requires_reauth
+                && matches!(
+                    c.status.as_deref(),
+                    Some("connected" | "active" | "syncing")
+                )
+        })
+        .count();
     let header_label = format!("Conexões ({conn_count} total, {active_count} ativas)");
     let error_msg = screen.error.clone();
     let loading = screen.loading;
@@ -191,6 +212,7 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut ConnectionsScreen,
             } else if has_rows {
                 p.table(
                     TableOptions {
+                        follow_selection: true,
                         columns: columns.clone(),
                         rows: table_rows.clone(),
                         header: true,

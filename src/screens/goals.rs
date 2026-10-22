@@ -1,15 +1,11 @@
-use hqtui::prelude::*;
-use hqtui::color::Color;
 use hqtui::input::InputEvent;
+use hqtui::prelude::*;
 use hqtui::widgets::{
-    ButtonOptions, ButtonVariant, KeyValueOptions, KeyValueRow, ModalButton, ModalOptions,
-    TextStyle,
+    ButtonOptions, ButtonVariant, ModalButton, ModalOptions, TableColumn, TableOptions, TableRow,
 };
 
 use crate::api::ApiClient;
 use crate::models::Goal;
-
-const COLOR_NEGATIVE: Color = Color::rgb(239, 68, 68);
 
 const KIND_OPTIONS: &[&str] = &["savings", "debt", "investment", "custom"];
 const STATUS_OPTIONS: &[&str] = &["active", "archived", "completed"];
@@ -85,6 +81,7 @@ pub struct GoalsScreen {
     pub delete_target_name: Option<String>,
     pub delete_target_progress: Option<String>,
     pub loaded: bool,
+    dialog: Option<ModalOptions>,
 }
 
 impl GoalsScreen {
@@ -107,11 +104,14 @@ impl GoalsScreen {
             delete_target_name: None,
             delete_target_progress: None,
             loaded: false,
+            dialog: None,
         }
     }
 
     pub fn load_initial(&mut self, api: &ApiClient) {
-        if self.loaded { return; }
+        if self.loaded {
+            return;
+        }
         self.loaded = true;
         self.fetch_goals(api);
     }
@@ -120,14 +120,30 @@ impl GoalsScreen {
         self.loading = true;
         self.error = None;
         match api.goals(None) {
-            Ok(goals) => { self.goals = goals; self.loading = false; }
-            Err(e) => { self.error = Some(format!("Falha ao carregar metas: {e}")); self.loading = false; }
+            Ok(goals) => {
+                self.goals = goals;
+                self.selected_index = (!self.goals.is_empty()).then_some(
+                    self.selected_index
+                        .unwrap_or(0)
+                        .min(self.goals.len().saturating_sub(1)),
+                );
+                self.loading = false;
+            }
+            Err(e) => {
+                self.error = Some(format!("Falha ao carregar metas: {e}"));
+                self.loading = false;
+            }
         }
     }
 
     pub fn handle_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
         if self.modal_state != GoalModalState::None {
-            self.handle_modal_input(app, api, events);
+            let modal_events = crate::presentation::modal_events(
+                events,
+                app.terminal.size(),
+                self.dialog.as_ref(),
+            );
+            self.handle_modal_input(app, api, &modal_events);
             return;
         }
         for event in events {
@@ -152,40 +168,53 @@ impl GoalsScreen {
                     }
                     return;
                 }
-                if k.name == "n" { self.open_create_modal(); return; }
+                if k.name == "n" {
+                    self.open_create_modal();
+                    return;
+                }
                 if k.name == "e" {
                     if let Some(idx) = self.selected_index
-                        && idx < self.goals.len() { self.populate_edit_form(idx); }
+                        && idx < self.goals.len()
+                    {
+                        self.populate_edit_form(idx);
+                    }
                     return;
                 }
                 if k.name == "d" || k.name == "delete" {
                     if let Some(idx) = self.selected_index
-                        && idx < self.goals.len() {
-                            let goal = &self.goals[idx];
-                            self.delete_target_id = Some(goal.id.clone());
-                            self.delete_target_name = Some(goal.name.clone());
-                            let pct = goal.progress_percent.unwrap_or(0.0);
-                            self.delete_target_progress = Some(format!("{pct:.1}%"));
-                            self.modal_state = GoalModalState::DeleteConfirm;
-                        }
+                        && idx < self.goals.len()
+                    {
+                        let goal = &self.goals[idx];
+                        self.delete_target_id = Some(goal.id.clone());
+                        self.delete_target_name = Some(goal.name.clone());
+                        let pct = goal.progress_percent.unwrap_or(0.0);
+                        self.delete_target_progress = Some(format!("{pct:.1}%"));
+                        self.modal_state = GoalModalState::DeleteConfirm;
+                    }
                     return;
                 }
             }
         }
-        if app.pressed("goals:new") { self.open_create_modal(); }
+        if app.pressed("goals:new") {
+            self.open_create_modal();
+        }
         if app.pressed("goals:edit")
             && let Some(idx) = self.selected_index
-                && idx < self.goals.len() { self.populate_edit_form(idx); }
+            && idx < self.goals.len()
+        {
+            self.populate_edit_form(idx);
+        }
         if app.pressed("goals:delete")
             && let Some(idx) = self.selected_index
-                && idx < self.goals.len() {
-                    let goal = &self.goals[idx];
-                    self.delete_target_id = Some(goal.id.clone());
-                    self.delete_target_name = Some(goal.name.clone());
-                    let pct = goal.progress_percent.unwrap_or(0.0);
-                    self.delete_target_progress = Some(format!("{pct:.1}%"));
-                    self.modal_state = GoalModalState::DeleteConfirm;
-                }
+            && idx < self.goals.len()
+        {
+            let goal = &self.goals[idx];
+            self.delete_target_id = Some(goal.id.clone());
+            self.delete_target_name = Some(goal.name.clone());
+            let pct = goal.progress_percent.unwrap_or(0.0);
+            self.delete_target_progress = Some(format!("{pct:.1}%"));
+            self.modal_state = GoalModalState::DeleteConfirm;
+        }
     }
 
     fn populate_edit_form(&mut self, idx: usize) {
@@ -193,10 +222,16 @@ impl GoalsScreen {
         self.form_name = goal.name.clone();
         self.form_target_amount = goal.target_amount.clone().unwrap_or_default();
         self.form_target_date = goal.target_date.clone().unwrap_or_default();
-        self.form_kind_index = goal.kind.as_deref()
-            .and_then(|k| KIND_OPTIONS.iter().position(|&o| o == k)).unwrap_or(0);
-        self.form_status_index = goal.status.as_deref()
-            .and_then(|s| STATUS_OPTIONS.iter().position(|&o| o == s)).unwrap_or(0);
+        self.form_kind_index = goal
+            .kind
+            .as_deref()
+            .and_then(|k| KIND_OPTIONS.iter().position(|&o| o == k))
+            .unwrap_or(0);
+        self.form_status_index = goal
+            .status
+            .as_deref()
+            .and_then(|s| STATUS_OPTIONS.iter().position(|&o| o == s))
+            .unwrap_or(0);
         self.form_field = GoalFormField::Name;
         self.form_error = None;
         self.modal_state = GoalModalState::Edit;
@@ -219,57 +254,107 @@ impl GoalsScreen {
                 let is_create = self.modal_state == GoalModalState::Create;
                 for event in events {
                     if let InputEvent::Key(k) = event {
-                        if k.name == "escape" { self.modal_state = GoalModalState::None; return; }
-                        if k.name == "tab" && !k.shift { self.form_field = self.form_field.next(is_create); return; }
-                        if k.name == "tab" && k.shift { self.form_field = self.form_field.prev(is_create); return; }
-                        if k.name == "enter" { self.submit_form(api); return; }
+                        if k.name == "escape" {
+                            self.modal_state = GoalModalState::None;
+                            return;
+                        }
+                        if k.name == "tab" && !k.shift {
+                            self.form_field = self.form_field.next(is_create);
+                            return;
+                        }
+                        if k.name == "tab" && k.shift {
+                            self.form_field = self.form_field.prev(is_create);
+                            return;
+                        }
+                        if k.name == "enter" || k.key == "ctrl+s" {
+                            self.submit_form(api);
+                            return;
+                        }
                         if self.form_field == GoalFormField::Kind && is_create {
                             if k.name == "right" || k.name == "l" {
-                                self.form_kind_index = (self.form_kind_index + 1) % KIND_OPTIONS.len(); return;
+                                self.form_kind_index =
+                                    (self.form_kind_index + 1) % KIND_OPTIONS.len();
+                                return;
                             }
                             if k.name == "left" || k.name == "h" {
-                                self.form_kind_index = if self.form_kind_index == 0 { KIND_OPTIONS.len() - 1 } else { self.form_kind_index - 1 }; return;
+                                self.form_kind_index = if self.form_kind_index == 0 {
+                                    KIND_OPTIONS.len() - 1
+                                } else {
+                                    self.form_kind_index - 1
+                                };
+                                return;
                             }
                         }
                         if self.form_field == GoalFormField::Status {
                             if k.name == "right" || k.name == "l" {
-                                self.form_status_index = (self.form_status_index + 1) % STATUS_OPTIONS.len(); return;
+                                self.form_status_index =
+                                    (self.form_status_index + 1) % STATUS_OPTIONS.len();
+                                return;
                             }
                             if k.name == "left" || k.name == "h" {
-                                self.form_status_index = if self.form_status_index == 0 { STATUS_OPTIONS.len() - 1 } else { self.form_status_index - 1 }; return;
+                                self.form_status_index = if self.form_status_index == 0 {
+                                    STATUS_OPTIONS.len() - 1
+                                } else {
+                                    self.form_status_index - 1
+                                };
+                                return;
                             }
                         }
                         if k.key == "backspace" {
                             match self.form_field {
-                                GoalFormField::Name => { self.form_name.pop(); }
-                                GoalFormField::TargetAmount => { self.form_target_amount.pop(); }
-                                GoalFormField::TargetDate => { self.form_target_date.pop(); }
+                                GoalFormField::Name => {
+                                    self.form_name.pop();
+                                }
+                                GoalFormField::TargetAmount => {
+                                    self.form_target_amount.pop();
+                                }
+                                GoalFormField::TargetDate => {
+                                    self.form_target_date.pop();
+                                }
                                 _ => {}
                             }
                             return;
                         }
                         if k.key == "ctrl+u" {
                             match self.form_field {
-                                GoalFormField::Name => { self.form_name.clear(); }
-                                GoalFormField::TargetAmount => { self.form_target_amount.clear(); }
-                                GoalFormField::TargetDate => { self.form_target_date.clear(); }
+                                GoalFormField::Name => {
+                                    self.form_name.clear();
+                                }
+                                GoalFormField::TargetAmount => {
+                                    self.form_target_amount.clear();
+                                }
+                                GoalFormField::TargetDate => {
+                                    self.form_target_date.clear();
+                                }
                                 _ => {}
                             }
                             return;
                         }
                         if let Some(ch) = &k.char
-                            && !k.ctrl && !k.alt {
-                                match self.form_field {
-                                    GoalFormField::Name => { self.form_name.push_str(ch); }
-                                    GoalFormField::TargetAmount => { self.form_target_amount.push_str(ch); }
-                                    GoalFormField::TargetDate => { self.form_target_date.push_str(ch); }
-                                    _ => {}
+                            && !k.ctrl
+                            && !k.alt
+                        {
+                            match self.form_field {
+                                GoalFormField::Name => {
+                                    self.form_name.push_str(ch);
                                 }
+                                GoalFormField::TargetAmount => {
+                                    self.form_target_amount.push_str(ch);
+                                }
+                                GoalFormField::TargetDate => {
+                                    self.form_target_date.push_str(ch);
+                                }
+                                _ => {}
                             }
+                        }
                     }
                 }
-                if app.pressed("goal_form_cancel") { self.modal_state = GoalModalState::None; }
-                if app.pressed("goal_form_save") { self.submit_form(api); }
+                if app.pressed("goal_form_cancel") {
+                    self.modal_state = GoalModalState::None;
+                }
+                if app.pressed("goal_form_save") {
+                    self.submit_form(api);
+                }
             }
             GoalModalState::DeleteConfirm => {
                 for event in events {
@@ -284,8 +369,12 @@ impl GoalsScreen {
                         if k.name == "y" || k.name == "enter" {
                             if let Some(ref id) = self.delete_target_id {
                                 match api.delete_goal(id) {
-                                    Ok(()) => { self.fetch_goals(api); }
-                                    Err(e) => { self.form_error = Some(format!("Erro ao excluir: {e}")); }
+                                    Ok(()) => {
+                                        self.fetch_goals(api);
+                                    }
+                                    Err(e) => {
+                                        self.form_error = Some(format!("Erro ao excluir: {e}"));
+                                    }
                                 }
                             }
                             self.modal_state = GoalModalState::None;
@@ -305,8 +394,12 @@ impl GoalsScreen {
                 if app.pressed("goal_delete_confirm") {
                     if let Some(ref id) = self.delete_target_id {
                         match api.delete_goal(id) {
-                            Ok(()) => { self.fetch_goals(api); }
-                            Err(e) => { self.form_error = Some(format!("Erro ao excluir: {e}")); }
+                            Ok(()) => {
+                                self.fetch_goals(api);
+                            }
+                            Err(e) => {
+                                self.form_error = Some(format!("Erro ao excluir: {e}"));
+                            }
                         }
                     }
                     self.modal_state = GoalModalState::None;
@@ -344,7 +437,13 @@ impl GoalsScreen {
                         let status = STATUS_OPTIONS.get(self.form_status_index).copied();
                         let td = self.form_target_date.trim();
                         let target_date = if td.is_empty() { None } else { Some(td) };
-                        api.update_goal(&goal_id, Some(name), Some(target_amount), status, target_date)
+                        api.update_goal(
+                            &goal_id,
+                            Some(name),
+                            Some(target_amount),
+                            status,
+                            target_date,
+                        )
                     } else {
                         self.form_error = Some("Meta n\u{e3}o encontrada.".to_string());
                         return;
@@ -357,8 +456,13 @@ impl GoalsScreen {
             _ => return,
         };
         match result {
-            Ok(_) => { self.modal_state = GoalModalState::None; self.fetch_goals(api); }
-            Err(e) => { self.form_error = Some(format!("Erro: {e}")); }
+            Ok(_) => {
+                self.modal_state = GoalModalState::None;
+                self.fetch_goals(api);
+            }
+            Err(e) => {
+                self.form_error = Some(format!("Erro: {e}"));
+            }
         }
     }
 }
@@ -366,33 +470,6 @@ impl GoalsScreen {
 impl Default for GoalsScreen {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-fn format_brl(amount_str: &str) -> String {
-    let amount_str = amount_str.trim();
-    let clean_str = amount_str
-        .replace(['.', ',', ' '], "");
-    if let Ok(amount) = clean_str.parse::<f64>() {
-        let formatted = format!("{amount:.2}");
-        let parts: Vec<&str> = formatted.split('.').collect();
-        if parts.len() == 2 {
-            let integer_part = parts[0];
-            let decimal_part = parts[1];
-            let mut result = String::new();
-            let chars: Vec<char> = integer_part.chars().collect();
-            for (i, c) in chars.iter().enumerate() {
-                if i > 0 && (chars.len() - i).is_multiple_of(3) {
-                    result.push('.');
-                }
-                result.push(*c);
-            }
-            format!("{result},{decimal_part}")
-        } else {
-            format!("{},00", parts[0])
-        }
-    } else {
-        amount_str.to_string()
     }
 }
 
@@ -406,15 +483,14 @@ fn status_badge(status: Option<&str>) -> String {
     }
 }
 
-pub fn render_with_state(
-    ui: &mut Container<'_>,
-    screen: &mut GoalsScreen,
-    api: &ApiClient,
-) {
+pub fn render_with_state(ui: &mut Container<'_>, screen: &mut GoalsScreen, api: &ApiClient) {
     screen.load_initial(api);
 
     let goal_count = screen.goals.len();
-    let panel_title = format!("Metas ({goal_count})");
+    let panel_title = format!(
+        "Metas ({}/{goal_count})",
+        screen.selected_index.unwrap_or(0) + usize::from(goal_count > 0)
+    );
     let error_msg = screen.error.clone();
     let loading = screen.loading;
     let selected = screen.selected_index;
@@ -429,124 +505,86 @@ pub fn render_with_state(
     let delete_target_name = screen.delete_target_name.clone();
     let delete_target_progress = screen.delete_target_progress.clone();
 
-    let goal_displays: Vec<_> = screen
+    let rows = screen
         .goals
         .iter()
-        .enumerate()
-        .map(|(i, goal)| {
-            let is_selected = selected == Some(i);
-            let name = goal.name.clone();
-            let kind = goal
-                .kind
-                .clone()
-                .unwrap_or_else(|| "N\u{e3}o especificado".to_string());
-            let status_text = status_badge(goal.status.as_deref());
-            let target_display = goal
-                .target_amount
-                .as_ref().map_or_else(|| "N\u{e3}o definido".to_string(), |s| format!("R$ {}", format_brl(s)));
-            let current_display = goal
-                .current_amount
-                .as_ref().map_or_else(|| "R$ 0,00".to_string(), |s| format!("R$ {}", format_brl(s)));
-            let currency = goal
-                .currency_code
-                .clone()
-                .unwrap_or_else(|| "BRL".to_string());
-            let progress_pct = goal.progress_percent.unwrap_or(0.0);
-            let progress_ratio = (progress_pct / 100.0).clamp(0.0, 1.0);
-            let pct_text = format!("{progress_pct:.1}%");
-            let target_date = goal
-                .target_date
-                .clone()
-                .unwrap_or_else(|| "N\u{e3}o definido".to_string());
-            let created_at = goal
-                .created_at
-                .clone()
-                .unwrap_or_else(|| "Desconhecido".to_string());
-            let item_title = format!("{name} - {status_text}");
-            (
-                is_selected,
-                item_title,
-                kind,
-                target_display,
-                current_display,
-                currency,
-                progress_ratio,
-                pct_text,
-                target_date,
-                created_at,
-            )
+        .map(|goal| {
+            TableRow::new([
+                goal.name.clone(),
+                crate::presentation::format_currency(
+                    goal.current_amount.as_deref(),
+                    goal.currency_code.as_deref(),
+                ),
+                crate::presentation::format_currency(
+                    goal.target_amount.as_deref(),
+                    goal.currency_code.as_deref(),
+                ),
+                format!("{:.0}%", goal.progress_percent.unwrap_or(0.0)),
+            ])
         })
-        .collect();
-
+        .collect::<Vec<_>>();
+    let detail = selected
+        .and_then(|index| screen.goals.get(index))
+        .map(|goal| {
+            format!(
+                "{} · {} · Até {} · Criada {}",
+                status_badge(goal.status.as_deref()),
+                goal.kind.as_deref().unwrap_or("Sem tipo"),
+                goal.target_date.as_deref().unwrap_or("Sem prazo"),
+                goal.created_at.as_deref().unwrap_or("—")
+            )
+        });
     ui.column(Column::new().gap(1), move |col| {
-        col.panel(Panel::new().title(&panel_title), move |p| {
-            if loading {
-                p.text("Carregando...");
-                return;
-            }
-            if let Some(ref err) = error_msg {
-                p.styled_text(err, TextStyle::new().fg(COLOR_NEGATIVE));
-                return;
-            }
-            if goal_displays.is_empty() {
-                p.text("Nenhuma meta encontrada.");
-                p.text("Pressione 'n' para criar uma nova meta.");
-                return;
-            }
-
-            p.text("n: Nova Meta | e: Editar | d: Excluir | \u{2191}/\u{2193}: Navegar");
-            p.divider(DividerOptions::default());
-
-            for (
-                is_selected,
-                item_title,
-                kind,
-                target_display,
-                current_display,
-                currency,
-                progress_ratio,
-                pct_text,
-                target_date,
-                created_at,
-            ) in goal_displays.clone()
-            {
-                if is_selected {
-                    p.styled_text(&format!("> {item_title}"), TextStyle::new().bold());
+        col.row(Row::new().size(Size::Cells(1)).gap(1), move |row| {
+            row.button(
+                ButtonOptions::new("Nova meta (n)").variant(ButtonVariant::Primary),
+                "goals:new",
+            );
+            row.button(ButtonOptions::new("Editar (e)"), "goals:edit");
+            row.button(
+                ButtonOptions::new("Excluir (d)").variant(ButtonVariant::Danger),
+                "goals:delete",
+            );
+        });
+        col.panel(
+            Panel::new()
+                .title(panel_title)
+                .footer("j/k Selecionar  n Nova  e Editar  d Excluir"),
+            move |panel| {
+                if loading {
+                    panel.text("Carregando…");
+                } else if let Some(error) = error_msg {
+                    panel.text(&error);
+                } else if rows.is_empty() {
+                    panel.text("Nenhuma meta. Pressione n para criar.");
                 } else {
-                    p.text(&format!("  {item_title}"));
-                }
-                p.key_values(KeyValueOptions {
-                    rows: vec![
-                        KeyValueRow::new("Tipo", &kind),
-                        KeyValueRow::new("Valor Alvo", &target_display),
-                        KeyValueRow::new("Valor Atual", &current_display),
-                        KeyValueRow::new("Moeda", &currency),
-                        KeyValueRow::new("Data Alvo", &target_date),
-                        KeyValueRow::new("Criado em", &created_at),
-                    ],
-                    ..Default::default()
-                });
-                p.divider(DividerOptions::default());
-                let pr = progress_ratio;
-                let pt = pct_text.clone();
-                p.draw(move |s| {
-                    hqtui::widgets::draw_meter(
-                        s,
-                        &hqtui::widgets::MeterOptions {
-                            value: pr,
-                            label: Some("Progresso".into()),
-                            text: Some(pt.clone()),
+                    panel.table(
+                        TableOptions {
+                            columns: vec![
+                                TableColumn::new("Meta").width(Size::Fill),
+                                TableColumn::new("Atual")
+                                    .width(Size::Cells(16))
+                                    .align(Align::Right),
+                                TableColumn::new("Alvo")
+                                    .width(Size::Cells(16))
+                                    .align(Align::Right),
+                                TableColumn::new("% ")
+                                    .width(Size::Cells(5))
+                                    .align(Align::Right),
+                            ],
+                            rows,
+                            selected,
+                            zebra: true,
+                            follow_selection: true,
                             ..Default::default()
                         },
+                        "goals:table",
                     );
-                });
-                p.divider(DividerOptions::default());
-            }
-        });
-
-        col.button(
-            ButtonOptions::new("Nova Meta").variant(ButtonVariant::Primary),
-            "goals:new",
+                    if let Some(detail) = detail {
+                        panel.text(&detail);
+                    }
+                }
+            },
         );
     });
 
@@ -563,7 +601,10 @@ pub fn render_with_state(
             } else {
                 form_target_amount.clone()
             };
-            let kind_label = KIND_OPTIONS.get(form_kind_index).copied().unwrap_or("savings");
+            let kind_label = KIND_OPTIONS
+                .get(form_kind_index)
+                .copied()
+                .unwrap_or("savings");
             let kind_display = if form_field == GoalFormField::Kind {
                 format!("< {kind_label} >")
             } else {
@@ -576,18 +617,19 @@ pub fn render_with_state(
             };
             let err = form_error.clone();
 
-            ui.modal(ModalOptions {
+            let options = ModalOptions {
                 title: Some("Nova Meta".to_string()),
                 message: Some(format!(
                     "Nome: {name_display}\nValor alvo: {amount_display}\nTipo: {kind_display}\nData alvo (YYYY-MM-DD): {date_display}\n\nTab: pr\u{f3}ximo campo | Enter: salvar | Esc: cancelar{}",
                     err.map(|e| format!("\n\n{e}")).unwrap_or_default()
                 )),
-                buttons: vec![
-                    ModalButton::new("Cancelar"),
-                    ModalButton::new("Salvar"),
-                ],
+                buttons: vec![ModalButton::new("Cancelar"), ModalButton::new("Salvar")],
+                width: Some(68),
+                align: Some(Align::Left),
                 ..Default::default()
-            });
+            };
+            screen.dialog = Some(options.clone());
+            ui.modal(options);
         }
         GoalModalState::Edit => {
             let name_display = if form_field == GoalFormField::Name {
@@ -600,7 +642,10 @@ pub fn render_with_state(
             } else {
                 form_target_amount.clone()
             };
-            let status_label = STATUS_OPTIONS.get(form_status_index).copied().unwrap_or("active");
+            let status_label = STATUS_OPTIONS
+                .get(form_status_index)
+                .copied()
+                .unwrap_or("active");
             let status_display = if form_field == GoalFormField::Status {
                 format!("< {status_label} >")
             } else {
@@ -613,33 +658,35 @@ pub fn render_with_state(
             };
             let err = form_error.clone();
 
-            ui.modal(ModalOptions {
+            let options = ModalOptions {
                 title: Some("Editar Meta".to_string()),
                 message: Some(format!(
                     "Nome: {name_display}\nValor alvo: {amount_display}\nStatus: {status_display}\nData alvo (YYYY-MM-DD): {date_display}\n\nTab: pr\u{f3}ximo campo | Enter: salvar | Esc: cancelar{}",
                     err.map(|e| format!("\n\n{e}")).unwrap_or_default()
                 )),
-                buttons: vec![
-                    ModalButton::new("Cancelar"),
-                    ModalButton::new("Salvar"),
-                ],
+                buttons: vec![ModalButton::new("Cancelar"), ModalButton::new("Salvar")],
+                width: Some(68),
+                align: Some(Align::Left),
                 ..Default::default()
-            });
+            };
+            screen.dialog = Some(options.clone());
+            ui.modal(options);
         }
         GoalModalState::DeleteConfirm => {
             let target = delete_target_name.unwrap_or_default();
             let progress = delete_target_progress.unwrap_or_default();
-            ui.modal(ModalOptions {
+            let options = ModalOptions {
                 title: Some("Confirmar Exclus\u{e3}o".to_string()),
                 message: Some(format!(
                     "Tem certeza que deseja excluir a meta \"{target}\"?\nProgresso atual: {progress}\n\nEsta a\u{e7}\u{e3}o n\u{e3}o pode ser desfeita."
                 )),
-                buttons: vec![
-                    ModalButton::new("Cancelar"),
-                    ModalButton::new("Excluir"),
-                ],
+                buttons: vec![ModalButton::new("Cancelar"), ModalButton::new("Excluir")],
+                width: Some(68),
+                align: Some(Align::Left),
                 ..Default::default()
-            });
+            };
+            screen.dialog = Some(options.clone());
+            ui.modal(options);
         }
         GoalModalState::None => {}
     }

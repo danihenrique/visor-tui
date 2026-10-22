@@ -1,11 +1,11 @@
-use hqtui::prelude::*;
 use hqtui::color::Color;
 use hqtui::input::InputEvent;
+use hqtui::prelude::*;
+use hqtui::unicode::Align;
 use hqtui::widgets::{
-    ButtonOptions, ButtonVariant, ModalButton, ModalOptions, TableOptions, TableColumn, TableRow,
+    ButtonOptions, ButtonVariant, ModalButton, ModalOptions, TableColumn, TableOptions, TableRow,
     TextStyle,
 };
-use hqtui::unicode::Align;
 
 use crate::api::ApiClient;
 use crate::models::Category;
@@ -72,6 +72,7 @@ pub struct CategoriesScreen {
     pub delete_target_name: Option<String>,
     pub include_hidden: bool,
     pub loaded: bool,
+    dialog: Option<ModalOptions>,
 }
 
 impl CategoriesScreen {
@@ -94,6 +95,7 @@ impl CategoriesScreen {
             delete_target_name: None,
             include_hidden: false,
             loaded: false,
+            dialog: None,
         }
     }
 
@@ -111,6 +113,11 @@ impl CategoriesScreen {
         match api.categories(self.include_hidden) {
             Ok(cats) => {
                 self.categories = cats;
+                self.selected_index = (!self.categories.is_empty()).then_some(
+                    self.selected_index
+                        .unwrap_or(0)
+                        .min(self.categories.len().saturating_sub(1)),
+                );
                 self.loading = false;
             }
             Err(e) => {
@@ -122,7 +129,12 @@ impl CategoriesScreen {
 
     pub fn handle_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
         if self.modal_state != CategoryModalState::None {
-            self.handle_modal_input(app, api, events);
+            let modal_events = crate::presentation::modal_events(
+                events,
+                app.terminal.size(),
+                self.dialog.as_ref(),
+            );
+            self.handle_modal_input(app, api, &modal_events);
             return;
         }
 
@@ -146,6 +158,11 @@ impl CategoriesScreen {
                         };
                         self.selected_index = Some(prev);
                     }
+                    return;
+                }
+                if k.name == "h" {
+                    self.include_hidden = !self.include_hidden;
+                    self.fetch_categories(api);
                     return;
                 }
                 if k.name == "n" {
@@ -188,30 +205,32 @@ impl CategoriesScreen {
 
     fn open_edit_modal(&mut self) {
         if let Some(idx) = self.selected_index
-            && idx < self.categories.len() {
-                let cat = &self.categories[idx];
-                self.form_name = cat.name.clone();
-                self.form_type_index = CATEGORY_TYPES
-                    .iter()
-                    .position(|t| cat.category_type.as_deref() == Some(t))
-                    .unwrap_or(0);
-                self.form_parent_id = cat.parent_id.clone().unwrap_or_default();
-                self.form_kind = cat.kind.clone().unwrap_or_default();
-                self.form_hidden = cat.hidden;
-                self.form_field = CategoryFormField::Name;
-                self.form_error = None;
-                self.modal_state = CategoryModalState::Edit;
-            }
+            && idx < self.categories.len()
+        {
+            let cat = &self.categories[idx];
+            self.form_name = cat.name.clone();
+            self.form_type_index = CATEGORY_TYPES
+                .iter()
+                .position(|t| cat.category_type.as_deref() == Some(t))
+                .unwrap_or(0);
+            self.form_parent_id = cat.parent_id.clone().unwrap_or_default();
+            self.form_kind = cat.kind.clone().unwrap_or_default();
+            self.form_hidden = cat.hidden;
+            self.form_field = CategoryFormField::Name;
+            self.form_error = None;
+            self.modal_state = CategoryModalState::Edit;
+        }
     }
 
     fn open_delete_confirm(&mut self) {
         if let Some(idx) = self.selected_index
-            && idx < self.categories.len() {
-                let cat = &self.categories[idx];
-                self.delete_target_id = Some(cat.id.clone());
-                self.delete_target_name = Some(cat.name.clone());
-                self.modal_state = CategoryModalState::DeleteConfirm;
-            }
+            && idx < self.categories.len()
+        {
+            let cat = &self.categories[idx];
+            self.delete_target_id = Some(cat.id.clone());
+            self.delete_target_name = Some(cat.name.clone());
+            self.modal_state = CategoryModalState::DeleteConfirm;
+        }
     }
 
     fn handle_modal_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
@@ -231,14 +250,15 @@ impl CategoriesScreen {
                             self.form_field = self.form_field.prev();
                             return;
                         }
-                        if k.name == "enter" {
+                        if k.name == "enter" || k.key == "ctrl+s" {
                             self.submit_form(api);
                             return;
                         }
                         // Type field: left/right to cycle
                         if self.form_field == CategoryFormField::Type {
                             if k.name == "right" || k.name == "l" {
-                                self.form_type_index = (self.form_type_index + 1) % CATEGORY_TYPES.len();
+                                self.form_type_index =
+                                    (self.form_type_index + 1) % CATEGORY_TYPES.len();
                                 return;
                             }
                             if k.name == "left" || k.name == "h" {
@@ -252,38 +272,59 @@ impl CategoriesScreen {
                         }
                         // Hidden field: space or y/n to toggle
                         if self.form_field == CategoryFormField::Hidden
-                            && (k.name == "space" || k.name == "y" || k.name == "n") {
-                                self.form_hidden = !self.form_hidden;
-                                return;
-                            }
+                            && (k.name == "space" || k.name == "y" || k.name == "n")
+                        {
+                            self.form_hidden = !self.form_hidden;
+                            return;
+                        }
                         // Text fields: backspace, ctrl+u, char input
                         if k.key == "backspace" {
                             match self.form_field {
-                                CategoryFormField::Name => { self.form_name.pop(); }
-                                CategoryFormField::Parent => { self.form_parent_id.pop(); }
-                                CategoryFormField::Kind => { self.form_kind.pop(); }
+                                CategoryFormField::Name => {
+                                    self.form_name.pop();
+                                }
+                                CategoryFormField::Parent => {
+                                    self.form_parent_id.pop();
+                                }
+                                CategoryFormField::Kind => {
+                                    self.form_kind.pop();
+                                }
                                 _ => {}
                             }
                             return;
                         }
                         if k.key == "ctrl+u" {
                             match self.form_field {
-                                CategoryFormField::Name => { self.form_name.clear(); }
-                                CategoryFormField::Parent => { self.form_parent_id.clear(); }
-                                CategoryFormField::Kind => { self.form_kind.clear(); }
+                                CategoryFormField::Name => {
+                                    self.form_name.clear();
+                                }
+                                CategoryFormField::Parent => {
+                                    self.form_parent_id.clear();
+                                }
+                                CategoryFormField::Kind => {
+                                    self.form_kind.clear();
+                                }
                                 _ => {}
                             }
                             return;
                         }
                         if let Some(ch) = &k.char
-                            && !k.ctrl && !k.alt {
-                                match self.form_field {
-                                    CategoryFormField::Name => { self.form_name.push_str(ch); }
-                                    CategoryFormField::Parent => { self.form_parent_id.push_str(ch); }
-                                    CategoryFormField::Kind => { self.form_kind.push_str(ch); }
-                                    _ => {}
+                            && !k.ctrl
+                            && !k.alt
+                        {
+                            match self.form_field {
+                                CategoryFormField::Name => {
+                                    self.form_name.push_str(ch);
                                 }
+                                CategoryFormField::Parent => {
+                                    self.form_parent_id.push_str(ch);
+                                }
+                                CategoryFormField::Kind => {
+                                    self.form_kind.push_str(ch);
+                                }
+                                _ => {}
                             }
+                        }
                     }
                 }
             }
@@ -348,10 +389,11 @@ impl CategoriesScreen {
 
         // Validate parent_id references an existing category
         if let Some(pid) = parent_id
-            && !self.categories.iter().any(|c| c.id == pid) {
-                self.form_error = Some(format!("Categoria pai nao encontrada: {pid}"));
-                return;
-            }
+            && !self.categories.iter().any(|c| c.id == pid)
+        {
+            self.form_error = Some(format!("Categoria pai nao encontrada: {pid}"));
+            return;
+        }
 
         let kind = if self.form_kind.trim().is_empty() {
             None
@@ -360,9 +402,7 @@ impl CategoriesScreen {
         };
 
         let result = match self.modal_state {
-            CategoryModalState::Create => {
-                api.create_category(name, category_type, parent_id, kind)
-            }
+            CategoryModalState::Create => api.create_category(name, category_type, parent_id, kind),
             CategoryModalState::Edit => {
                 if let Some(idx) = self.selected_index {
                     if idx < self.categories.len() {
@@ -451,8 +491,12 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut CategoriesScreen, 
 
     let columns = vec![
         TableColumn::new("Nome").width(Size::Fill),
-        TableColumn::new("Tipo").width(Size::Cells(12)).align(Align::Left),
-        TableColumn::new("Kind").width(Size::Cells(12)).align(Align::Left),
+        TableColumn::new("Tipo")
+            .width(Size::Cells(12))
+            .align(Align::Left),
+        TableColumn::new("Kind")
+            .width(Size::Cells(12))
+            .align(Align::Left),
     ];
 
     let has_rows = !table_rows.is_empty();
@@ -473,7 +517,7 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut CategoriesScreen, 
 
     ui.column(Column::new().gap(1), move |col| {
         // Action buttons row
-        col.row(Row::new().gap(1), move |r| {
+        col.row(Row::new().size(Size::Cells(1)).gap(1), move |r| {
             r.button(
                 ButtonOptions::new("Nova Categoria (n)").variant(ButtonVariant::Primary),
                 "categories:new",
@@ -502,6 +546,7 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut CategoriesScreen, 
             } else if has_rows {
                 p.table(
                     TableOptions {
+                        follow_selection: true,
                         columns: columns.clone(),
                         rows: table_rows.clone(),
                         header: true,
@@ -520,7 +565,7 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut CategoriesScreen, 
         });
 
         // Key hints
-        col.row(Row::new(), move |r| {
+        col.row(Row::new().size(Size::Cells(1)), move |r| {
             r.styled_text(
                 "n: Nova | e: Editar | d: Excluir | ↑↓: Navegar",
                 TextStyle::new().fg(COLOR_NEUTRAL),
@@ -576,32 +621,34 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut CategoriesScreen, 
 
             let err = form_error.clone();
 
-            ui.modal(ModalOptions {
+            let options = ModalOptions {
                 title: Some(title.to_string()),
                 message: Some(format!(
                     "Nome: {name_display}\nTipo: {type_display}\nPai (ID): {parent_display}\nKind: {kind_display}\nOculta: {hidden_display}\n\nTab: proximo campo | Enter: salvar | Esc: cancelar{}",
                     err.map(|e| format!("\n\n{e}")).unwrap_or_default()
                 )),
-                buttons: vec![
-                    ModalButton::new("Cancelar"),
-                    ModalButton::new("Salvar"),
-                ],
+                buttons: vec![ModalButton::new("Cancelar"), ModalButton::new("Salvar")],
+                width: Some(68),
+                align: Some(Align::Left),
                 ..Default::default()
-            });
+            };
+            screen.dialog = Some(options.clone());
+            ui.modal(options);
         }
         CategoryModalState::DeleteConfirm => {
             let target = delete_target_name.unwrap_or_default();
-            ui.modal(ModalOptions {
+            let options = ModalOptions {
                 title: Some("Confirmar Exclusao".to_string()),
                 message: Some(format!(
                     "Tem certeza que deseja excluir a categoria \"{target}\"?\n\nEsta acao nao pode ser desfeita."
                 )),
-                buttons: vec![
-                    ModalButton::new("Cancelar"),
-                    ModalButton::new("Excluir"),
-                ],
+                buttons: vec![ModalButton::new("Cancelar"), ModalButton::new("Excluir")],
+                width: Some(68),
+                align: Some(Align::Left),
                 ..Default::default()
-            });
+            };
+            screen.dialog = Some(options.clone());
+            ui.modal(options);
         }
         CategoryModalState::None => {}
     }

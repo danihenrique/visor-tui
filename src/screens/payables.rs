@@ -1,7 +1,7 @@
-use hqtui::prelude::*;
 use hqtui::color::Color;
-use hqtui::widgets::{TableOptions, TableColumn, TableRow, ButtonOptions, ButtonVariant};
+use hqtui::prelude::*;
 use hqtui::unicode::Align;
+use hqtui::widgets::{ButtonOptions, ButtonVariant, TableColumn, TableOptions, TableRow};
 
 use crate::api::{ApiClient, ApiError};
 use crate::models::InstallmentPlan;
@@ -15,46 +15,8 @@ enum Tab {
     Completed,
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn format_money(amount: Option<&str>, currency: Option<&str>) -> String {
-    let raw = match amount {
-        Some(s) if !s.is_empty() => s,
-        _ => return "—".to_string(),
-    };
-    let curr = currency.unwrap_or("BRL");
-
-    match raw.parse::<f64>() {
-        Ok(v) => {
-            let negative = v < 0.0;
-            let abs = v.abs();
-            let integer_part = abs.trunc() as u64;
-            let decimal_part = ((abs.fract()) * 100.0).round() as u64;
-            let int_str = format_integer_with_dots(integer_part);
-            let formatted = format!("{int_str},{decimal_part:02} {curr}");
-            if negative {
-                format!("-{formatted}")
-            } else {
-                formatted
-            }
-        }
-        Err(_) => format!("{raw} {curr}"),
-    }
-}
-
-fn format_integer_with_dots(n: u64) -> String {
-    let s = n.to_string();
-    let len = s.len();
-    if len <= 3 {
-        return s;
-    }
-    let mut result = String::with_capacity(len + len / 3);
-    for (i, ch) in s.chars().enumerate() {
-        if i > 0 && (len - i).is_multiple_of(3) {
-            result.push('.');
-        }
-        result.push(ch);
-    }
-    result
+    crate::presentation::format_currency(amount, currency)
 }
 
 fn format_date(date: Option<&str>) -> String {
@@ -96,7 +58,10 @@ fn build_row_data(items: &[InstallmentPlan]) -> Vec<PayableRowData> {
         .iter()
         .map(|item| {
             let currency = item.currency_code.as_deref();
-            let description = item.description.clone().unwrap_or_else(|| "Sem descrição".to_string());
+            let description = item
+                .description
+                .clone()
+                .unwrap_or_else(|| "Sem descrição".to_string());
             let progress = format_progress(item.paid_installments, item.total_installments);
             let installment_amount = format_money(item.installment_amount.as_deref(), currency);
             let total = format_money(item.total_amount.as_deref(), currency);
@@ -119,12 +84,24 @@ fn build_row_data(items: &[InstallmentPlan]) -> Vec<PayableRowData> {
 fn table_columns() -> Vec<TableColumn> {
     vec![
         TableColumn::new("Descrição").width(Size::Fill),
-        TableColumn::new("Parcelas").width(Size::Cells(10)).align(Align::Center),
-        TableColumn::new("Valor Parcela").width(Size::Cells(18)).align(Align::Right),
-        TableColumn::new("Total").width(Size::Cells(18)).align(Align::Right),
-        TableColumn::new("Restante").width(Size::Cells(18)).align(Align::Right),
-        TableColumn::new("Próximo Vencimento").width(Size::Cells(18)).align(Align::Right),
-        TableColumn::new("Status").width(Size::Cells(12)).align(Align::Center),
+        TableColumn::new("Parcelas")
+            .width(Size::Cells(10))
+            .align(Align::Center),
+        TableColumn::new("Valor Parcela")
+            .width(Size::Cells(18))
+            .align(Align::Right),
+        TableColumn::new("Total")
+            .width(Size::Cells(18))
+            .align(Align::Right),
+        TableColumn::new("Restante")
+            .width(Size::Cells(18))
+            .align(Align::Right),
+        TableColumn::new("Próximo Vencimento")
+            .width(Size::Cells(18))
+            .align(Align::Right),
+        TableColumn::new("Status")
+            .width(Size::Cells(12))
+            .align(Align::Center),
     ]
 }
 
@@ -136,7 +113,53 @@ fn draw_error(ui: &mut Container<'_>, err: &ApiError) {
     });
 }
 
+#[derive(Default)]
+pub struct PayablesScreen {
+    tab: usize,
+    selected: Option<usize>,
+}
+
+impl PayablesScreen {
+    pub fn handle_input(&mut self, app: &App, events: &[hqtui::input::InputEvent]) {
+        for event in events {
+            if let hqtui::input::InputEvent::Key(key) = event {
+                match key.name.as_str() {
+                    "left" | "h" => {
+                        self.tab = (self.tab + 2) % 3;
+                        self.selected = None;
+                    }
+                    "right" | "l" => {
+                        self.tab = (self.tab + 1) % 3;
+                        self.selected = None;
+                    }
+                    "down" | "j" => {
+                        self.selected =
+                            Some(self.selected.map_or(0, |index| index.saturating_add(1)));
+                    }
+                    "up" | "k" => {
+                        self.selected = self.selected.map(|index| index.saturating_sub(1));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for (index, id) in ["tab_all", "tab_active", "tab_completed"]
+            .iter()
+            .enumerate()
+        {
+            if app.pressed(id) {
+                self.tab = index;
+                self.selected = None;
+            }
+        }
+    }
+}
+
 pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
+    render_with_state(ui, api, &PayablesScreen::default());
+}
+
+pub fn render_with_state(ui: &mut Container<'_>, api: &ApiClient, screen: &PayablesScreen) {
     let plans_result = api.installment_plans(None);
 
     let plans = match plans_result {
@@ -148,7 +171,11 @@ pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
     };
 
     // Default tab
-    let active_tab = Tab::All;
+    let active_tab = match screen.tab {
+        1 => Tab::Active,
+        2 => Tab::Completed,
+        _ => Tab::All,
+    };
 
     // Pre-compute all row data before entering closures
     let all_rows = build_row_data(&plans);
@@ -156,13 +183,25 @@ pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
     // Filter rows by tab
     let active_rows: Vec<PayableRowData> = all_rows
         .iter()
-        .filter(|r| r.status == "active" || r.status == "Active" || r.status == "ativo" || r.status == "Ativo")
+        .filter(|r| {
+            r.status == "active"
+                || r.status == "Active"
+                || r.status == "ativo"
+                || r.status == "Ativo"
+        })
         .cloned()
         .collect();
 
     let completed_rows: Vec<PayableRowData> = all_rows
         .iter()
-        .filter(|r| r.status == "completed" || r.status == "Completed" || r.status == "concluído" || r.status == "Concluído" || r.status == "concluido" || r.status == "Concluido")
+        .filter(|r| {
+            r.status == "completed"
+                || r.status == "Completed"
+                || r.status == "concluído"
+                || r.status == "Concluído"
+                || r.status == "concluido"
+                || r.status == "Concluido"
+        })
         .cloned()
         .collect();
 
@@ -244,13 +283,19 @@ pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
     let (current_table_rows, empty_msg) = match active_tab {
         Tab::All => (all_table_rows, "Nenhum parcelamento encontrado."),
         Tab::Active => (active_table_rows, "Nenhum parcelamento ativo encontrado."),
-        Tab::Completed => (completed_table_rows, "Nenhum parcelamento concluído encontrado."),
+        Tab::Completed => (
+            completed_table_rows,
+            "Nenhum parcelamento concluído encontrado.",
+        ),
     };
     let has_rows = !current_table_rows.is_empty();
+    let selected = screen
+        .selected
+        .map(|index| index.min(current_table_rows.len().saturating_sub(1)));
 
     ui.column(Column::new().gap(1), move |col| {
         // Tab buttons row
-        col.row(Row::new().gap(1), move |r| {
+        col.row(Row::new().size(Size::Cells(1)).gap(1), move |r| {
             r.button(
                 ButtonOptions::new(all_label.clone()).variant(all_variant),
                 "tab_all",
@@ -274,6 +319,8 @@ pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
                         rows: current_table_rows.clone(),
                         header: true,
                         zebra: true,
+                        selected,
+                        follow_selection: true,
                         ..Default::default()
                     },
                     "",

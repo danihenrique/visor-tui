@@ -1,5 +1,5 @@
-use hqtui::prelude::*;
 use hqtui::color::Color;
+use hqtui::prelude::*;
 use hqtui::widgets::{
     ButtonOptions, ButtonVariant, DividerOptions, KeyValueOptions, KeyValueRow, ModalButton,
     ModalOptions, TextStyle,
@@ -49,14 +49,21 @@ pub fn render(ui: &mut Container<'_>, api: &ApiClient, modal: SettingsModal) {
     let user_name = me.name.clone();
     let user_email = me.email.clone();
     let user_locale = me.locale.clone().unwrap_or_else(|| "—".to_string());
-    let user_currency = me.display_currency_code.clone().unwrap_or_else(|| "—".to_string());
+    let user_currency = me
+        .display_currency_code
+        .clone()
+        .unwrap_or_else(|| "—".to_string());
     let user_plan = me.plan.clone().unwrap_or_else(|| "—".to_string());
-    let active_space_id = me.active_space_id.clone();
+    let active_space_id = crate::config::active_space_id().or_else(|| me.active_space_id.clone());
 
     // Find active space name
     let active_space_name = active_space_id
         .as_deref()
-        .and_then(|sid| spaces.iter().find(|s| s.id == sid)).map_or_else(|| "Nenhum espaço ativo".to_string(), |s| format!("* {}", s.name));
+        .and_then(|sid| spaces.iter().find(|s| s.id == sid))
+        .map_or_else(
+            || "Nenhum espaço ativo".to_string(),
+            |s| format!("* {}", s.name),
+        );
 
     let has_active_space = active_space_id.is_some();
 
@@ -117,18 +124,24 @@ pub fn render(ui: &mut Container<'_>, api: &ApiClient, modal: SettingsModal) {
         // Sair button
         col.row(Row::new(), move |r| {
             r.button(
-                ButtonOptions::new("Sair").variant(ButtonVariant::Danger),
+                ButtonOptions::new("Sair da conta (l)").variant(ButtonVariant::Danger),
                 "logout",
             );
+            r.button(ButtonOptions::new("Trocar espaço (s)"), "change_space");
         });
     });
 
     // Draw logout confirmation modal overlay
     if modal == SettingsModal::LogoutConfirm {
-        ui.modal(ModalOptions {
+        ui.modal(logout_dialog());
+    }
+}
+#[must_use]
+pub fn logout_dialog() -> ModalOptions {
+    ModalOptions {
             title: Some("Confirmar Logout".to_string()),
             message: Some(
-                "Tem certeza que deseja sair? Isso removerá as credenciais armazenadas."
+                "Tem certeza que deseja sair? Isso removerá as credenciais armazenadas.\n\nEnter Confirmar | Esc Cancelar"
                     .to_string(),
             ),
             buttons: vec![
@@ -136,6 +149,5 @@ pub fn render(ui: &mut Container<'_>, api: &ApiClient, modal: SettingsModal) {
                 ModalButton::new("Sair"),
             ],
             ..Default::default()
-        });
-    }
+        }
 }
