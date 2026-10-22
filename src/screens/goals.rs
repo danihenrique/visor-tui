@@ -6,6 +6,7 @@ use hqtui::widgets::{
 
 use crate::api::ApiClient;
 use crate::models::Goal;
+use crate::presentation::{Metric, Tone, amount, format_currency, metric_strip};
 
 const KIND_OPTIONS: &[&str] = &["savings", "debt", "investment", "custom"];
 const STATUS_OPTIONS: &[&str] = &["active", "archived", "completed"];
@@ -492,13 +493,37 @@ impl Default for GoalsScreen {
     }
 }
 
-fn status_badge(status: Option<&str>) -> String {
+fn status_badge(status: Option<&str>) -> &str {
     match status {
-        Some("active") => "[ATIVO]".to_string(),
-        Some("archived") => "[ARQUIVADO]".to_string(),
-        Some("completed") => "[CONCLU\u{cd}DO]".to_string(),
-        Some(s) => format!("[{}]", s.to_uppercase()),
-        None => "[SEM STATUS]".to_string(),
+        Some("active") => "Ativa",
+        Some("archived") => "Arquivada",
+        Some("completed") => "Concluída",
+        Some(status) => status,
+        None => "Sem status",
+    }
+}
+
+fn goal_progress(goal: &Goal) -> Option<f64> {
+    goal.progress_percent
+        .filter(|value| value.is_finite())
+        .or_else(|| {
+            let target = amount(goal.target_amount.as_deref())?;
+            (target > 0.0)
+                .then(|| {
+                    amount(goal.current_amount.as_deref()).map(|current| current / target * 100.0)
+                })
+                .flatten()
+        })
+}
+
+fn goal_kind(kind: Option<&str>) -> &str {
+    match kind {
+        Some("savings") => "Reserva",
+        Some("debt") => "Dívida",
+        Some("investment") => "Investimento",
+        Some("custom") => "Personalizada",
+        Some(kind) => kind,
+        None => "Meta",
     }
 }
 
@@ -524,58 +549,104 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut GoalsScreen, api: 
     let delete_target_name = screen.delete_target_name.clone();
     let delete_target_progress = screen.delete_target_progress.clone();
 
+    let theme = ui.theme().clone();
+    let selected_goal = selected.and_then(|index| screen.goals.get(index)).cloned();
+    let active_count = screen
+        .goals
+        .iter()
+        .filter(|goal| goal.status.as_deref() == Some("active"))
+        .count();
+    let metrics = vec![
+        Metric::new(
+            "Metas ativas",
+            format!("{active_count} / {goal_count}"),
+            Tone::Accent,
+        ),
+        Metric::new(
+            "Atual · selecionada",
+            selected_goal.as_ref().map_or_else(
+                || "—".into(),
+                |goal| {
+                    format_currency(
+                        goal.current_amount.as_deref(),
+                        goal.currency_code.as_deref(),
+                    )
+                },
+            ),
+            Tone::Positive,
+        ),
+        Metric::new(
+            "Alvo · selecionada",
+            selected_goal.as_ref().map_or_else(
+                || "—".into(),
+                |goal| {
+                    format_currency(goal.target_amount.as_deref(), goal.currency_code.as_deref())
+                },
+            ),
+            Tone::Neutral,
+        ),
+    ];
     let rows = screen
         .goals
         .iter()
         .map(|goal| {
-            TableRow::new([
+            let mut row = TableRow::new([
                 goal.name.clone(),
-                crate::presentation::format_currency(
+                format_currency(
                     goal.current_amount.as_deref(),
                     goal.currency_code.as_deref(),
                 ),
-                crate::presentation::format_currency(
-                    goal.target_amount.as_deref(),
-                    goal.currency_code.as_deref(),
-                ),
-                format!("{:.0}%", goal.progress_percent.unwrap_or(0.0)),
-            ])
+                format_currency(goal.target_amount.as_deref(), goal.currency_code.as_deref()),
+                goal_progress(goal)
+                    .map_or_else(|| "—".into(), |progress| format!("{progress:.0}%")),
+            ]);
+            row.cell_colors = vec![None, Some(theme.success), None, Some(theme.accent)];
+            row
         })
         .collect::<Vec<_>>();
-    let detail = selected
-        .and_then(|index| screen.goals.get(index))
-        .map(|goal| {
+    let show_detail = ui.height() >= 16;
+    let compact_detail = selected_goal.as_ref().map(|goal| {
+        [
             format!(
-                "{} · {} · Até {} · Criada {}",
+                "{} · {} · Prazo {}",
                 status_badge(goal.status.as_deref()),
-                goal.kind.as_deref().unwrap_or("Sem tipo"),
-                goal.target_date.as_deref().unwrap_or("Sem prazo"),
-                goal.created_at.as_deref().unwrap_or("—")
-            )
-        });
-    ui.column(Column::new().gap(1), move |col| {
+                goal_kind(goal.kind.as_deref()),
+                goal.target_date.as_deref().unwrap_or("não definido")
+            ),
+            format!("Criada {}", goal.created_at.as_deref().unwrap_or("—")),
+        ]
+    });
+    ui.column(Column::new().gap(usize::from(show_detail)), move |col| {
+        if show_detail {
+            metric_strip(col, metrics);
+        }
         col.row(Row::new().size(Size::Cells(1)).gap(1), move |row| {
             row.button(
                 ButtonOptions::new("Nova meta (n)").variant(ButtonVariant::Primary),
                 "goals:new",
             );
-            row.button(ButtonOptions::new("Editar (e)"), "goals:edit");
             row.button(
-                ButtonOptions::new("Excluir (d)").variant(ButtonVariant::Danger),
+                ButtonOptions::new("Editar (e)").variant(ButtonVariant::Ghost),
+                "goals:edit",
+            );
+            row.button(
+                ButtonOptions::new("Excluir (d)").variant(ButtonVariant::Ghost),
                 "goals:delete",
             );
         });
         col.panel(
             Panel::new()
                 .title(panel_title)
+                .border(BorderStyle::Rounded)
                 .footer("j/k Selecionar  n Nova  e Editar  d Excluir"),
             move |panel| {
                 if loading {
-                    panel.text("Carregando…");
+                    panel.label("Carregando suas metas…");
                 } else if let Some(error) = error_msg {
-                    panel.text(&error);
+                    panel.styled_text(&error, TextStyle::new().fg(theme.danger));
                 } else if rows.is_empty() {
-                    panel.text("Nenhuma meta. Pressione n para criar.");
+                    panel.text("Dê um destino ao seu dinheiro.");
+                    panel.label("Pressione n para criar sua primeira meta.");
                 } else {
                     panel.table(
                         TableOptions {
@@ -587,24 +658,61 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut GoalsScreen, api: 
                                 TableColumn::new("Alvo")
                                     .width(Size::Cells(16))
                                     .align(Align::Right),
-                                TableColumn::new("% ")
-                                    .width(Size::Cells(5))
+                                TableColumn::new("Progresso")
+                                    .width(Size::Cells(9))
                                     .align(Align::Right),
                             ],
                             rows,
                             selected,
-                            zebra: true,
                             follow_selection: true,
+                            scrollbar: true,
+                            header_color: Some(theme.muted),
                             ..Default::default()
                         },
                         "goals:table",
                     );
-                    if let Some(detail) = detail {
-                        panel.text(&detail);
-                    }
                 }
             },
         );
+        if show_detail && let Some(goal) = selected_goal {
+            col.panel(
+                Panel::new()
+                    .title(goal.name.clone())
+                    .border(BorderStyle::Rounded)
+                    .size(Size::Cells(5)),
+                move |panel| {
+                    if let Some(progress) = goal_progress(&goal) {
+                        panel.meter(MeterOptions {
+                            value: progress / 100.0,
+                            text: Some(format!("{progress:.0}%")),
+                            color: Some(theme.success),
+                            ..Default::default()
+                        });
+                    } else {
+                        panel.label("Progresso indisponível");
+                    }
+                    panel.label(&format!(
+                        "{} · {} · Prazo {}",
+                        status_badge(goal.status.as_deref()),
+                        goal_kind(goal.kind.as_deref()),
+                        goal.target_date.as_deref().unwrap_or("não definido")
+                    ));
+                    panel.label(&format!(
+                        "Criada {}",
+                        goal.created_at.as_deref().unwrap_or("—")
+                    ));
+                },
+            );
+        }
+        if !show_detail && let Some(lines) = compact_detail {
+            col.sized(Size::Cells(2), move |details| {
+                details.column(Column::new(), move |body| {
+                    for line in lines {
+                        body.label(&line);
+                    }
+                });
+            });
+        }
     });
 
     // Render modals
@@ -715,4 +823,56 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut GoalsScreen, api: 
 pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
     let mut screen = GoalsScreen::new();
     render_with_state(ui, &mut screen, api);
+}
+
+#[cfg(test)]
+mod visual_tests {
+    use super::*;
+
+    #[test]
+    fn compact_goals_keep_dates_and_selected_amounts_visible() {
+        let api = ApiClient::for_test(
+            "http://127.0.0.1:1",
+            crate::auth::Credential::PersonalToken {
+                token: "test-only".into(),
+            },
+            "space",
+        )
+        .unwrap();
+        let mut screen = GoalsScreen::new();
+        screen.loaded = true;
+        screen.selected_index = Some(0);
+        screen.goals = serde_json::from_value(serde_json::json!([{"id":"g", "name":"Reserva", "kind":"savings", "status":"active", "current_amount":"123.45", "target_amount":"246.90", "target_date":"2027-06-01", "created_at":"2026-10-22"}])).unwrap();
+        for (width, height) in [(56, 10), (60, 18), (80, 24)] {
+            let text = hqtui::testing::render_to_text(width, height, "dark", |ui| {
+                render_with_state(ui, &mut screen, &api);
+            });
+            for value in [
+                "Reserva",
+                "123,45 BRL",
+                "246,90 BRL",
+                "2027-06-01",
+                "2026-10-22",
+            ] {
+                assert!(
+                    text.contains(value),
+                    "Missing {value} at {width}x{height}\n{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn missing_goal_progress_is_unknown_or_computed_from_known_amounts() {
+        let mut goal: Goal =
+            serde_json::from_value(serde_json::json!({"id":"g", "name":"Reserva"})).unwrap();
+        assert_eq!(goal_progress(&goal), None);
+        goal.target_amount = Some("200.00".into());
+        goal.current_amount = Some("50.00".into());
+        assert_eq!(goal_progress(&goal), Some(25.0));
+        goal.target_amount = Some("0".into());
+        assert_eq!(goal_progress(&goal), None);
+        goal.progress_percent = Some(80.0);
+        assert_eq!(goal_progress(&goal), Some(80.0));
+    }
 }
