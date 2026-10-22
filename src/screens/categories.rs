@@ -8,7 +8,6 @@ use hqtui::widgets::{
 
 use crate::api::ApiClient;
 use crate::models::Category;
-use crate::presentation::{Metric, Tone, metric_strip};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CategoryModalState {
@@ -69,6 +68,7 @@ pub struct CategoriesScreen {
     pub delete_target_name: Option<String>,
     pub include_hidden: bool,
     pub loaded: bool,
+    pub reload_requested: bool,
     dialog: Option<ModalOptions>,
 }
 
@@ -92,6 +92,7 @@ impl CategoriesScreen {
             delete_target_name: None,
             include_hidden: false,
             loaded: false,
+            reload_requested: false,
             dialog: None,
         }
     }
@@ -107,6 +108,7 @@ impl CategoriesScreen {
     pub fn fetch_categories(&mut self, api: &ApiClient) {
         self.loading = true;
         self.error = None;
+        self.reload_requested = false;
         match api.categories(self.include_hidden) {
             Ok(cats) => {
                 self.categories = cats;
@@ -178,7 +180,7 @@ impl CategoriesScreen {
                 }
                 if k.name == "h" {
                     self.include_hidden = !self.include_hidden;
-                    self.fetch_categories(api);
+                    self.reload_requested = true;
                     return;
                 }
                 if k.name == "n" {
@@ -376,7 +378,7 @@ impl CategoriesScreen {
         if let Some(ref id) = self.delete_target_id {
             match api.delete_category(id) {
                 Ok(()) => {
-                    self.fetch_categories(api);
+                    self.reload_requested = true;
                 }
                 Err(e) => {
                     self.form_error = Some(format!("Erro ao excluir: {e}"));
@@ -441,7 +443,7 @@ impl CategoriesScreen {
         match result {
             Ok(_) => {
                 self.modal_state = CategoryModalState::None;
-                self.fetch_categories(api);
+                self.reload_requested = true;
             }
             Err(e) => {
                 self.form_error = Some(format!("Erro: {e}"));
@@ -545,46 +547,80 @@ fn build_tree_rows(categories: &[Category], theme: &Theme) -> Vec<TableRow> {
 
 pub fn render_with_state(ui: &mut Container<'_>, screen: &mut CategoriesScreen, api: &ApiClient) {
     screen.load_initial(api);
+    render_with_period(ui, screen, &Ok(Vec::new().into()));
+}
 
+pub fn render_with_period(
+    ui: &mut Container<'_>,
+    screen: &mut CategoriesScreen,
+    transactions: &Result<std::sync::Arc<[crate::models::Transaction]>, String>,
+) {
+    let summary = transactions
+        .as_ref()
+        .map(|rows| crate::period::summarize(rows));
     let theme = ui.theme().clone();
     let table_rows = build_tree_rows(&screen.categories, &theme);
-    let metrics = vec![
-        Metric::new(
-            "Categorias",
-            screen.categories.len().to_string(),
-            Tone::Accent,
-        ),
-        Metric::new(
-            "Receitas",
-            screen
-                .categories
+    let mut table_rows = table_rows;
+    let order = category_order(&screen.categories);
+    for (row, (index, _)) in table_rows.iter_mut().zip(order) {
+        let spending = summary
+            .as_ref()
+            .ok()
+            .and_then(|summary| summary.categories.get(&screen.categories[index].id));
+        let values = spending.map(|currencies| {
+            currencies
                 .iter()
-                .filter(|category| category.category_type.as_deref() == Some("income"))
-                .count()
-                .to_string(),
-            Tone::Positive,
-        ),
-        Metric::new(
-            "Despesas",
-            screen
-                .categories
-                .iter()
-                .filter(|category| category.category_type.as_deref() == Some("expense"))
-                .count()
-                .to_string(),
-            Tone::Negative,
-        ),
-    ];
-
+                .filter(|(_, flow)| flow.expenses > 0)
+                .map(|(currency, flow)| crate::period::money_cents(flow.expenses, currency))
+                .collect::<Vec<_>>()
+                .join(" / ")
+        });
+        row.cells
+            .push(values.filter(|value| !value.is_empty()).unwrap_or_else(|| {
+                if summary.is_ok() {
+                    crate::period::money_cents(0, "BRL")
+                } else {
+                    "Indisponível".into()
+                }
+            }));
+        row.cell_colors.push(Some(theme.danger));
+    }
     let columns = vec![
         TableColumn::new("Nome").width(Size::Fill),
         TableColumn::new("Tipo")
             .width(Size::Cells(12))
             .align(Align::Left),
-        TableColumn::new("Grupo").width(Size::Cells(12)),
+        TableColumn::new("Grupo").width(Size::Cells(9)),
         TableColumn::new("Exibição").width(Size::Cells(8)),
+        TableColumn::new("Gastos diretos")
+            .width(Size::Cells(21))
+            .align(Align::Right),
     ];
-
+    let selected_spending = screen
+        .selected_index
+        .and_then(|selected| category_order(&screen.categories).get(selected).copied())
+        .and_then(|(index, _)| {
+            summary.as_ref().ok().map(|summary| {
+                let category = &screen.categories[index];
+                let values = summary
+                    .categories
+                    .get(&category.id)
+                    .map(|currencies| {
+                        currencies
+                            .iter()
+                            .filter(|(_, flow)| flow.expenses > 0)
+                            .map(|(currency, flow)| {
+                                crate::period::money_cents(flow.expenses, currency)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                (category.name.clone(), values)
+            })
+        });
+    let period_error = transactions.as_ref().err().cloned();
+    let period_summary = summary.ok();
+    let transaction_count = transactions.as_ref().map_or(0, |rows| rows.len());
     let has_rows = !table_rows.is_empty();
     let cat_count = screen.categories.len();
     let panel_title = format!("Categorias ({cat_count})");
@@ -602,7 +638,12 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut CategoriesScreen, 
     let delete_target_name = screen.delete_target_name.clone();
 
     ui.column(Column::new().gap(1), move |col| {
-        metric_strip(col, metrics);
+        if let Some(summary) = &period_summary {
+            crate::presentation::period_summary(col, summary, transaction_count);
+        }
+        if let Some(error) = &period_error {
+            col.label(&format!("Período indisponível. {error}"));
+        }
         col.row(Row::new().size(Size::Cells(1)).gap(1), move |row| {
             row.button(
                 ButtonOptions::new("Nova categoria (n)").variant(ButtonVariant::Primary),
@@ -646,6 +687,21 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut CategoriesScreen, 
                 }
             },
         );
+        if let Some((name, values)) = selected_spending
+            && !values.is_empty()
+        {
+            col.sized(
+                Size::Cells(i64::try_from(values.len() + 1).unwrap_or(i64::MAX)),
+                move |detail| {
+                    detail.column(Column::new(), move |body| {
+                        body.label(&format!("Gastos diretos · {name}"));
+                        for value in values {
+                            body.text(&value);
+                        }
+                    });
+                },
+            );
+        }
     });
 
     // Draw modals
@@ -732,6 +788,30 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut CategoriesScreen, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_category_exposes_every_original_currency_at_compact_width() {
+        let mut screen = CategoriesScreen::new();
+        screen.categories = serde_json::from_value(
+            serde_json::json!([{"id":"food", "name":"Mercado", "type":"expense"}]),
+        )
+        .unwrap();
+        screen.selected_index = Some(0);
+        let rows: std::sync::Arc<[crate::models::Transaction]> = serde_json::from_value::<Vec<crate::models::Transaction>>(serde_json::json!([
+            {"id":"brl", "account_id":"a", "category_id":"food", "type":"debit", "amount":"1347.50", "currency_code":"BRL"},
+            {"id":"usd", "account_id":"a", "category_id":"food", "type":"debit", "amount":"12.50", "currency_code":"USD"}
+        ])).unwrap().into();
+        let rendered = hqtui::testing::render_to_text(80, 20, "dark", |ui| {
+            render_with_period(ui, &mut screen, &Ok(rows.clone()));
+        });
+        let detail = rendered
+            .split("Gastos diretos · Mercado")
+            .nth(1)
+            .expect("selected category detail");
+        assert!(detail.contains("1.347,50 BRL"), "{rendered}");
+        assert!(detail.contains("12,50 USD"), "{rendered}");
+        assert!(rendered.contains("Nova categoria"));
+    }
 
     #[test]
     fn edit_and_delete_follow_the_displayed_hierarchy() {

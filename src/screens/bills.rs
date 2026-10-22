@@ -4,6 +4,7 @@ use hqtui::unicode::Align;
 
 use crate::api::ApiClient;
 use crate::models::{Bill, Card};
+use crate::period::{DateRange, Period};
 use crate::presentation::{Metric, Tone, amount, format_currency, metric_strip, money_total};
 
 #[derive(Default)]
@@ -13,26 +14,40 @@ pub struct BillsScreen {
     selected_card: usize,
     selected_bill: Option<usize>,
     error: Option<String>,
+    pub reload_requested: bool,
 }
 
 impl BillsScreen {
-    pub fn load(&mut self, api: &ApiClient) {
+    pub fn load(&mut self, api: &ApiClient, range: DateRange) {
+        self.bills.clear();
+        self.error = None;
+        self.reload_requested = false;
+        let selected_id = self
+            .cards
+            .get(self.selected_card)
+            .map(|card| card.id.clone());
         match api.cards() {
             Ok(cards) => {
                 self.cards = cards;
-                self.selected_card = self.selected_card.min(self.cards.len().saturating_sub(1));
-                self.load_bills(api);
+                self.selected_card = selected_id
+                    .and_then(|id| self.cards.iter().position(|card| card.id == id))
+                    .unwrap_or(0);
+                self.load_bills(api, range);
             }
             Err(error) => self.error = Some(format!("Falha ao carregar cartões: {error}")),
         }
     }
 
-    fn load_bills(&mut self, api: &ApiClient) {
+    fn load_bills(&mut self, api: &ApiClient, range: DateRange) {
         self.error = None;
         self.bills.clear();
         self.selected_bill = None;
         if let Some(card) = self.cards.get(self.selected_card) {
-            match api.bills(&card.id, None, None) {
+            match api.bills(
+                &card.id,
+                Some(&range.start().to_string()),
+                Some(&range.end().to_string()),
+            ) {
                 Ok(bills) => {
                     self.bills = bills;
                     self.selected_bill = (!self.bills.is_empty()).then_some(0);
@@ -42,7 +57,7 @@ impl BillsScreen {
         }
     }
 
-    pub fn handle_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
+    pub fn handle_input(&mut self, app: &App, events: &[InputEvent]) {
         let mut change = 0;
         for event in events {
             if let InputEvent::Key(key) = event {
@@ -73,14 +88,14 @@ impl BillsScreen {
             } else {
                 (self.selected_card + self.cards.len() - 1) % self.cards.len()
             };
-            self.load_bills(api);
+            self.reload_requested = true;
         }
     }
 }
 
 pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
     let mut screen = BillsScreen::default();
-    screen.load(api);
+    screen.load(api, Period::default().range());
     render_with_state(ui, &screen);
 }
 
@@ -215,7 +230,7 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &BillsScreen) {
         });
         col.panel(
             Panel::new()
-                .title("Faturas do cartão")
+                .title("Faturas com vencimento no período")
                 .border(BorderStyle::Rounded)
                 .footer("←/→ Cartão  j/k Faturas  ~ Valor estimado"),
             move |panel| {
@@ -289,6 +304,39 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &BillsScreen) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bills_use_selected_due_date_range_and_keep_card_identity() {
+        let mut server = mockito::Server::new();
+        let cards = server
+            .mock("GET", "/v1/spaces/s/cards")
+            .with_body(r#"{"data":[{"id":"one","name":"One"},{"id":"two","name":"Two"}]}"#)
+            .create();
+        let bills = server
+            .mock(
+                "GET",
+                "/v1/spaces/s/cards/two/bills?from=2024-02-01&to=2024-02-29",
+            )
+            .with_body(r#"{"data":[{"id":"bill","due_date":"2024-02-29"}]}"#)
+            .create();
+        let api = ApiClient::for_test(
+            &server.url(),
+            crate::auth::Credential::PersonalToken {
+                token: "test-only".into(),
+            },
+            "s",
+        )
+        .unwrap();
+        let mut screen = BillsScreen {
+            cards: serde_json::from_value(serde_json::json!([{"id":"two","name":"Two"}])).unwrap(),
+            ..Default::default()
+        };
+        screen.load(&api, DateRange::parse("2024-02-01", "2024-02-29").unwrap());
+        assert_eq!(screen.selected_card, 1);
+        assert_eq!(screen.bills[0].id.as_deref(), Some("bill"));
+        cards.assert();
+        bills.assert();
+    }
 
     #[test]
     fn compact_bills_keep_minimum_and_closing_date_visible() {

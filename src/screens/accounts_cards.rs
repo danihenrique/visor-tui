@@ -435,6 +435,7 @@ mod tests {
                 crate::keymap::Screen::AccountsCards,
                 "Pessoal".into(),
                 "Sincronizado".into(),
+                "Outubro 2026".into(),
                 false,
                 |body| render_content(body, &accounts, &cards, false, &mut selection),
             );

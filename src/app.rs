@@ -4,12 +4,14 @@ use std::rc::Rc;
 use hqtui::input::InputEvent;
 use hqtui::prelude::*;
 
-use crate::api::ApiClient;
+use crate::api::{ApiClient, TransactionFilters, TransactionQuery};
 use crate::auth;
 use crate::config;
 use crate::keymap::{GlobalAction, Screen, global_action};
+use crate::period::{Period, brasilia_today};
 use crate::presentation;
 use crate::screens;
+use crate::screens::period_picker::{PeriodPicker, PickerOutcome};
 
 #[allow(clippy::struct_excessive_bools)]
 pub struct VisorApp {
@@ -22,6 +24,10 @@ pub struct VisorApp {
     space_selector_visible: bool,
     selected_space: usize,
     enter_pending: bool,
+    period: Period,
+    period_picker: Option<PeriodPicker>,
+    period_transactions: Result<std::sync::Arc<[crate::models::Transaction]>, String>,
+    overview: Result<crate::models::Overview, String>,
     show_hidden_accounts: bool,
     account_selection: presentation::TableSelection,
     summary_selection: presentation::TableSelection,
@@ -118,6 +124,10 @@ impl VisorApp {
             space_selector_visible,
             selected_space: 0,
             enter_pending: true,
+            period: Period::current_month(brasilia_today()),
+            period_picker: None,
+            period_transactions: Err("Carregando…".into()),
+            overview: Err("Carregando…".into()),
             show_hidden_accounts: false,
             account_selection: presentation::TableSelection::default(),
             summary_selection: presentation::TableSelection::default(),
@@ -153,6 +163,17 @@ impl VisorApp {
 
     fn handle_input(&mut self, events: &[InputEvent]) {
         for event in events {
+            if let Some(picker) = &mut self.period_picker {
+                match picker.handle_input(std::slice::from_ref(event)) {
+                    PickerOutcome::Editing => {}
+                    PickerOutcome::Cancelled => self.period_picker = None,
+                    PickerOutcome::Accepted(period) => {
+                        self.period_picker = None;
+                        self.set_period(period);
+                    }
+                }
+                continue;
+            }
             if let InputEvent::Paste(paste) = event {
                 if self.api.is_none() {
                     self.login_token_input.push_str(paste.text.trim());
@@ -213,6 +234,16 @@ impl VisorApp {
                     continue;
                 }
                 match global_action(self.screen, key, false) {
+                    Some(GlobalAction::PreviousMonth) => {
+                        self.set_period(self.period.previous_month());
+                    }
+                    Some(GlobalAction::NextMonth) => self.set_period(self.period.next_month()),
+                    Some(GlobalAction::CurrentMonth) => {
+                        self.set_period(Period::current_month(brasilia_today()));
+                    }
+                    Some(GlobalAction::PeriodPicker) => {
+                        self.period_picker = Some(PeriodPicker::new(&self.period));
+                    }
                     Some(GlobalAction::Help) => self.show_help = true,
                     Some(GlobalAction::Quit) => self.app.quit(),
                     Some(GlobalAction::Screen(screen)) => self.enter_screen(screen),
@@ -232,6 +263,9 @@ impl VisorApp {
             .cloned()
             .collect();
         if mouse_events.is_empty() {
+            return;
+        }
+        if self.period_picker.is_some() {
             return;
         }
         if self.show_help {
@@ -256,6 +290,17 @@ impl VisorApp {
         }
     }
 
+    fn set_period(&mut self, period: Period) {
+        if self.period != period {
+            self.period = period;
+            self.period_transactions = Err("Carregando…".into());
+            self.summary_selection = presentation::TableSelection::default();
+            if self.screen.uses_period() {
+                self.enter_pending = true;
+            }
+        }
+    }
+
     fn enter_screen(&mut self, screen: Screen) {
         if self.screen != screen {
             self.screen = screen;
@@ -265,6 +310,9 @@ impl VisorApp {
     }
 
     fn modal_open(&self) -> bool {
+        if self.period_picker.is_some() {
+            return true;
+        }
         match self.screen {
             Screen::Transactions => self.transactions_screen.borrow().is_modal_open(),
             Screen::Tags => {
@@ -336,7 +384,7 @@ impl VisorApp {
                 .connections_screen
                 .borrow_mut()
                 .handle_input(&self.app, &api, events),
-            Screen::Bills => self.bills_screen.handle_input(&self.app, &api, events),
+            Screen::Bills => self.bills_screen.handle_input(&self.app, events),
             Screen::Payables => self.payables_screen.handle_input(&self.app, events),
             Screen::AccountsCards => {
                 if pressed_key(events, "h") || self.app.pressed("toggle_hidden") {
@@ -358,6 +406,12 @@ impl VisorApp {
             Screen::Settings => self.handle_settings(events),
             _ => {}
         }
+        self.enter_pending |= match self.screen {
+            Screen::Transactions => self.transactions_screen.borrow().reload_requested,
+            Screen::Bills => self.bills_screen.reload_requested,
+            Screen::Categories => self.categories_screen.borrow().reload_requested,
+            _ => false,
+        };
         api.set_fetch_allowed(false);
     }
 
@@ -476,8 +530,25 @@ impl VisorApp {
     fn load_screen(&mut self) {
         let Some(api) = self.api.as_ref() else { return };
         api.set_fetch_allowed(true);
+        if matches!(
+            self.screen,
+            Screen::Overview | Screen::CashFlow | Screen::Categories
+        ) {
+            self.period_transactions = api
+                .transactions_in_range(&TransactionQuery {
+                    range: self.period.range(),
+                    filters: TransactionFilters::default(),
+                })
+                .map_err(|error| error.to_string());
+        }
         match self.screen {
-            Screen::Transactions => self.transactions_screen.borrow_mut().on_enter(api),
+            Screen::Overview | Screen::CashFlow => {
+                self.overview = api.overview().map_err(|error| error.to_string());
+            }
+            Screen::Transactions => self
+                .transactions_screen
+                .borrow_mut()
+                .on_enter(api, &self.period),
             Screen::Tags => {
                 let mut screen = self.tags_screen.borrow_mut();
                 screen.loaded = true;
@@ -508,12 +579,27 @@ impl VisorApp {
                 screen.loaded = true;
                 screen.fetch(api);
             }
-            Screen::Bills => self.bills_screen.load(api),
+            Screen::Bills => self.bills_screen.load(api, self.period.range()),
+            Screen::Payables => self.payables_screen.load(api, self.period.range()),
             Screen::Doctor => {
                 self.doctor_state.run_checks(Some(api));
             }
-            _ => {}
+            Screen::AccountsCards => {
+                let _ = api.accounts(self.show_hidden_accounts);
+                let _ = api.cards();
+            }
+            Screen::Projection => {
+                let _ = api.overview();
+            }
+            Screen::NetWorth => {
+                let _ = api.investments();
+            }
+            Screen::Settings => {
+                let _ = api.me();
+                let _ = api.spaces();
+            }
         }
+        api.set_fetch_allowed(false);
     }
 
     fn check_space_after_login(&mut self) {
@@ -540,12 +626,14 @@ impl VisorApp {
         }
         if self.enter_pending {
             let current = self.screen;
+            let period = self.period.label();
             self.app.draw(move |frame| {
                 presentation::shell(
                     frame.ui,
                     current,
                     "Visor Finance".into(),
                     "Sincronizando dados…".into(),
+                    period,
                     false,
                     |panel| {
                         panel.text("Carregando…");
@@ -556,6 +644,10 @@ impl VisorApp {
         }
 
         let current = self.screen;
+        let period = self.period;
+        let period_picker = self.period_picker.clone();
+        let period_transactions = self.period_transactions.clone();
+        let overview = self.overview.clone();
         let show_help = self.show_help;
         let modal_open = self.modal_open() || show_help;
         let api = Rc::clone(self.api.as_ref().expect("authenticated screen"));
@@ -585,19 +677,19 @@ impl VisorApp {
         let bills_screen = &self.bills_screen;
         let payables_screen = &mut self.payables_screen;
         self.app.draw(move |frame| {
-            presentation::shell(frame.ui, current, space, status, modal_open, move |panel| {
+            presentation::shell(frame.ui, current, space, status, period.label(), modal_open, move |panel| {
                 match current {
-                    Screen::Overview => screens::overview::draw_overview_scrolled(panel, &api, summary_selection),
+                    Screen::Overview => screens::overview::draw_selected_period(panel, &overview, &period_transactions, summary_selection),
                     Screen::Transactions => screens::transactions::render_with_state(panel, &mut tx_screen.borrow_mut(), &api),
                     Screen::Recurring => screens::recurring::render_with_state(panel, &mut recurring_screen.borrow_mut(), &api),
-                    Screen::CashFlow => screens::cash_flow::render_scrolled(panel, &api, summary_selection),
+                    Screen::CashFlow => screens::cash_flow::render_selected_period(panel, &overview, &period_transactions, summary_selection),
                     Screen::AccountsCards => screens::accounts_cards::render_scrolled(panel, &api, show_hidden, account_selection),
-                    Screen::Categories => screens::categories::render_with_state(panel, &mut categories_screen.borrow_mut(), &api),
+                    Screen::Categories => screens::categories::render_with_period(panel, &mut categories_screen.borrow_mut(), &period_transactions),
                     Screen::Goals => screens::goals::render_with_state(panel, &mut goals_screen.borrow_mut(), &api),
                     Screen::Projection => screens::projection::render_scrolled(panel, &api, summary_selection),
                     Screen::NetWorth => screens::net_worth::render_scrolled(panel, &api, summary_selection),
                     Screen::Bills => screens::bills::render_with_state(panel, bills_screen),
-                    Screen::Payables => screens::payables::render_with_state(panel, &api, payables_screen),
+                    Screen::Payables => screens::payables::render_with_state(panel, payables_screen),
                     Screen::Tags => screens::tags::render_with_state(panel, &mut tags_screen.borrow_mut(), &api),
                     Screen::Notifications => screens::notifications::render_with_state(panel, &mut notifications_screen.borrow_mut(), &api),
                     Screen::Connections => screens::connections::render_with_state(panel, &mut connections_screen.borrow_mut(), &api),
@@ -605,12 +697,13 @@ impl VisorApp {
                     Screen::Doctor => screens::doctor::render(panel, &doctor_state),
                 }
             });
+            if let Some(picker) = period_picker { picker.render(frame.ui); }
             if show_help {
                 frame.ui.modal(ModalOptions {
                     title: Some(format!("Ajuda · {}", current.label())),
                     width: Some(80),
                     align: Some(hqtui::unicode::Align::Left),
-                    message: Some(format!("{}\n\nTab / Shift+Tab  Próxima / anterior tela\n1–9,0,-,t,N,x,=,D  Ir para tela\nr Atualizar  ? Ajuda  q Sair\n\nFormulários: Tab / Shift+Tab campos\nEnter / Ctrl+S salvar  Esc voltar\n\nEsc ou Enter para fechar", current.help())),
+                    message: Some(format!("{}\n\nTab / Shift+Tab  Próxima / anterior tela\n1–9,0,-,t,N,x,=,D  Ir para tela\nr Atualizar  ? Ajuda  q Sair\n[ / ] Mês anterior / seguinte  T Mês atual\np Período: Mês, Semana, Trimestre, Ano, Personalizado\n←/→ ou h/l mudam o mês quando não usados pela tela\nTotais separados por moeda original; sem conversão cambial.\nIgnorados não entram nos totais. R receitas / D despesas.\n\nFormulários: Tab / Shift+Tab campos\nEnter / Ctrl+S salvar  Esc voltar\n\nEsc ou Enter para fechar", current.help())),
                     buttons: vec![],
                     ..Default::default()
                 });

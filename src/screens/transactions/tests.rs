@@ -9,7 +9,7 @@ use serde_json::json;
 
 fn transaction() -> Transaction {
     serde_json::from_value(json!({"id":"tx-1","account_id":"a-1","category_id":"c-1", "tag_ids":["t-1"],
-        "amount":"12.34","type":"debit","description":"Mercado","transacted_at":"2026-10-22T09:14:00-03:00","source":"manual"})).unwrap()
+        "amount":"12.34","type":"debit","description":"Mercado","transacted_at":"2026-10-22T09:14:00-03:00","source":"manual","currency_code":"BRL"})).unwrap()
 }
 
 fn screen() -> TransactionsScreen {
@@ -54,7 +54,8 @@ fn valid_form() -> TransactionForm {
 fn refresh_button_bypasses_a_fresh_cache() {
     let mut server = mockito::Server::new();
     let read = server
-        .mock("GET", "/v1/spaces/s/transactions?limit=50")
+        .mock("GET", "/v1/spaces/s/transactions")
+        .match_query(mockito::Matcher::UrlEncoded("limit".into(), "100".into()))
         .with_body(r#"{"data":[],"next_cursor":null}"#)
         .expect(2)
         .create();
@@ -77,9 +78,11 @@ fn refresh_button_bypasses_a_fresh_cache() {
     )
     .unwrap();
     let mut state = screen();
-    state.fetch_transactions(&api, false);
+    state.fetch_transactions(&api);
     let effect = state.click(view::Action::Key("r".into()));
     state.execute(effect, &api);
+    assert!(state.reload_requested);
+    state.load_initial(&api);
     read.assert();
     for request in metadata {
         request.assert();
@@ -87,14 +90,10 @@ fn refresh_button_bypasses_a_fresh_cache() {
 }
 
 #[test]
-fn right_arrow_loads_more_only_when_a_cursor_exists() {
+fn manual_pagination_keys_never_fetch() {
     let mut state = screen();
     assert_eq!(keys(&mut state, "\u{1b}[C"), [Effect::None]);
-    state.next_cursor = Some("next-page".into());
-    assert_eq!(
-        keys(&mut state, "\u{1b}[C"),
-        [Effect::Fetch { append: true }]
-    );
+    assert_eq!(keys(&mut state, "m"), [Effect::None]);
 }
 
 fn client(server: &mockito::Server) -> ApiClient {
@@ -296,21 +295,22 @@ fn picker_filters_by_name_selects_by_id_and_toggles_existing_tags() {
 }
 
 #[test]
-fn filters_stage_changes_validate_dates_and_clear_all_dimensions() {
+fn filters_stage_changes_and_clear_all_dimensions_without_changing_period() {
     let mut state = screen();
-    keys(&mut state, "f2026-10-23\t2026-10-01\x13");
-    assert!(matches!(&state.mode, TransactionMode::Filters(form) if form.error.is_some()));
+    let period = state.period;
+    keys(&mut state, "f");
+    assert!(matches!(&state.mode, TransactionMode::Filters(_)));
     assert_eq!(state.filters, TransactionFilters::default());
-    keys(&mut state, "\x15\x13");
-    assert_eq!(state.filters.date_from, "2026-10-23");
+    keys(&mut state, "\x13");
     assert!(!state.is_modal_open());
+    assert_eq!(state.period, period);
     state.filters.account_id = Some("a-1".into());
     state.filters.category_id = Some("c-1".into());
     state.filters.tag_id = Some("t-1".into());
     state.filters.tx_type = TxTypeFilter::Debit;
     state.filters.ignored = IgnoredFilter::OnlyIgnored;
     state.filters.search = "mercado".into();
-    assert_eq!(keys(&mut state, "c"), [Effect::Fetch { append: false }]);
+    assert_eq!(keys(&mut state, "c"), [Effect::Fetch]);
     assert_eq!(state.filters, TransactionFilters::default());
 }
 
@@ -318,7 +318,7 @@ fn filters_stage_changes_validate_dates_and_clear_all_dimensions() {
 fn filter_picker_can_return_to_all_accounts() {
     let mut state = screen();
     state.filters.account_id = Some("a-1".into());
-    keys(&mut state, "f\t\t\r\r\x13");
+    keys(&mut state, "f\r\r\x13");
     assert_eq!(state.filters.account_id, None);
 }
 
@@ -366,6 +366,8 @@ fn create_uses_normalized_amount_lowercase_type_and_required_category() {
     state.execute(effect, &api);
     assert!(!state.is_modal_open());
     create.assert();
+    assert!(state.reload_requested);
+    state.fetch_transactions(&api);
     refresh.assert();
 }
 
@@ -418,6 +420,8 @@ fn uncertain_create_retries_same_body_and_key_without_allowing_edits() {
     assert!(!state.is_modal_open());
     first.assert();
     replay.assert();
+    assert!(state.reload_requested);
+    state.fetch_transactions(&api);
     refresh.assert();
 }
 
@@ -469,6 +473,8 @@ fn rejected_create_unlocks_draft_and_uses_a_new_key_after_correction() {
     assert!(!state.is_modal_open());
     rejected.assert();
     accepted.assert();
+    assert!(state.reload_requested);
+    state.fetch_transactions(&api);
     refresh.assert();
 }
 
@@ -501,6 +507,8 @@ fn connected_edit_patch_omits_immutable_fields_and_clears_tags() {
     state.execute(effect, &api);
     assert!(!state.is_modal_open());
     patch.assert();
+    assert!(state.reload_requested);
+    state.fetch_transactions(&api);
     refresh.assert();
 }
 
@@ -525,9 +533,9 @@ fn filter_submission_fetches_all_dimensions_once() {
         .expect(1)
         .create();
     let mut state = screen();
+    state.period =
+        Period::custom(crate::period::DateRange::parse("2026-10-01", "2026-10-22").unwrap());
     state.mode = TransactionMode::Filters(FilterForm::new(TransactionFilters {
-        date_from: "01/10/2026".into(),
-        date_to: "22/10/2026".into(),
         account_id: Some("a-1".into()),
         category_id: Some("c-1".into()),
         tag_id: Some("t-1".into()),
@@ -537,6 +545,8 @@ fn filter_submission_fetches_all_dimensions_once() {
     }));
     let effect = keys(&mut state, "\x13").pop().unwrap();
     state.execute(effect, &api);
+    assert!(state.reload_requested);
+    state.fetch_transactions(&api);
     request.assert();
 }
 
@@ -602,8 +612,6 @@ fn table_amounts_fit_without_a_trailing_ellipsis() {
 fn active_filter_chips_wrap_and_keep_all_dimensions_visible() {
     let mut state = screen();
     state.filters = TransactionFilters {
-        date_from: "2026-10-01".into(),
-        date_to: "2026-10-22".into(),
         account_id: Some("a-1".into()),
         category_id: Some("c-1".into()),
         tag_id: Some("t-1".into()),
@@ -621,8 +629,6 @@ fn active_filter_chips_wrap_and_keep_all_dimensions_visible() {
         .filter_map(|cell| char::from_u32(*cell))
         .collect();
     for chip in [
-        "De:",
-        "Até:",
         "Busca:",
         "Conta:",
         "Categoria:",
@@ -665,35 +671,29 @@ fn loaded_totals_and_category_spending_exclude_ignored_and_income() {
     ignored.ignored = true;
     ignored.amount = "900.00".into();
     state.transactions = vec![expense, other, income, ignored];
-    state.next_cursor = Some("more".into());
     let lines = transaction_lines(&state, 120, 40);
     let summary = lines[..6].join("\n");
     assert!(summary.contains("4 lançamentos"));
     assert!(summary.contains("200,00 BRL"));
     assert!(summary.contains("40,00 BRL"));
-    assert!(summary.contains("Parcial"));
-    assert!(summary.contains("Sem ignorados"));
-    let chart = lines[lines
-        .iter()
-        .position(|line| line.contains("Gastos por categoria"))
-        .unwrap()..]
-        .join("\n");
-    assert!(chart.contains("Alimentação"));
-    assert!(chart.contains("30,00 BRL   75%"));
-    assert!(chart.contains("10,00 BRL   25%"));
-    assert!(!chart.contains("900,00"));
-    assert!(!chart.contains("200,00"));
+    assert!(summary.contains("160,00 BRL"));
+    assert!(!summary.contains("Parcial"));
+    assert!(summary.contains("sem ignorados"));
+    let grouped = lines.join("\n");
+    assert!(grouped.contains("22/10/2026"));
+    assert!(grouped.contains("R 200,00 BRL  D 40,00 BRL  Saldo 160,00 BRL"));
 }
 
 #[test]
-fn transactions_keep_foreign_currency_labels_and_skip_mixed_currency_charts() {
+fn transactions_keep_separate_original_currency_totals() {
     let mut state = screen();
     let mut foreign = transaction();
     foreign.amount = "5.00".into();
     foreign.currency_code = Some("USD".into());
     state.transactions.push(foreign);
     let lines = transaction_lines(&state, 120, 40);
-    assert!(lines[..6].join("\n").contains("Várias moedas"));
+    assert!(lines[..6].join("\n").contains("USD original"));
+    assert!(lines[..6].join("\n").contains("12,34 BRL"));
     let rendered = lines.join("\n");
     assert!(rendered.contains("-USD 5,00"));
     assert!(!rendered.contains("Gastos por categoria"));
@@ -729,5 +729,70 @@ fn selected_transaction_has_a_marker_highlight_and_click_target() {
                     .contains("CATEGORIA")
             }));
         }
+    }
+}
+
+#[test]
+fn errors_and_loading_never_present_an_empty_period_as_complete() {
+    let mut state = screen();
+    state.transactions.clear();
+    state.error = Some("Página indisponível".into());
+    let text = transaction_lines(&state, 93, 20).join("\n");
+    assert!(text.contains("Totais indisponíveis"));
+    assert!(!text.contains("0,00 BRL"));
+    assert!(!text.contains("0 lançamentos"));
+    state.error = None;
+    state.loading = true;
+    let text = transaction_lines(&state, 93, 20).join("\n");
+    assert!(text.contains("Carregando período completo"));
+    assert!(!text.contains("0,00 BRL"));
+}
+
+#[test]
+fn daily_headers_do_not_change_transaction_selection_or_mouse_targets() {
+    let mut state = screen();
+    let mut second = transaction();
+    second.id = "second".into();
+    second.transacted_at = Some("2026-10-21".into());
+    state.transactions.push(second);
+    keys(&mut state, "j");
+    let lines = transaction_lines(&state, 93, 20);
+    assert!(lines.join("\n").contains("21/10/2026"));
+    let hit = state
+        .hitboxes
+        .borrow()
+        .iter()
+        .find(|hit| matches!(hit.action, view::Action::Row(1)))
+        .cloned()
+        .unwrap();
+    state.click(hit.action);
+    keys(&mut state, "e");
+    assert!(
+        matches!(&state.mode, TransactionMode::Form(form) if form.original.as_ref().unwrap().id == "second")
+    );
+}
+
+#[test]
+fn account_and_category_fit_actual_content_width_and_compact_totals_remain_visible() {
+    let state = screen();
+    let wide = transaction_lines(&state, 93, 36).join("\n");
+    for value in [
+        "CATEGORIA",
+        "CONTA",
+        "Alimentação",
+        "Principal",
+        "-R$ 12,34",
+    ] {
+        assert!(wide.contains(value), "missing {value}\n{wide}");
+    }
+    let compact = transaction_lines(&state, 80, 20).join("\n");
+    for value in [
+        "Receitas",
+        "Despesas",
+        "Saldo do período",
+        "1 lançamentos",
+        "Mercado",
+    ] {
+        assert!(compact.contains(value), "missing {value}\n{compact}");
     }
 }

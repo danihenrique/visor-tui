@@ -292,7 +292,7 @@ fn summarize_iter<'a>(transactions: impl Iterator<Item = &'a Transaction>) -> Pe
         if transaction.ignored {
             continue;
         }
-        let income = match transaction.tx_type.as_str() {
+        let income = match transaction.tx_type.to_ascii_lowercase().as_str() {
             "credit" => true,
             "debit" => false,
             _ => continue,

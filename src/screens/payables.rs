@@ -2,6 +2,7 @@ use hqtui::prelude::*;
 
 use crate::api::ApiClient;
 use crate::models::InstallmentPlan;
+use crate::period::{DateRange, Period};
 use crate::presentation::{
     Metric, TableSelection, Tone, format_currency, metric_strip, money_total,
 };
@@ -76,9 +77,34 @@ fn status_label(plan: &InstallmentPlan) -> &str {
 pub struct PayablesScreen {
     tab: Tab,
     selection: TableSelection,
+    plans: Vec<InstallmentPlan>,
+    missing_dates: usize,
+    error: Option<String>,
 }
 
 impl PayablesScreen {
+    pub fn load(&mut self, api: &ApiClient, range: DateRange) {
+        self.plans.clear();
+        self.error = None;
+        self.missing_dates = 0;
+        match api.installment_plans(None) {
+            Ok(plans) => {
+                for plan in plans {
+                    match plan
+                        .next_due_date
+                        .as_deref()
+                        .and_then(|date| chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+                    {
+                        Some(date) if range.contains(date) => self.plans.push(plan),
+                        Some(_) => {}
+                        None => self.missing_dates += 1,
+                    }
+                }
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
+
     pub fn handle_input(&mut self, app: &App, events: &[hqtui::input::InputEvent]) {
         for event in events {
             if let hqtui::input::InputEvent::Key(key) = event {
@@ -111,29 +137,22 @@ impl PayablesScreen {
 }
 
 pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
-    render_with_state(ui, api, &mut PayablesScreen::default());
+    let mut screen = PayablesScreen::default();
+    screen.load(api, Period::default().range());
+    render_with_state(ui, &mut screen);
 }
 
-pub fn render_with_state(ui: &mut Container<'_>, api: &ApiClient, screen: &mut PayablesScreen) {
+pub fn render_with_state(ui: &mut Container<'_>, screen: &mut PayablesScreen) {
     let theme = ui.theme().clone();
-    let plans = match api.installment_plans(None) {
-        Ok(plans) => plans,
-        Err(error) => {
-            ui.panel(
-                Panel::new()
-                    .title("Contas a pagar")
-                    .border(BorderStyle::Rounded),
-                move |panel| {
-                    panel.styled_text(
-                        &format!("Não foi possível carregar os parcelamentos. {error}"),
-                        TextStyle::new().fg(theme.danger),
-                    );
-                    panel.label("Pressione r para tentar novamente.");
-                },
-            );
-            return;
-        }
-    };
+    if let Some(error) = &screen.error {
+        ui.text(&format!(
+            "Não foi possível carregar os parcelamentos. {error}"
+        ));
+        ui.label("Pressione r para tentar novamente.");
+        return;
+    }
+    let plans = &screen.plans;
+    let missing_dates = screen.missing_dates;
     let all_count = plans.len();
     let active_count = plans
         .iter()
@@ -226,6 +245,9 @@ pub fn render_with_state(ui: &mut Container<'_>, api: &ApiClient, screen: &mut P
         ]
     });
     ui.column(Column::new().gap(usize::from(show_detail)), move |col| {
+        col.label(&format!(
+            "Próximo vencimento no período · {missing_dates} sem data válida"
+        ));
         if show_detail {
             metric_strip(col, metrics);
         }
@@ -344,6 +366,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn payables_include_only_known_next_due_dates_in_the_selected_range() {
+        let mut server = mockito::Server::new();
+        let plans = server.mock("GET", "/v1/spaces/s/installment-plans")
+            .with_body(serde_json::json!({"data":[{"id":"start","next_due_date":"2024-02-01"},{"id":"end","next_due_date":"2024-02-29"},{"id":"outside","next_due_date":"2024-03-01"},{"id":"missing"},{"id":"invalid","next_due_date":"2024-02-30"}]}).to_string()).create();
+        let api = ApiClient::for_test(
+            &server.url(),
+            crate::auth::Credential::PersonalToken {
+                token: "test-only".into(),
+            },
+            "s",
+        )
+        .unwrap();
+        let mut screen = PayablesScreen::default();
+        screen.load(&api, DateRange::parse("2024-02-01", "2024-02-29").unwrap());
+        assert_eq!(
+            screen
+                .plans
+                .iter()
+                .map(|plan| plan.id.as_str())
+                .collect::<Vec<_>>(),
+            ["start", "end"]
+        );
+        assert_eq!(screen.missing_dates, 2);
+        plans.assert();
+    }
+
+    #[test]
     fn compact_payables_keep_installment_total_and_status_visible() {
         let mut server = mockito::Server::new();
         let mock = server.mock("GET", "/v1/spaces/space/installment-plans").with_status(200).with_body(serde_json::json!({"data":[{"id":"p", "description":"Notebook", "installment_amount":"500", "total_amount":"5000", "remaining_amount":"3000", "paid_installments":4, "total_installments":10, "next_due_date":"2026-11-02", "status":"active"}]}).to_string()).create();
@@ -356,9 +405,10 @@ mod tests {
         )
         .unwrap();
         let mut screen = PayablesScreen::default();
+        screen.load(&api, DateRange::parse("2026-11-01", "2026-11-30").unwrap());
         for (width, height) in [(56, 10), (60, 18), (80, 24)] {
             let text = hqtui::testing::render_to_text(width, height, "dark", |ui| {
-                render_with_state(ui, &api, &mut screen);
+                render_with_state(ui, &mut screen);
             });
             for value in [
                 "Notebook",

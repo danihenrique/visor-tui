@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
@@ -13,6 +13,109 @@ use crate::models::{
     Account, Bill, Card, Category, Connection, Goal, InstallmentPlan, Investment,
     InvestmentSummary, Me, Notification, Overview, RecurringExpense, Space, Tag, Transaction,
 };
+use crate::period::DateRange;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum TxTypeFilter {
+    #[default]
+    All,
+    Credit,
+    Debit,
+}
+
+impl TxTypeFilter {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "Todos",
+            Self::Credit => "Receita",
+            Self::Debit => "Despesa",
+        }
+    }
+
+    #[must_use]
+    pub fn api_value(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::Credit => Some("credit"),
+            Self::Debit => Some("debit"),
+        }
+    }
+
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::Credit,
+            Self::Credit => Self::Debit,
+            Self::Debit => Self::All,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum IgnoredFilter {
+    #[default]
+    All,
+    OnlyIgnored,
+    NotIgnored,
+}
+
+impl IgnoredFilter {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "Todos",
+            Self::OnlyIgnored => "Ignorados",
+            Self::NotIgnored => "Não ignorados",
+        }
+    }
+
+    #[must_use]
+    pub fn api_value(self) -> Option<bool> {
+        match self {
+            Self::All => None,
+            Self::OnlyIgnored => Some(true),
+            Self::NotIgnored => Some(false),
+        }
+    }
+
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::OnlyIgnored,
+            Self::OnlyIgnored => Self::NotIgnored,
+            Self::NotIgnored => Self::All,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct TransactionFilters {
+    pub account_id: Option<String>,
+    pub category_id: Option<String>,
+    pub tag_id: Option<String>,
+    pub tx_type: TxTypeFilter,
+    pub ignored: IgnoredFilter,
+    pub search: String,
+}
+
+impl TransactionFilters {
+    pub fn normalize(&mut self) {
+        self.search = self.search.trim().to_string();
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TransactionQuery {
+    pub range: DateRange,
+    pub filters: TransactionFilters,
+}
+
+#[derive(Clone)]
+struct RangeCacheEntry {
+    rows: Arc<[Transaction]>,
+    fetched_at: Instant,
+}
 
 #[derive(Clone)]
 struct CacheEntry {
@@ -44,6 +147,7 @@ impl CachedError {
 
 struct RequestState {
     cache: HashMap<String, CacheEntry>,
+    ranges: HashMap<(String, TransactionQuery), RangeCacheEntry>,
     fetch_allowed: bool,
     cooldown_until: Option<Instant>,
     last_sync: Option<chrono::DateTime<chrono::Local>>,
@@ -54,6 +158,7 @@ impl Default for RequestState {
     fn default() -> Self {
         Self {
             cache: HashMap::new(),
+            ranges: HashMap::new(),
             fetch_allowed: true,
             cooldown_until: None,
             last_sync: None,
@@ -461,7 +566,9 @@ impl ApiClient {
 
     /// Force the next allowed read to fetch fresh data. Rate limits still apply.
     pub fn invalidate_cache(&self) {
-        self.requests.lock().unwrap().cache.clear();
+        let mut state = self.requests.lock().unwrap();
+        state.cache.clear();
+        state.ranges.clear();
     }
 
     pub fn invalidate_all_cache(&self) {
@@ -831,59 +938,98 @@ impl ApiClient {
         Ok(serde_json::from_value(data)?)
     }
 
-    pub fn transactions(
+    pub fn transactions_in_range(
         &self,
-        from_date: Option<&str>,
-        to_date: Option<&str>,
-        account_id: Option<&str>,
-        category_id: Option<&str>,
-        tag_id: Option<&str>,
-        tx_type: Option<&str>,
-        ignored: Option<bool>,
-        search: Option<&str>,
-        limit: Option<u32>,
-        after: Option<&str>,
-    ) -> Result<(Vec<Transaction>, Option<String>), ApiError> {
+        query: &TransactionQuery,
+    ) -> Result<Arc<[Transaction]>, ApiError> {
+        let space = self.space_id.as_ref().ok_or(ApiError::NoSpace)?;
+        let key = (space.clone(), query.clone());
+        {
+            let state = self.requests.lock().unwrap();
+            if let Some(entry) = state.ranges.get(&key)
+                && (!state.fetch_allowed
+                    || entry.fetched_at.elapsed() < Duration::from_secs(CACHE_TTL_SECS))
+            {
+                return Ok(Arc::clone(&entry.rows));
+            }
+            if !state.fetch_allowed {
+                return Err(ApiError::Unavailable(
+                    "Período não carregado. Pressione r para atualizar.".into(),
+                ));
+            }
+        }
+        let result = self.fetch_transaction_range(query);
+        let mut state = self.requests.lock().unwrap();
+        state.last_failed = result.is_err();
+        if let Ok(rows) = &result {
+            state.last_sync = Some(chrono::Local::now());
+            state.ranges.insert(
+                key,
+                RangeCacheEntry {
+                    rows: Arc::clone(rows),
+                    fetched_at: Instant::now(),
+                },
+            );
+        }
+        result
+    }
+
+    fn fetch_transaction_range(
+        &self,
+        query: &TransactionQuery,
+    ) -> Result<Arc<[Transaction]>, ApiError> {
         let prefix = self.space_prefix()?;
-        let mut params = Vec::new();
-        if let Some(v) = from_date {
-            params.push(("from_date", v.to_string()));
+        let mut rows = Vec::new();
+        let mut ids = HashSet::new();
+        let mut cursors = HashSet::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            self.check_cooldown()?;
+            let filters = &query.filters;
+            let mut params = vec![
+                ("from_date", query.range.start().to_string()),
+                ("to_date", query.range.end().to_string()),
+                ("limit", "100".into()),
+            ];
+            for (name, value) in [
+                ("account_id", filters.account_id.as_deref()),
+                ("category_id", filters.category_id.as_deref()),
+                ("tag_id", filters.tag_id.as_deref()),
+                ("type", filters.tx_type.api_value()),
+                (
+                    "search",
+                    (!filters.search.is_empty()).then_some(filters.search.as_str()),
+                ),
+                ("after", cursor.as_deref()),
+            ] {
+                if let Some(value) = value {
+                    params.push((name, value.to_owned()));
+                }
+            }
+            if let Some(ignored) = filters.ignored.api_value() {
+                params.push(("ignored", ignored.to_string()));
+            }
+            let path = format!("{prefix}/transactions{}", Self::query_string(&params));
+            let text = self.fetch_response(&path, "application/json")?;
+            let page: crate::models::ListResponse<Transaction> = serde_json::from_str(&text)?;
+            for row in page.data {
+                if ids.insert(row.id.clone()) {
+                    rows.push(row);
+                }
+            }
+            match page.next_cursor.filter(|cursor| !cursor.is_empty()) {
+                None => return Ok(rows.into()),
+                Some(next) => {
+                    if !cursors.insert(next.clone()) {
+                        return Err(ApiError::Unavailable(
+                            "Paginação repetida. Não foi possível carregar o período completo."
+                                .into(),
+                        ));
+                    }
+                    cursor = Some(next);
+                }
+            }
         }
-        if let Some(v) = to_date {
-            params.push(("to_date", v.to_string()));
-        }
-        if let Some(v) = account_id {
-            params.push(("account_id", v.to_string()));
-        }
-        if let Some(v) = category_id {
-            params.push(("category_id", v.to_string()));
-        }
-        if let Some(v) = tag_id {
-            params.push(("tag_id", v.to_string()));
-        }
-        if let Some(v) = tx_type {
-            params.push(("type", v.to_string()));
-        }
-        if let Some(v) = ignored {
-            params.push(("ignored", v.to_string()));
-        }
-        if let Some(v) = search {
-            params.push(("search", v.to_string()));
-        }
-        if let Some(v) = limit {
-            params.push(("limit", v.to_string()));
-        }
-        if let Some(v) = after {
-            params.push(("after", v.to_string()));
-        }
-        let qs = Self::query_string(&params);
-        let resp: serde_json::Value = self.get(&format!("{prefix}/transactions{qs}"))?;
-        let data = resp.get("data").cloned().unwrap_or_default();
-        let next_cursor = resp
-            .get("next_cursor")
-            .and_then(|c| c.as_str())
-            .map(String::from);
-        Ok((serde_json::from_value(data)?, next_cursor))
     }
 
     pub fn transaction(&self, id: &str) -> Result<Transaction, ApiError> {
@@ -2145,10 +2291,22 @@ mod tests {
     }
 
     fn expire_cache(client: &ApiClient) {
-        for entry in client.requests.lock().unwrap().cache.values_mut() {
-            entry.fetched_at = Instant::now()
-                .checked_sub(Duration::from_secs(CACHE_TTL_SECS + 1))
-                .unwrap();
+        let at = Instant::now()
+            .checked_sub(Duration::from_secs(CACHE_TTL_SECS + 1))
+            .unwrap();
+        let mut state = client.requests.lock().unwrap();
+        for entry in state.cache.values_mut() {
+            entry.fetched_at = at;
+        }
+        for entry in state.ranges.values_mut() {
+            entry.fetched_at = at;
+        }
+    }
+
+    fn october_query() -> TransactionQuery {
+        TransactionQuery {
+            range: DateRange::parse("2026-10-01", "2026-10-31").unwrap(),
+            filters: TransactionFilters::default(),
         }
     }
 
@@ -2249,37 +2407,164 @@ mod tests {
     }
 
     #[test]
-    fn transaction_queries_encode_search_and_cursor_as_single_values() {
+    fn range_fetch_encodes_filters_and_cursor_without_partial_cache_entries() {
         let mut server = mockito::Server::new();
-        let mock = server
-            .mock("GET", "/v1/spaces/s/transactions")
+        let first = server.mock("GET", "/v1/spaces/s/transactions")
             .match_query(mockito::Matcher::AllOf(vec![
-                mockito::Matcher::UrlEncoded(
-                    "search".to_owned(),
-                    "café + pão & type=income#x".to_owned(),
-                ),
-                mockito::Matcher::UrlEncoded("after".to_owned(), "a+/=b&c".to_owned()),
-                mockito::Matcher::UrlEncoded("type".to_owned(), "expense".to_owned()),
+                mockito::Matcher::UrlEncoded("from_date".into(), "2026-10-01".into()),
+                mockito::Matcher::UrlEncoded("to_date".into(), "2026-10-31".into()),
+                mockito::Matcher::UrlEncoded("limit".into(), "100".into()),
+                mockito::Matcher::UrlEncoded("type".into(), "debit".into()),
+                mockito::Matcher::UrlEncoded("search".into(), "café + pão & type=income#x".into()),
             ]))
-            .with_body(r#"{"data":[]}"#)
+            .with_body(json!({"data":[{"id":"one","account_id":"a","amount":"1.00","type":"debit"}],"next_cursor":"a+/=b&c"}).to_string()).expect(1).create();
+        let second = server.mock("GET", "/v1/spaces/s/transactions")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("from_date".into(), "2026-10-01".into()),
+                mockito::Matcher::UrlEncoded("to_date".into(), "2026-10-31".into()),
+                mockito::Matcher::UrlEncoded("after".into(), "a+/=b&c".into()),
+                mockito::Matcher::UrlEncoded("type".into(), "debit".into()),
+                mockito::Matcher::UrlEncoded("search".into(), "café + pão & type=income#x".into()),
+            ]))
+            .with_body(json!({"data":[{"id":"one","account_id":"a","amount":"1.00","type":"debit"},{"id":"two","account_id":"a","amount":"2.00","type":"debit"}],"next_cursor":null}).to_string()).expect(1).create();
+        let api = test_client(&server);
+        let mut query = october_query();
+        query.filters.tx_type = TxTypeFilter::Debit;
+        query.filters.search = "café + pão & type=income#x".into();
+        let rows = api.transactions_in_range(&query).unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["one", "two"]
+        );
+        assert!(Arc::ptr_eq(
+            &rows,
+            &api.transactions_in_range(&query).unwrap()
+        ));
+        assert!(api.requests.lock().unwrap().cache.is_empty());
+        first.assert();
+        second.assert();
+    }
+
+    #[test]
+    fn failed_later_page_is_never_cached_and_retry_starts_from_first_page() {
+        let mut server = mockito::Server::new();
+        let first = server.mock("GET", "/v1/spaces/s/transactions")
+            .match_query("from_date=2026-10-01&to_date=2026-10-31&limit=100")
+            .with_body(json!({"data":[{"id":"one","account_id":"a","amount":"1","type":"debit"}],"next_cursor":"next"}).to_string()).expect(2).create();
+        let failure = server
+            .mock("GET", "/v1/spaces/s/transactions")
+            .match_query("from_date=2026-10-01&to_date=2026-10-31&limit=100&after=next")
+            .with_status(503)
+            .with_body(r#"{"errors":[{"code":"OFFLINE","message":"Unavailable"}]}"#)
             .expect(1)
             .create();
-        let client = test_client(&server);
-        client
-            .transactions(
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some("expense"),
-                None,
-                Some("café + pão & type=income#x"),
-                None,
-                Some("a+/=b&c"),
+        let api = test_client(&server);
+        let query = october_query();
+        assert!(api.transactions_in_range(&query).is_err());
+        assert!(api.requests.lock().unwrap().ranges.is_empty());
+        failure.assert();
+        failure.remove();
+        let success = server.mock("GET", "/v1/spaces/s/transactions")
+            .match_query("from_date=2026-10-01&to_date=2026-10-31&limit=100&after=next")
+            .with_body(json!({"data":[{"id":"two","account_id":"a","amount":"2","type":"debit"}],"next_cursor":null}).to_string()).expect(1).create();
+        assert_eq!(api.transactions_in_range(&query).unwrap().len(), 2);
+        first.assert();
+        success.assert();
+    }
+
+    #[test]
+    fn repeated_cursor_fails_without_publishing_an_incomplete_range() {
+        let mut server = mockito::Server::new();
+        let pages = server
+            .mock("GET", "/v1/spaces/s/transactions")
+            .match_query(mockito::Matcher::Any)
+            .with_body(r#"{"data":[],"next_cursor":"repeat"}"#)
+            .expect(2)
+            .create();
+        let api = test_client(&server);
+        let error = api.transactions_in_range(&october_query()).unwrap_err();
+        assert!(error.to_string().contains("Paginação repetida"));
+        assert!(api.requests.lock().unwrap().ranges.is_empty());
+        pages.assert();
+    }
+
+    #[test]
+    fn complete_range_cache_obeys_ttl_fetch_gate_refresh_and_all_query_dimensions() {
+        let mut server = mockito::Server::new();
+        let pages = server
+            .mock("GET", "/v1/spaces/s/transactions")
+            .match_query(mockito::Matcher::Any)
+            .with_body(r#"{"data":[]}"#)
+            .expect(10)
+            .create();
+        let api = test_client(&server);
+        let query = october_query();
+        api.transactions_in_range(&query).unwrap();
+        expire_cache(&api);
+        api.set_fetch_allowed(false);
+        api.transactions_in_range(&query).unwrap();
+        let mut variants = Vec::new();
+        let mut changed = query.clone();
+        changed.range = DateRange::parse("2026-11-01", "2026-11-30").unwrap();
+        variants.push(changed);
+        let mut changed = query.clone();
+        changed.filters.account_id = Some("a".into());
+        variants.push(changed);
+        let mut changed = query.clone();
+        changed.filters.category_id = Some("c".into());
+        variants.push(changed);
+        let mut changed = query.clone();
+        changed.filters.tag_id = Some("t".into());
+        variants.push(changed);
+        let mut changed = query.clone();
+        changed.filters.tx_type = TxTypeFilter::Credit;
+        variants.push(changed);
+        let mut changed = query.clone();
+        changed.filters.ignored = IgnoredFilter::NotIgnored;
+        variants.push(changed);
+        let mut changed = query.clone();
+        changed.filters.search = "coffee".into();
+        variants.push(changed);
+        assert!(api.transactions_in_range(&variants[0]).is_err());
+        api.set_fetch_allowed(true);
+        api.transactions_in_range(&query).unwrap();
+        for variant in &variants {
+            api.transactions_in_range(variant).unwrap();
+            api.transactions_in_range(variant).unwrap();
+        }
+        api.invalidate_cache();
+        api.transactions_in_range(&query).unwrap();
+        pages.assert();
+    }
+
+    #[test]
+    fn complete_range_keys_include_space() {
+        let mut server = mockito::Server::new();
+        let first = server
+            .mock("GET", "/v1/spaces/s/transactions")
+            .match_query(mockito::Matcher::Any)
+            .with_body(
+                json!({"data":[{"id":"one","account_id":"a","amount":"1","type":"debit"}]})
+                    .to_string(),
             )
-            .unwrap();
-        mock.assert();
+            .create();
+        let second = server
+            .mock("GET", "/v1/spaces/other/transactions")
+            .match_query(mockito::Matcher::Any)
+            .with_body(
+                json!({"data":[{"id":"two","account_id":"a","amount":"1","type":"debit"}]})
+                    .to_string(),
+            )
+            .create();
+        let mut api = test_client(&server);
+        let query = october_query();
+        assert_eq!(api.transactions_in_range(&query).unwrap()[0].id, "one");
+        api.space_id = Some("other".into());
+        assert_eq!(api.transactions_in_range(&query).unwrap()[0].id, "two");
+        api.space_id = Some("s".into());
+        assert_eq!(api.transactions_in_range(&query).unwrap()[0].id, "one");
+        first.assert();
+        second.assert();
     }
 
     #[test]
@@ -2301,20 +2586,9 @@ mod tests {
             .expect(1)
             .create();
         let client = test_client(&server);
-        client
-            .transactions(
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some("A&B"),
-                None,
-                None,
-            )
-            .unwrap();
+        let mut query = october_query();
+        query.filters.search = "A&B".into();
+        client.transactions_in_range(&query).unwrap();
         let csv = client
             .export_transactions_csv(
                 None,
@@ -2355,7 +2629,11 @@ mod tests {
     fn successful_writes_invalidate_filtered_reads_and_aggregates() {
         let mut server = mockito::Server::new();
         let read = server
-            .mock("GET", "/v1/spaces/s/transactions?ignored=true")
+            .mock("GET", "/v1/spaces/s/transactions")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "ignored".into(),
+                "true".into(),
+            ))
             .with_body(r#"{"data":[]}"#)
             .expect(2)
             .create();
@@ -2371,20 +2649,9 @@ mod tests {
             .create();
         let client = test_client(&server);
         for iteration in 0..2 {
-            client
-                .transactions(
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(true),
-                    None,
-                    None,
-                    None,
-                )
-                .unwrap();
+            let mut query = october_query();
+            query.filters.ignored = IgnoredFilter::OnlyIgnored;
+            client.transactions_in_range(&query).unwrap();
             let _: serde_json::Value = client.get("/v1/spaces/s/overview").unwrap();
             if iteration == 0 {
                 client.delete_transaction("tx1").unwrap();

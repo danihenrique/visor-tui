@@ -1,132 +1,171 @@
-use hqtui::prelude::*;
+use std::sync::Arc;
 
-use crate::api::{ApiClient, ApiError};
-use crate::models::Overview;
-use crate::presentation::{Metric, TableSelection, Tone, amount, metric_strip};
+use hqtui::prelude::*;
+use hqtui::unicode::Align;
+
+use crate::models::{Overview, Transaction};
+use crate::period::{FlowTotals, day_groups, money_cents, summarize};
+use crate::presentation::{TableSelection, Tone, amount};
 
 fn money(value: Option<&str>, currency: &str) -> String {
     crate::presentation::format_currency(value, Some(currency))
 }
 
-pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
-    render_scrolled(ui, api, &mut TableSelection::default());
-}
-
-pub fn render_scrolled(ui: &mut Container<'_>, api: &ApiClient, selection: &mut TableSelection) {
-    match api.overview() {
-        Ok(data) => render_cash_flow_data(ui, &data, selection),
-        Err(error) => {
-            selection.set_row_count(0);
-            render_error(ui, &error);
+pub fn render_selected_period(
+    ui: &mut Container<'_>,
+    overview: &Result<Overview, String>,
+    transactions: &Result<Arc<[Transaction]>, String>,
+    selection: &mut TableSelection,
+) {
+    let Ok(transactions) = transactions else {
+        selection.set_row_count(0);
+        if let Err(error) = transactions {
+            ui.text(&format!("Movimento do período indisponível: {error}"));
         }
-    }
-}
-
-fn render_error(ui: &mut Container<'_>, error: &ApiError) {
-    let message = format!("Falha ao carregar fluxo de caixa: {error}");
-    let danger = ui.theme().danger;
-    ui.panel(Panel::new().title("Erro"), move |panel| {
-        panel.styled_text(&message, TextStyle::new().fg(danger));
-        panel.label("Verifique sua conexão e credenciais.");
-    });
-}
-
-fn render_cash_flow_data(ui: &mut Container<'_>, data: &Overview, selection: &mut TableSelection) {
-    let data = data.clone();
-    let currency = data.currency_code.as_deref().unwrap_or("BRL");
-    let period = data.period.as_ref();
-    let metrics = vec![
-        Metric::new(
-            "Receitas",
-            money(period.and_then(|p| p.income.as_deref()), currency),
-            Tone::Positive,
-        ),
-        Metric::new(
-            "Despesas",
-            money(period.and_then(|p| p.expenses.as_deref()), currency),
-            Tone::Negative,
-        ),
-        Metric::new(
-            "Resultado",
-            money(period.and_then(|p| p.result.as_deref()), currency),
-            result_tone(period.and_then(|p| p.result.as_deref())),
-        ),
-    ];
-    selection.set_row_count(3);
+        return;
+    };
+    let show_scope_dates = ui.height() >= 12;
+    let count = transactions.len();
+    let overview = overview.clone();
+    let summary = summarize(transactions);
+    let days = daily_flows(transactions);
+    let day_count = days.len().max(1);
+    selection.set_row_count(day_count + 2);
     let selected = selection.selected().unwrap_or_default();
-    let full = ui.height() >= 20;
-    let dense = ui.height() < 25;
-    let wide = ui.width() >= 90;
-    let tiles = ui.height() >= 14;
-    ui.column(
-        Column::new().gap(usize::from(tiles && !dense)),
-        move |col| {
-            let currency = data.currency_code.clone().unwrap_or_else(|| "BRL".into());
-            col.label(&format!(
-                "{} a {}",
-                data.period_start.as_deref().unwrap_or("Sem início"),
-                data.period_end.as_deref().unwrap_or("Sem fim")
-            ));
-            if tiles {
-                metric_strip(col, metrics);
-            }
-            if full {
-                let period = data.period.clone();
-                let period_currency = currency.clone();
-                col.panel(
-                    Panel::new()
-                        .title("Movimento do período")
-                        .focused(selected == 0)
-                        .size(Size::Cells(if dense { 5 } else { 7 })),
-                    move |panel| {
-                        period_bars(panel, period.as_ref(), &period_currency);
-                    },
-                );
-                let projection = data.projection.clone();
-                if wide {
-                    col.row(Row::new().gap(1), move |row| {
-                        let second = projection.clone();
-                        let second_currency = currency.clone();
-                        row.panel(
-                            Panel::new().title("Próximo saldo").focused(selected == 1),
-                            move |panel| projection_bars(panel, projection.as_ref(), &currency),
-                        );
-                        row.panel(
-                            Panel::new()
-                                .title("Saídas previstas")
-                                .focused(selected == 2),
-                            move |panel| outflow_bars(panel, second.as_ref(), &second_currency),
-                        );
-                    });
-                } else {
+    ui.column(Column::new().gap(0), move |col| {
+        crate::presentation::period_summary(col, &summary, count);
+        if selected < day_count {
+            col.panel(
+                Panel::new().title("Fluxo diário do período"),
+                move |panel| {
+                    daily_flow_table(panel, &days, selected);
+                },
+            );
+        } else {
+            match overview {
+                Ok(data) => {
+                    if show_scope_dates {
+                        col.label(&format!(
+                            "Previsão atual · {} a {}",
+                            data.period_start.as_deref().unwrap_or("Sem início"),
+                            data.period_end.as_deref().unwrap_or("Sem fim")
+                        ));
+                    }
+                    let currency = data.currency_code.clone().unwrap_or_else(|| "BRL".into());
+                    let outflows = selected == day_count + 1;
                     col.panel(
-                        Panel::new()
-                            .title(if selected == 2 {
-                                "Saídas previstas"
-                            } else {
-                                "Próximo saldo"
-                            })
-                            .focused(selected != 0),
+                        Panel::new().title(if outflows {
+                            "Saídas previstas · atual"
+                        } else {
+                            "Próximo saldo · atual"
+                        }),
                         move |panel| {
-                            if selected == 2 {
-                                outflow_bars(panel, projection.as_ref(), &currency);
+                            if outflows {
+                                outflow_bars(panel, data.projection.as_ref(), &currency);
                             } else {
-                                projection_bars(panel, projection.as_ref(), &currency);
+                                projection_bars(panel, data.projection.as_ref(), &currency);
                             }
                         },
                     );
                 }
-            } else {
-                let title = ["Movimento do período", "Próximo saldo", "Saídas previstas"][selected];
-                col.panel(Panel::new().title(title), move |panel| match selected {
-                    0 => period_bars(panel, data.period.as_ref(), &currency),
-                    1 => projection_bars(panel, data.projection.as_ref(), &currency),
-                    _ => outflow_bars(panel, data.projection.as_ref(), &currency),
-                });
+                Err(error) => {
+                    col.text(&format!("Previsão atual indisponível: {error}"));
+                }
             }
-            col.label(&format!("j/k Seções  ·  {}/3", selected + 1));
+        }
+        col.label(&format!(
+            "j/k Dias e previsão atual · {}/{}",
+            selected + 1,
+            day_count + 2
+        ));
+    });
+}
+
+struct DailyFlow {
+    date: String,
+    currency: String,
+    totals: FlowTotals,
+}
+
+fn daily_flows(transactions: &[Transaction]) -> Vec<DailyFlow> {
+    day_groups(transactions)
+        .into_iter()
+        .flat_map(|group| {
+            let date = group.date.map_or_else(
+                || "Sem data válida".into(),
+                |day| day.format("%d/%m/%Y").to_string(),
+            );
+            let mut currencies = group.summary.currencies;
+            if currencies.is_empty() {
+                currencies.insert("BRL".into(), FlowTotals::default());
+            }
+            currencies
+                .into_iter()
+                .map(move |(currency, totals)| DailyFlow {
+                    date: date.clone(),
+                    currency,
+                    totals,
+                })
+        })
+        .collect()
+}
+
+fn daily_flow_table(ui: &mut Container<'_>, days: &[DailyFlow], selected: usize) {
+    if days.is_empty() {
+        ui.label("Nenhum lançamento no período selecionado.");
+        return;
+    }
+    let rows = days
+        .iter()
+        .map(|day| {
+            let mut row = TableRow::new([
+                day.date.clone(),
+                money_cents(day.totals.income, &day.currency),
+                money_cents(day.totals.expenses, &day.currency),
+                money_cents(day.totals.result(), &day.currency),
+            ]);
+            row.cell_colors = vec![
+                Some(ui.theme().muted),
+                Some(ui.theme().success),
+                Some(ui.theme().danger),
+                Some(if day.totals.result() < 0 {
+                    ui.theme().danger
+                } else {
+                    ui.theme().success
+                }),
+            ];
+            row
+        })
+        .collect();
+    ui.table(
+        TableOptions {
+            columns: vec![
+                TableColumn::new("Dia").width(Size::Cells(10)),
+                TableColumn::new("Receitas")
+                    .width(Size::Fill)
+                    .align(Align::Right),
+                TableColumn::new("Despesas")
+                    .width(Size::Fill)
+                    .align(Align::Right),
+                TableColumn::new("Saldo")
+                    .width(Size::Fill)
+                    .align(Align::Right),
+            ],
+            rows,
+            selected: Some(selected),
+            follow_selection: true,
+            zebra: true,
+            scrollbar: true,
+            ..Default::default()
         },
+        "cash-flow:days",
     );
+    if let Some(day) = days.get(selected) {
+        ui.label(&format!(
+            "{} · {} lançamentos em {}",
+            day.date, day.totals.count, day.currency
+        ));
+    }
 }
 
 fn result_tone(value: Option<&str>) -> Tone {
@@ -135,30 +174,6 @@ fn result_tone(value: Option<&str>) -> Tone {
         Some(value) if value < 0.0 => Tone::Negative,
         _ => Tone::Neutral,
     }
-}
-
-fn period_bars(
-    ui: &mut Container<'_>,
-    period: Option<&crate::models::OverviewPeriod>,
-    currency: &str,
-) {
-    let Some(period) = period else {
-        ui.label("Nenhum movimento disponível neste período.");
-        return;
-    };
-    financial_bars(
-        ui,
-        &[
-            ("Receitas", period.income.as_deref(), Tone::Positive),
-            ("Despesas", period.expenses.as_deref(), Tone::Negative),
-            (
-                "Resultado",
-                period.result.as_deref(),
-                result_tone(period.result.as_deref()),
-            ),
-        ],
-        currency,
-    );
 }
 
 fn projection_bars(
@@ -268,6 +283,79 @@ mod tests {
     use hqtui::testing::render_to_text;
 
     #[test]
+    fn daily_flow_uses_selected_rows_and_keeps_current_forecast_accessible() {
+        let overview = Ok(serde_json::from_value(serde_json::json!({
+            "currency_code":"BRL", "period_start":"2026-10-01", "period_end":"2026-10-31",
+            "period":{"income":"9999.99", "expenses":"7777.77", "result":"2222.22"},
+            "projection":{"current_balance":"3800", "expected_income":"500", "projected_balance":"3930",
+                "estimated_day_to_day":"90", "committed_outflows":{"scheduled":"40"}}
+        })).unwrap());
+        let rows: Arc<[Transaction]> = serde_json::from_value::<Vec<Transaction>>(serde_json::json!([
+            {"id":"one", "account_id":"a", "type":"credit", "amount":"0.10", "currency_code":"BRL", "transacted_at":"2026-09-01"},
+            {"id":"two", "account_id":"a", "type":"credit", "amount":"0.20", "currency_code":"BRL", "transacted_at":"2026-09-01"},
+            {"id":"three", "account_id":"a", "type":"debit", "amount":"9.50", "currency_code":"USD", "transacted_at":"2026-09-01"},
+            {"id":"four", "account_id":"a", "type":"debit", "amount":"0.15", "currency_code":"BRL", "transacted_at":"2026-09-02"}
+        ])).unwrap().into();
+        let rows = Ok(rows);
+        for (width, height) in [(76, 17), (92, 32)] {
+            let mut selection = TableSelection::default();
+            let mut seen = String::new();
+            for _ in 0..5 {
+                let rendered = render_to_text(width, height, "dark", |ui| {
+                    render_selected_period(ui, &overview, &rows, &mut selection);
+                });
+                assert!(
+                    rendered.contains("0,30 BRL"),
+                    "{width}x{height}\n{rendered}"
+                );
+                assert!(rendered.contains("0,15 BRL"), "{rendered}");
+                assert!(!rendered.contains("9.999,99"), "{rendered}");
+                seen.push_str(&rendered);
+                selection.move_by(1);
+            }
+            for expected in [
+                "01/09/2026",
+                "02/09/2026",
+                "-9,50 USD",
+                "Previsão atual",
+                "2026-10-01",
+                "2026-10-31",
+                "Saldo projetado",
+                "3.930,00 BRL",
+                "Agendados",
+                "Dia a dia",
+            ] {
+                assert!(
+                    seen.contains(expected),
+                    "{width}x{height}: missing {expected}\n{seen}"
+                );
+            }
+            assert_eq!(selection.selected(), Some(4));
+        }
+    }
+
+    #[test]
+    fn empty_and_failed_periods_never_fall_back_to_current_movement() {
+        let overview = Ok(serde_json::from_value(serde_json::json!({
+            "period":{"income":"9999.99", "expenses":"7777.77", "result":"2222.22"}
+        }))
+        .unwrap());
+        for (rows, expected) in [
+            (Ok(Arc::<[Transaction]>::from([])), "Nenhum lançamento"),
+            (
+                Err("Falha de leitura".into()),
+                "Movimento do período indisponível",
+            ),
+        ] {
+            let rendered = render_to_text(76, 17, "dark", |ui| {
+                render_selected_period(ui, &overview, &rows, &mut TableSelection::default());
+            });
+            assert!(rendered.contains(expected), "{rendered}");
+            assert!(!rendered.contains("9.999,99"), "{rendered}");
+        }
+    }
+
+    #[test]
     fn every_cash_flow_section_is_reachable_without_flattening_records() {
         let data: Overview = serde_json::from_value(serde_json::json!({
             "currency_code":"BRL", "period_start":"2026-10-01", "period_end":"2026-10-31",
@@ -280,12 +368,16 @@ mod tests {
             let mut seen = String::new();
             for _ in 0..3 {
                 seen.push_str(&render_to_text(width, height, "dark", |ui| {
-                    render_cash_flow_data(ui, &data, &mut selection);
+                    let transactions = serde_json::from_value::<Vec<Transaction>>(serde_json::json!([
+                        {"id":"income", "account_id":"a", "type":"credit", "amount":"5000", "currency_code":"BRL", "transacted_at":"2026-10-01"},
+                        {"id":"expense", "account_id":"a", "type":"debit", "amount":"1200", "currency_code":"BRL", "transacted_at":"2026-10-01"}
+                    ])).unwrap().into();
+                    render_selected_period(ui, &Ok(data.clone()), &Ok(transactions), &mut selection);
                 }));
                 selection.move_by(1);
             }
             for text in [
-                "Resultado",
+                "Saldo do período",
                 "3.800,00 BRL",
                 "Saldo projetado",
                 "3.930,00 BRL",

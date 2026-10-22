@@ -104,6 +104,10 @@ pub enum GlobalAction {
     Help,
     Quit,
     Refresh,
+    PreviousMonth,
+    NextMonth,
+    CurrentMonth,
+    PeriodPicker,
 }
 
 #[must_use]
@@ -116,6 +120,12 @@ pub fn global_action(current: Screen, key: &KeyEvent, modal_open: bool) -> Optio
         "?" => Some(GlobalAction::Help),
         "q" => Some(GlobalAction::Quit),
         "r" => Some(GlobalAction::Refresh),
+        "[" => Some(GlobalAction::PreviousMonth),
+        "]" => Some(GlobalAction::NextMonth),
+        "T" => Some(GlobalAction::CurrentMonth),
+        "p" => Some(GlobalAction::PeriodPicker),
+        "h" | "left" if !current.claims_period_alias(value) => Some(GlobalAction::PreviousMonth),
+        "l" | "right" if !current.claims_period_alias(value) => Some(GlobalAction::NextMonth),
         _ if key.name == "tab" || key.name == "backtab" => {
             let count = Screen::all().len();
             let step = if key.shift || key.name == "backtab" {
@@ -134,10 +144,30 @@ pub fn global_action(current: Screen, key: &KeyEvent, modal_open: bool) -> Optio
 
 impl Screen {
     #[must_use]
+    pub fn claims_period_alias(self, key: &str) -> bool {
+        matches!(self, Self::Bills | Self::Recurring | Self::Payables)
+            || key == "h" && matches!(self, Self::AccountsCards | Self::Categories)
+            || key == "l" && self == Self::Settings
+    }
+
+    #[must_use]
+    pub fn uses_period(self) -> bool {
+        matches!(
+            self,
+            Self::Overview
+                | Self::Transactions
+                | Self::CashFlow
+                | Self::Categories
+                | Self::Bills
+                | Self::Payables
+        )
+    }
+
+    #[must_use]
     pub fn help(self) -> &'static str {
         match self {
             Self::Transactions => {
-                "j/k ou ↑/↓  Selecionar\n/ Buscar  f Filtros  c Limpar filtros\nn Nova  e Editar  d Excluir\nEnter Detalhes  m/→ Carregar mais  E CSV"
+                "j/k ou ↑/↓  Selecionar\n/ Buscar  f Filtros  c Limpar filtros\nn Nova  e Editar  d Excluir\nEnter Detalhes  E CSV\nTotais por moeda original, sem ignorados; R receitas, D despesas"
             }
             Self::Recurring => {
                 "j/k ou ↑/↓  Selecionar\n←/→  Assinaturas / Recorrentes\nn Nova assinatura  e Editar  d Excluir"
@@ -186,9 +216,7 @@ mod tests {
                 Some(GlobalAction::Screen(screen))
             );
         }
-        for local in [
-            "n", "e", "d", "j", "k", "up", "down", "left", "right", "/", "f",
-        ] {
+        for local in ["n", "e", "d", "j", "k", "up", "down", "/", "f"] {
             assert_eq!(
                 global_action(Screen::Transactions, &key(local), false),
                 None,
@@ -199,8 +227,30 @@ mod tests {
 
     #[test]
     fn modal_typing_never_triggers_global_actions() {
-        for value in ["q", "?", "r", "n", "d", "1", "0", "N", "D", "tab"] {
+        for value in [
+            "q", "?", "r", "n", "d", "1", "0", "N", "D", "tab", "[", "]", "T", "p", "h", "l",
+        ] {
             assert_eq!(global_action(Screen::Transactions, &key(value), true), None);
+        }
+    }
+
+    #[test]
+    fn period_keys_work_everywhere_and_aliases_preserve_local_actions() {
+        for screen in Screen::all() {
+            for (value, action) in [
+                ("[", GlobalAction::PreviousMonth),
+                ("]", GlobalAction::NextMonth),
+                ("T", GlobalAction::CurrentMonth),
+                ("p", GlobalAction::PeriodPicker),
+            ] {
+                assert_eq!(global_action(screen, &key(value), false), Some(action));
+            }
+            for value in ["h", "l", "left", "right"] {
+                assert_eq!(
+                    global_action(screen, &key(value), false).is_some(),
+                    !screen.claims_period_alias(value)
+                );
+            }
         }
     }
 

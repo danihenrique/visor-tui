@@ -7,8 +7,9 @@ use hqtui::{
 use serde_json::Value;
 
 use crate::{
-    api::ApiClient,
+    api::{ApiClient, TransactionQuery},
     models::{Account, Category, Tag, Transaction},
+    period::{Period, transaction_date},
 };
 
 mod model;
@@ -37,7 +38,7 @@ pub enum TransactionMode {
 enum Effect {
     None,
     Refresh,
-    Fetch { append: bool },
+    Fetch,
     Save(Value),
     Delete(String),
     Export,
@@ -46,7 +47,8 @@ enum Effect {
 #[derive(Clone, Default)]
 pub struct TransactionsScreen {
     pub transactions: Vec<Transaction>,
-    pub next_cursor: Option<String>,
+    pub period: Period,
+    pub reload_requested: bool,
     pub loading: bool,
     pub error: Option<String>,
     pub selected_index: Option<usize>,
@@ -71,7 +73,8 @@ impl TransactionsScreen {
         !matches!(self.mode, TransactionMode::List)
     }
 
-    pub fn on_enter(&mut self, api: &ApiClient) {
+    pub fn on_enter(&mut self, api: &ApiClient, period: &Period) {
+        self.period = *period;
         self.load_initial(api);
     }
 
@@ -90,52 +93,47 @@ impl TransactionsScreen {
             Ok(items) => self.tags = items,
             Err(error) => errors.push(error.to_string()),
         }
-        self.fetch_transactions(api, false);
+        self.fetch_transactions(api);
         if !errors.is_empty() {
             self.error = Some(errors.join(" · "));
         }
         self.loaded = true;
     }
 
-    pub fn refresh(&mut self, api: &ApiClient) {
-        api.invalidate_cache();
-        self.load_initial(api);
-    }
-
-    pub fn fetch_transactions(&mut self, api: &ApiClient, append: bool) {
+    pub fn fetch_transactions(&mut self, api: &ApiClient) {
         self.loading = true;
         self.error = None;
-        let f = &self.filters;
-        let after = if append {
-            self.next_cursor.as_deref()
-        } else {
-            None
+        let previous_id = self
+            .selected_index
+            .and_then(|index| self.transactions.get(index))
+            .map(|tx| tx.id.clone());
+        let query = TransactionQuery {
+            range: self.period.range(),
+            filters: self.filters.clone(),
         };
-        match api.transactions(
-            nonempty(&f.date_from),
-            nonempty(&f.date_to),
-            f.account_id.as_deref(),
-            f.category_id.as_deref(),
-            f.tag_id.as_deref(),
-            f.tx_type.api_value(),
-            f.ignored.api_value(),
-            nonempty(&f.search),
-            Some(50),
-            after,
-        ) {
-            Ok((transactions, cursor)) => {
-                if append {
-                    self.transactions.extend(transactions);
-                } else {
-                    self.transactions = transactions;
-                    self.scroll_offset = 0;
-                    self.selected_index = (!self.transactions.is_empty()).then_some(0);
-                }
-                self.next_cursor = cursor;
+        match api.transactions_in_range(&query) {
+            Ok(transactions) => {
+                self.transactions = transactions.to_vec();
+                self.transactions
+                    .sort_by_key(|tx| std::cmp::Reverse(transaction_date(tx)));
+                self.scroll_offset = 0;
+                self.selected_index = previous_id
+                    .and_then(|id| self.transactions.iter().position(|tx| tx.id == id))
+                    .or_else(|| (!self.transactions.is_empty()).then_some(0));
             }
-            Err(error) => self.error = Some(error.to_string()),
+            Err(error) => {
+                self.transactions.clear();
+                self.selected_index = None;
+                self.error = Some(error.to_string());
+            }
         }
         self.loading = false;
+        self.reload_requested = false;
+    }
+
+    fn request_reload(&mut self) {
+        self.loading = true;
+        self.reload_requested = true;
     }
 
     pub fn handle_input(&mut self, _app: &App, api: &ApiClient, events: &[InputEvent]) {
@@ -173,13 +171,16 @@ impl TransactionsScreen {
     fn execute(&mut self, effect: Effect, api: &ApiClient) {
         match effect {
             Effect::None => {}
-            Effect::Refresh => self.refresh(api),
-            Effect::Fetch { append } => self.fetch_transactions(api, append),
+            Effect::Refresh => {
+                api.invalidate_cache();
+                self.request_reload();
+            }
+            Effect::Fetch => self.request_reload(),
             Effect::Save(body) => self.save(api, &body),
             Effect::Delete(id) => match api.delete_transaction(&id) {
                 Ok(()) => {
                     self.mode = TransactionMode::List;
-                    self.fetch_transactions(api, false);
+                    self.request_reload();
                 }
                 Err(error) => self.error = Some(error.to_string()),
             },
@@ -199,7 +200,7 @@ impl TransactionsScreen {
         match result {
             Ok(_) => {
                 self.mode = TransactionMode::List;
-                self.fetch_transactions(api, false);
+                self.request_reload();
             }
             Err(error) => {
                 if form.original.is_none() {
@@ -222,9 +223,10 @@ impl TransactionsScreen {
 
     fn export(&mut self, api: &ApiClient) {
         let f = &self.filters;
+        let range = self.period.range();
         match api.export_transactions_csv(
-            nonempty(&f.date_from),
-            nonempty(&f.date_to),
+            Some(&range.start().to_string()),
+            Some(&range.end().to_string()),
             f.account_id.as_deref(),
             f.category_id.as_deref(),
             f.tag_id.as_deref(),
@@ -328,7 +330,7 @@ impl TransactionsScreen {
                 } else if key.name == "enter" {
                     self.filters.search = text.trim().to_string();
                     self.mode = TransactionMode::List;
-                    return Effect::Fetch { append: false };
+                    return Effect::Fetch;
                 } else {
                     edit_text(text, key);
                 }
@@ -400,10 +402,9 @@ impl TransactionsScreen {
             }
             "c" => {
                 self.filters = TransactionFilters::default();
-                return Effect::Fetch { append: false };
+                return Effect::Fetch;
             }
             "r" => return Effect::Refresh,
-            "m" | "right" if self.next_cursor.is_some() => return Effect::Fetch { append: true },
             "E" | "ctrl+e" => return Effect::Export,
             _ => {}
         }
@@ -427,17 +428,10 @@ impl TransactionsScreen {
         let TransactionMode::Filters(form) = &mut self.mode else {
             return Effect::None;
         };
-        match form.draft.validate() {
-            Ok(()) => {
-                self.filters = form.draft.clone();
-                self.mode = TransactionMode::List;
-                Effect::Fetch { append: false }
-            }
-            Err(error) => {
-                form.error = Some(error);
-                Effect::None
-            }
-        }
+        form.draft.normalize();
+        self.filters = form.draft.clone();
+        self.mode = TransactionMode::List;
+        Effect::Fetch
     }
 
     fn picker(&self) -> Option<&Picker> {
@@ -688,7 +682,7 @@ fn activate_filter_field(form: &mut FilterForm) -> bool {
         FilterField::Account => form.picker = Some(Picker::new(PickerKind::Account)),
         FilterField::Category => form.picker = Some(Picker::new(PickerKind::Category)),
         FilterField::Tag => form.picker = Some(Picker::new(PickerKind::Tags)),
-        _ => return false,
+        FilterField::Search => return false,
     }
     true
 }

@@ -7,79 +7,7 @@ use uuid::Uuid;
 use crate::api::ApiError;
 use crate::models::Transaction;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum TxTypeFilter {
-    #[default]
-    All,
-    Credit,
-    Debit,
-}
-
-impl TxTypeFilter {
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::All => "Todos",
-            Self::Credit => "Receita",
-            Self::Debit => "Despesa",
-        }
-    }
-
-    #[must_use]
-    pub fn api_value(self) -> Option<&'static str> {
-        match self {
-            Self::All => None,
-            Self::Credit => Some("credit"),
-            Self::Debit => Some("debit"),
-        }
-    }
-
-    #[must_use]
-    pub fn next(self) -> Self {
-        match self {
-            Self::All => Self::Credit,
-            Self::Credit => Self::Debit,
-            Self::Debit => Self::All,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum IgnoredFilter {
-    #[default]
-    All,
-    OnlyIgnored,
-    NotIgnored,
-}
-
-impl IgnoredFilter {
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::All => "Todos",
-            Self::OnlyIgnored => "Ignorados",
-            Self::NotIgnored => "Não ignorados",
-        }
-    }
-
-    #[must_use]
-    pub fn api_value(self) -> Option<bool> {
-        match self {
-            Self::All => None,
-            Self::OnlyIgnored => Some(true),
-            Self::NotIgnored => Some(false),
-        }
-    }
-
-    #[must_use]
-    pub fn next(self) -> Self {
-        match self {
-            Self::All => Self::OnlyIgnored,
-            Self::OnlyIgnored => Self::NotIgnored,
-            Self::NotIgnored => Self::All,
-        }
-    }
-}
+pub use crate::api::{IgnoredFilter, TransactionFilters, TxTypeFilter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FormField {
@@ -421,39 +349,8 @@ fn collect_field_errors(value: &Value, errors: &mut BTreeMap<FormField, String>)
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TransactionFilters {
-    pub date_from: String,
-    pub date_to: String,
-    pub account_id: Option<String>,
-    pub category_id: Option<String>,
-    pub tag_id: Option<String>,
-    pub tx_type: TxTypeFilter,
-    pub ignored: IgnoredFilter,
-    pub search: String,
-}
-
-impl TransactionFilters {
-    pub fn validate(&mut self) -> Result<(), String> {
-        for date in [&mut self.date_from, &mut self.date_to] {
-            if date.trim().is_empty() {
-                date.clear();
-            } else {
-                *date = parse_date(date)?.to_string();
-            }
-        }
-        if !self.date_from.is_empty() && !self.date_to.is_empty() && self.date_from > self.date_to {
-            return Err("A data inicial deve ser anterior à data final.".into());
-        }
-        self.search = self.search.trim().to_string();
-        Ok(())
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterField {
-    From,
-    To,
     Account,
     Category,
     Tag,
@@ -463,9 +360,7 @@ pub enum FilterField {
 }
 
 impl FilterField {
-    pub const ALL: [Self; 8] = [
-        Self::From,
-        Self::To,
+    pub const ALL: [Self; 6] = [
         Self::Account,
         Self::Category,
         Self::Tag,
@@ -476,8 +371,6 @@ impl FilterField {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::From => "De",
-            Self::To => "Até",
             Self::Account => "Conta",
             Self::Category => "Categoria",
             Self::Tag => "Tag",
@@ -500,7 +393,7 @@ impl FilterForm {
     pub fn new(draft: TransactionFilters) -> Self {
         Self {
             draft,
-            focused: FilterField::From,
+            focused: FilterField::Account,
             picker: None,
             error: None,
         }
@@ -511,15 +404,13 @@ impl FilterForm {
             .position(|f| *f == self.focused)
             .unwrap_or(0);
         self.focused = FilterField::ALL[if backwards {
-            (index + 7) % 8
+            (index + 5) % 6
         } else {
-            (index + 1) % 8
+            (index + 1) % 6
         }];
     }
     pub fn text_mut(&mut self) -> Option<&mut String> {
         match self.focused {
-            FilterField::From => Some(&mut self.draft.date_from),
-            FilterField::To => Some(&mut self.draft.date_to),
             FilterField::Search => Some(&mut self.draft.search),
             _ => None,
         }

@@ -60,6 +60,62 @@ pub fn metric_strip(ui: &mut Container<'_>, metrics: Vec<Metric>) {
     });
 }
 
+pub fn period_summary(
+    ui: &mut Container<'_>,
+    summary: &crate::period::PeriodSummary,
+    count: usize,
+) {
+    let flow = summary.currencies.get("BRL").copied().unwrap_or_default();
+    let income = crate::period::money_cents(flow.income, "BRL");
+    let expenses = crate::period::money_cents(flow.expenses, "BRL");
+    let result = crate::period::money_cents(flow.result(), "BRL");
+    if ui.height() < 24 {
+        ui.text(&format!("Receitas {income}  ·  Despesas {expenses}"));
+        ui.styled_text(
+            &format!("Saldo do período {result}  ·  {count} lançamentos"),
+            TextStyle::new().fg(if flow.result() < 0 {
+                ui.theme().danger
+            } else {
+                ui.theme().success
+            }),
+        );
+    } else {
+        metric_strip(
+            ui,
+            vec![
+                Metric::new("Receitas", income, Tone::Positive),
+                Metric::new("Despesas", expenses, Tone::Negative),
+                Metric::new(
+                    "Saldo do período",
+                    result,
+                    if flow.result() < 0 {
+                        Tone::Negative
+                    } else {
+                        Tone::Positive
+                    },
+                ),
+            ],
+        );
+        ui.label(&format!("{count} lançamentos · sem ignorados nos totais"));
+    }
+    for (currency, flow) in &summary.currencies {
+        if currency != "BRL" {
+            ui.label(&format!(
+                "{currency} original · R {}  D {}  Saldo {}",
+                crate::period::money_cents(flow.income, currency),
+                crate::period::money_cents(flow.expenses, currency),
+                crate::period::money_cents(flow.result(), currency)
+            ));
+        }
+    }
+    if summary.invalid_amounts > 0 {
+        ui.label(&format!(
+            "{} valores inválidos excluídos dos totais",
+            summary.invalid_amounts
+        ));
+    }
+}
+
 #[must_use]
 pub fn amount(value: Option<&str>) -> Option<f64> {
     value?
@@ -199,6 +255,7 @@ pub fn shell<'a>(
     current: Screen,
     space: String,
     status: String,
+    period: String,
     modal_open: bool,
     content: impl FnOnce(&mut Container<'a>) + 'a,
 ) {
@@ -219,7 +276,15 @@ pub fn shell<'a>(
                 header.column(Column::new().size(Size::Cells(8)), move |brand| {
                     brand.styled_text(" VISOR", TextStyle::new().fg(accent).bold());
                 });
-                header.text(&format!("{}  ·  {space}", current.label()));
+                header.column(Column::new().size(Size::Fill), move |title| {
+                    title.text(&format!("{}  ·  {space}", current.label()));
+                    if !short {
+                        title.styled_text(
+                            &format!("◀ {period} ▶"),
+                            TextStyle::new().fg(accent).bold(),
+                        );
+                    }
+                });
             },
         );
         col.row(Row::new().size(Size::Fill).gap(1), move |body| {
@@ -287,7 +352,7 @@ pub fn shell<'a>(
                 let hint = if modal_open {
                     " Tab Campo  Ctrl+S Salvar  Esc Voltar".to_owned()
                 } else if compact {
-                    " Tab Telas  j/k Selecionar  ? Ajuda  r Atualizar  q Sair".to_owned()
+                    " [ ] Mês  T Hoje  p Período  Tab Telas  ? Ajuda  q Sair".to_owned()
                 } else {
                     let local = match current {
                         Screen::Transactions => "/ Buscar  n Nova  Enter Detalhes",
@@ -301,7 +366,7 @@ pub fn shell<'a>(
                         Screen::Settings => "s Espaço  l Sair da conta",
                         _ => "j/k Selecionar",
                     };
-                    format!(" Tab Telas  {local}  ? Ajuda  r Atualizar  q Sair")
+                    format!(" [ ] Mês  T Hoje  p Período  Tab Telas  {local}  ? Ajuda  r Atualizar")
                 };
                 footer.styled_text(&hint, TextStyle::new().fg(muted));
             },
@@ -448,9 +513,7 @@ mod tests {
             "s",
         )
         .unwrap();
-        let views: [(&str, View); 6] = [
-            ("overview", screens::overview::draw_overview_scrolled),
-            ("cash_flow", screens::cash_flow::render_scrolled),
+        let views: [(&str, View); 4] = [
             ("projection", screens::projection::render_scrolled),
             ("net_worth", screens::net_worth::render_scrolled),
             ("accounts_cards", |ui, api, selection| {
@@ -603,6 +666,7 @@ mod tests {
                     Screen::Goals,
                     "Pessoal".into(),
                     "Sincronizado".into(),
+                    "Outubro 2026".into(),
                     false,
                     |panel| crate::screens::goals::render_with_state(panel, &mut goals, &api),
                 );
@@ -614,6 +678,7 @@ mod tests {
                     Screen::Recurring,
                     "Pessoal".into(),
                     "Sincronizado".into(),
+                    "Outubro 2026".into(),
                     false,
                     |panel| {
                         crate::screens::recurring::render_with_state(panel, &mut recurring, &api);
@@ -670,6 +735,7 @@ mod tests {
                     Screen::Transactions,
                     "Pessoal".into(),
                     "Sincronizado".into(),
+                    "Outubro 2026".into(),
                     false,
                     |content| {
                         content.text("Conteúdo da tela");
