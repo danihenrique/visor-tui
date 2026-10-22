@@ -1,0 +1,12 @@
+pub mod accounts_cards;
+pub mod overview;
+pub mod transactions;
+pub mod recurring;
+pub mod cash_flow;
+pub mod categories;
+pub mod goals;
+pub mod projection;
+pub mod net_worth;
+pub mod bills;
+pub mod payables;
+pub mod settings;

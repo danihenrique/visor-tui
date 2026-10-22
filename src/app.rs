@@ -1,9 +1,13 @@
 use hqtui::prelude::*;
 
+use crate::api::ApiClient;
+use crate::screens;
+
 /// Main application state and event loop.
 pub struct VisorApp {
     app: App,
     screen: Screen,
+    api: ApiClient,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,9 +62,11 @@ impl Screen {
 impl VisorApp {
     pub fn new() -> std::io::Result<Self> {
         let app = App::new()?;
+        let api = ApiClient::new().map_err(|e| std::io::Error::other(e))?;
         Ok(Self {
             app,
             screen: Screen::Overview,
+            api,
         })
     }
 
@@ -113,10 +119,21 @@ impl VisorApp {
 
                 // Main content
                 row.column(Column::new().size(Size::Fill).gap(1), |col| {
-                    col.panel(Panel::new().title(current.label()), |p| {
-                        p.heading(current.label());
-                        p.text("Screen placeholder — implementation pending.");
-                    });
+                    match current {
+                        Screen::Overview => {
+                            screens::overview::draw_overview(col, &self.api);
+                        }
+                        Screen::AccountsCards => {
+                            screens::accounts_cards::render(col, &self.api, false);
+                        }
+                        _ => {
+                            let label = current.label();
+                            col.panel(Panel::new().title(label), move |p| {
+                                p.heading(label);
+                                p.text("Tela em desenvolvimento — disponivel em breve.");
+                            });
+                        }
+                    }
                 });
             });
 
