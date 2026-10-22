@@ -1,4 +1,7 @@
+use std::collections::HashMap;
 use std::fmt::Write;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
 use serde::de::DeserializeOwned;
@@ -11,12 +14,29 @@ use crate::models::{
     InvestmentSummary, Me, Notification, Overview, RecurringExpense, Space, Tag, Transaction,
 };
 
+/// Cache entry with TTL-based expiration.
+#[derive(Clone)]
+struct CacheEntry {
+    data: serde_json::Value,
+    fetched_at: Instant,
+}
+
+/// In-memory response cache keyed by `(space_id, endpoint, params)`.
+type ResponseCache = Arc<Mutex<HashMap<String, CacheEntry>>>;
+
+/// Default cache TTL in seconds.
+const CACHE_TTL_SECS: u64 = 60;
+
+/// Maximum retries for idempotent GET requests on 429.
+const MAX_RETRIES: u32 = 3;
+
 /// API client that reuses visor-cli's auth and config mechanisms.
 pub struct ApiClient {
     client: Client,
     base_url: String,
     credential: Credential,
     space_id: Option<String>,
+    cache: ResponseCache,
 }
 
 /// Exit code constants matching the CLI contract.
@@ -212,6 +232,16 @@ impl ApiError {
             None
         }
     }
+
+    /// Returns the HTTP status code if this is an API error.
+    #[must_use]
+    pub fn http_status(&self) -> Option<u16> {
+        if let Self::Api(data) = self {
+            Some(data.status)
+        } else {
+            None
+        }
+    }
 }
 
 /// Format a user-friendly display string for TUI toast/modal display.
@@ -339,6 +369,7 @@ impl ApiClient {
             base_url,
             credential,
             space_id,
+            cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -354,25 +385,120 @@ impl ApiClient {
             base_url: base_url.to_string(),
             credential,
             space_id: Some(space_id.to_string()),
+            cache: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
-    fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
-        let url = format!("{}{}", self.base_url, path);
-        let resp = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", self.credential.bearer_token()))
-            .header("Accept", "application/json")
-            .send()?;
+    /// Build a cache key from space ID and request path.
+    fn cache_key(&self, path: &str) -> String {
+        let sid = self.space_id.as_deref().unwrap_or("_");
+        format!("{sid}:{path}")
+    }
 
-        let status = resp.status().as_u16();
-        if !resp.status().is_success() {
-            let body: serde_json::Value = resp.json().unwrap_or_default();
-            return Err(ApiError::from_body(status, &body));
+    /// Invalidate all cache entries whose key contains the given resource segment.
+    /// The segment should be a resource name like "/tags", "/transactions", etc.
+    /// This matches against the full cached path (e.g., `"space_id:/v1/spaces/space_id/tags"`).
+    fn invalidate_cache_prefix(&self, resource: &str) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.retain(|k, _| !k.ends_with(resource));
+        }
+    }
+
+    /// Invalidate the entire cache (e.g., on logout or space switch).
+    pub fn invalidate_all_cache(&self) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.clear();
+        }
+    }
+
+    /// Compute jittered exponential backoff duration for a given retry attempt.
+    fn backoff_duration(attempt: u32, retry_after: Option<Duration>) -> Duration {
+        if let Some(ra) = retry_after {
+            return ra;
+        }
+        let base_ms = 500u64 * 2u64.saturating_pow(attempt);
+        let jitter_ms = base_ms / 4;
+        let total_ms = base_ms + (u64::from(std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_millis()) % jitter_ms.max(1));
+        Duration::from_millis(total_ms.min(30_000))
+    }
+
+    fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
+        let key = self.cache_key(path);
+
+        // Check cache first.
+        if let Ok(cache) = self.cache.lock()
+            && let Some(entry) = cache.get(&key)
+            && entry.fetched_at.elapsed() < Duration::from_secs(CACHE_TTL_SECS)
+        {
+            return Ok(serde_json::from_value(entry.data.clone())?);
         }
 
-        Ok(resp.json()?)
+        let url = format!("{}{}", self.base_url, path);
+        let mut last_err = None;
+
+        for attempt in 0..=MAX_RETRIES {
+            let resp = self
+                .client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", self.credential.bearer_token()))
+                .header("Accept", "application/json")
+                .send();
+
+            match resp {
+                Ok(r) => {
+                    let status = r.status().as_u16();
+
+                    if status == 429 && attempt < MAX_RETRIES {
+                        let body: serde_json::Value = r.json().unwrap_or_default();
+                        let retry_after = body
+                            .get("errors")
+                            .and_then(|e| e.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|e| e.get("details"))
+                            .and_then(|d| d.get("retry_after_seconds"))
+                            .and_then(serde_json::Value::as_u64)
+                            .map(Duration::from_secs);
+                        let wait = Self::backoff_duration(attempt, retry_after);
+                        std::thread::sleep(wait);
+                        last_err = Some(ApiError::from_body(status, &body));
+                        continue;
+                    }
+
+                    if !r.status().is_success() {
+                        let body: serde_json::Value = r.json().unwrap_or_default();
+                        return Err(ApiError::from_body(status, &body));
+                    }
+
+                    let value: serde_json::Value = r.json()?;
+
+                    // Store in cache.
+                    if let Ok(mut cache) = self.cache.lock() {
+                        cache.insert(key, CacheEntry {
+                            data: value.clone(),
+                            fetched_at: Instant::now(),
+                        });
+                    }
+
+                    return Ok(serde_json::from_value(value)?);
+                }
+                Err(e) => {
+                    if attempt < MAX_RETRIES {
+                        let wait = Self::backoff_duration(attempt, None);
+                        std::thread::sleep(wait);
+                        last_err = Some(ApiError::Http(e));
+                        continue;
+                    }
+                    return Err(ApiError::Http(e));
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            ApiError::api(429, "RATE_LIMITED".into(), "Max retries exceeded".into(), serde_json::Value::Null, None)
+        }))
     }
 
     fn space_prefix(&self) -> Result<String, ApiError> {
@@ -684,6 +810,7 @@ impl ApiClient {
             &serde_json::Value::Object(body),
             Some(&idempotency_key),
         )?;
+        self.invalidate_cache_prefix("/transactions");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
@@ -741,13 +868,16 @@ impl ApiClient {
             &format!("{prefix}/transactions/{id}"),
             &serde_json::Value::Object(body),
         )?;
+        self.invalidate_cache_prefix("/transactions");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
 
     pub fn delete_transaction(&self, id: &str) -> Result<(), ApiError> {
         let prefix = self.space_prefix()?;
-        self.delete(&format!("{prefix}/transactions/{id}"))
+        self.delete(&format!("{prefix}/transactions/{id}"))?;
+        self.invalidate_cache_prefix("/transactions");
+        Ok(())
     }
 
     // ── Tag Mutations ──
@@ -767,6 +897,7 @@ impl ApiClient {
             &serde_json::Value::Object(body),
             Some(&idempotency_key),
         )?;
+        self.invalidate_cache_prefix("/tags");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
@@ -786,13 +917,16 @@ impl ApiClient {
             &format!("{prefix}/tags/{id}"),
             &serde_json::Value::Object(body),
         )?;
+        self.invalidate_cache_prefix("/tags");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
 
     pub fn delete_tag(&self, id: &str) -> Result<(), ApiError> {
         let prefix = self.space_prefix()?;
-        self.delete(&format!("{prefix}/tags/{id}"))
+        self.delete(&format!("{prefix}/tags/{id}"))?;
+        self.invalidate_cache_prefix("/tags");
+        Ok(())
     }
 
     // ── Category Mutations ──
@@ -822,6 +956,7 @@ impl ApiClient {
             &serde_json::Value::Object(body),
             Some(&idempotency_key),
         )?;
+        self.invalidate_cache_prefix("/categories");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
@@ -850,13 +985,16 @@ impl ApiClient {
             &format!("{prefix}/categories/{id}"),
             &serde_json::Value::Object(body),
         )?;
+        self.invalidate_cache_prefix("/categories");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
 
     pub fn delete_category(&self, id: &str) -> Result<(), ApiError> {
         let prefix = self.space_prefix()?;
-        self.delete(&format!("{prefix}/categories/{id}"))
+        self.delete(&format!("{prefix}/categories/{id}"))?;
+        self.invalidate_cache_prefix("/categories");
+        Ok(())
     }
 
     // ── Goal Mutations ──
@@ -890,6 +1028,7 @@ impl ApiClient {
             &serde_json::Value::Object(body),
             Some(&idempotency_key),
         )?;
+        self.invalidate_cache_prefix("/goals");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
@@ -922,13 +1061,16 @@ impl ApiClient {
             &format!("{prefix}/goals/{id}"),
             &serde_json::Value::Object(body),
         )?;
+        self.invalidate_cache_prefix("/goals");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
 
     pub fn delete_goal(&self, id: &str) -> Result<(), ApiError> {
         let prefix = self.space_prefix()?;
-        self.delete(&format!("{prefix}/goals/{id}"))
+        self.delete(&format!("{prefix}/goals/{id}"))?;
+        self.invalidate_cache_prefix("/goals");
+        Ok(())
     }
 
     // ── Subscription Mutations ──
@@ -964,6 +1106,7 @@ impl ApiClient {
             &serde_json::Value::Object(body),
             Some(&idempotency_key),
         )?;
+        self.invalidate_cache_prefix("/subscriptions");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
@@ -996,13 +1139,16 @@ impl ApiClient {
             &format!("{prefix}/subscriptions/{id}"),
             &serde_json::Value::Object(body),
         )?;
+        self.invalidate_cache_prefix("/subscriptions");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
 
     pub fn delete_subscription(&self, id: &str) -> Result<(), ApiError> {
         let prefix = self.space_prefix()?;
-        self.delete(&format!("{prefix}/subscriptions/{id}"))
+        self.delete(&format!("{prefix}/subscriptions/{id}"))?;
+        self.invalidate_cache_prefix("/subscriptions");
+        Ok(())
     }
 
     // ── Fixed Bill Mutations ──
@@ -1034,6 +1180,7 @@ impl ApiClient {
             &serde_json::Value::Object(body),
             Some(&idempotency_key),
         )?;
+        self.invalidate_cache_prefix("/fixed-bills");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
@@ -1066,13 +1213,16 @@ impl ApiClient {
             &format!("{prefix}/fixed-bills/{id}"),
             &serde_json::Value::Object(body),
         )?;
+        self.invalidate_cache_prefix("/fixed-bills");
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
     }
 
     pub fn delete_fixed_bill(&self, id: &str) -> Result<(), ApiError> {
         let prefix = self.space_prefix()?;
-        self.delete(&format!("{prefix}/fixed-bills/{id}"))
+        self.delete(&format!("{prefix}/fixed-bills/{id}"))?;
+        self.invalidate_cache_prefix("/fixed-bills");
+        Ok(())
     }
 
     pub fn export_transactions_csv(
@@ -1514,5 +1664,135 @@ mod tests {
         let display = err.to_string();
         assert!(display.contains("r1"), "{display}");
         mock.assert();
+    }
+
+    #[test]
+    fn test_get_retries_on_429_with_retry_after() {
+        let mut server = mockito::Server::new();
+        // First request returns 429 with retry_after_seconds = 1
+        let mock_429 = server
+            .mock("GET", "/v1/spaces/s/tags")
+            .match_header("authorization", "Bearer visor_pat_test_secret")
+            .with_status(429)
+            .with_body(
+                json!({"errors": [{"code": "RATE_LIMITED", "message": "Too many requests", "details": {"retry_after_seconds": 1}}]})
+                .to_string(),
+            )
+            .create();
+        // Second request succeeds
+        let mock_ok = server
+            .mock("GET", "/v1/spaces/s/tags")
+            .match_header("authorization", "Bearer visor_pat_test_secret")
+            .with_status(200)
+            .with_body(
+                json!({"data": [{"id": "t1", "name": "Food", "color": "#ff0000"}]})
+                .to_string(),
+            )
+            .create();
+
+        let client = test_client(&server);
+        let tags = client.tags().unwrap();
+
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].id, "t1");
+        mock_429.assert();
+        mock_ok.assert();
+    }
+
+    #[test]
+    fn test_categories_returns_error_after_max_retries_on_429() {
+        let mut server = mockito::Server::new();
+        // All requests return 429 — should exhaust retries
+        let mock = server
+            .mock("GET", "/v1/spaces/s/categories")
+            .match_header("authorization", "Bearer visor_pat_test_secret")
+            .with_status(429)
+            .with_body(
+                json!({"errors": [{"code": "RATE_LIMITED", "message": "Too many requests", "details": {"retry_after_seconds": 1}}]})
+                .to_string(),
+            )
+            .expect(MAX_RETRIES as usize + 1)
+            .create();
+
+        let client = test_client(&server);
+        let result = client.categories(false);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.http_status(), Some(429));
+        mock.assert();
+    }
+
+    #[test]
+    fn test_cache_hit_avoids_second_request() {
+        let mut server = mockito::Server::new();
+        // Only one GET should be made; second call should hit cache
+        let mock = server
+            .mock("GET", "/v1/spaces/s/goals")
+            .match_header("authorization", "Bearer visor_pat_test_secret")
+            .with_status(200)
+            .with_body(
+                json!({"data": [{"id": "g1", "name": "Savings", "target_amount": "5000", "kind": "savings"}]})
+                .to_string(),
+            )
+            .expect(1)
+            .create();
+
+        let client = test_client(&server);
+        let goals1 = client.goals(None).unwrap();
+        let goals2 = client.goals(None).unwrap();
+
+        assert_eq!(goals1.len(), 1);
+        assert_eq!(goals2.len(), 1);
+        assert_eq!(goals1[0].id, goals2[0].id);
+        mock.assert();
+    }
+
+    #[test]
+    fn test_write_invalidates_cache_for_subsequent_get() {
+        let mut server = mockito::Server::new();
+        // First GET populates cache
+        let mock_get1 = server
+            .mock("GET", "/v1/spaces/s/tags")
+            .match_header("authorization", "Bearer visor_pat_test_secret")
+            .with_status(200)
+            .with_body(
+                json!({"data": [{"id": "t1", "name": "Old", "color": "#000"}]})
+                .to_string(),
+            )
+            .create();
+        // POST creates a tag (invalidates cache)
+        let mock_post = server
+            .mock("POST", "/v1/spaces/s/tags")
+            .match_header("authorization", "Bearer visor_pat_test_secret")
+            .with_status(201)
+            .with_body(
+                json!({"data": {"id": "t2", "name": "New", "color": "#fff"}})
+                .to_string(),
+            )
+            .create();
+        // Second GET must hit server again (cache was invalidated)
+        let mock_get2 = server
+            .mock("GET", "/v1/spaces/s/tags")
+            .match_header("authorization", "Bearer visor_pat_test_secret")
+            .with_status(200)
+            .with_body(
+                json!({"data": [{"id": "t1", "name": "Old", "color": "#000"}, {"id": "t2", "name": "New", "color": "#fff"}]})
+                .to_string(),
+            )
+            .create();
+
+        let client = test_client(&server);
+        let tags1 = client.tags().unwrap();
+        assert_eq!(tags1.len(), 1);
+
+        let _new_tag = client.create_tag("New", Some("#fff")).unwrap();
+
+        let tags2 = client.tags().unwrap();
+        assert_eq!(tags2.len(), 2);
+
+        mock_get1.assert();
+        mock_post.assert();
+        mock_get2.assert();
     }
 }

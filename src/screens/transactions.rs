@@ -47,6 +47,39 @@ impl TxTypeFilter {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IgnoredFilter {
+    All,
+    OnlyIgnored,
+    NotIgnored,
+}
+
+impl IgnoredFilter {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "Todos",
+            Self::OnlyIgnored => "Ignorados",
+            Self::NotIgnored => "Nao ignorados",
+        }
+    }
+
+    fn api_value(self) -> Option<bool> {
+        match self {
+            Self::All => None,
+            Self::OnlyIgnored => Some(true),
+            Self::NotIgnored => Some(false),
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::All => Self::OnlyIgnored,
+            Self::OnlyIgnored => Self::NotIgnored,
+            Self::NotIgnored => Self::All,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalState {
     None,
     Detail,
@@ -64,9 +97,11 @@ pub enum FormField {
     Type,
     Account,
     Category,
+    Tags,
     Merchant,
     Notes,
     Date,
+    Ignored,
 }
 
 impl FormField {
@@ -76,23 +111,27 @@ impl FormField {
             Self::Description => Self::Type,
             Self::Type => Self::Account,
             Self::Account => Self::Category,
-            Self::Category => Self::Merchant,
+            Self::Category => Self::Tags,
+            Self::Tags => Self::Merchant,
             Self::Merchant => Self::Notes,
             Self::Notes => Self::Date,
-            Self::Date => Self::Amount,
+            Self::Date => Self::Ignored,
+            Self::Ignored => Self::Amount,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Self::Amount => Self::Date,
+            Self::Amount => Self::Ignored,
             Self::Description => Self::Amount,
             Self::Type => Self::Description,
             Self::Account => Self::Type,
             Self::Category => Self::Account,
-            Self::Merchant => Self::Category,
+            Self::Tags => Self::Category,
+            Self::Merchant => Self::Tags,
             Self::Notes => Self::Merchant,
             Self::Date => Self::Notes,
+            Self::Ignored => Self::Date,
         }
     }
 }
@@ -112,6 +151,7 @@ pub struct TransactionsScreen {
     pub date_from: String,
     pub date_to: String,
     pub type_filter: TxTypeFilter,
+    pub ignored_filter: IgnoredFilter,
     pub account_filter_index: usize,
     pub category_filter_index: usize,
     pub tag_filter_index: usize,
@@ -129,9 +169,11 @@ pub struct TransactionsScreen {
     pub new_tx_type: TxTypeFilter,
     pub new_tx_account_index: usize,
     pub new_tx_category_index: usize,
+    pub new_tx_tag_indices: Vec<usize>,
     pub new_tx_merchant: String,
     pub new_tx_notes: String,
     pub new_tx_date: String,
+    pub new_tx_ignored: bool,
     pub new_tx_error: Option<String>,
     pub new_tx_field: FormField,
 
@@ -141,6 +183,7 @@ pub struct TransactionsScreen {
     pub edit_tx_description: String,
     pub edit_tx_type: TxTypeFilter,
     pub edit_tx_category_index: usize,
+    pub edit_tx_tag_indices: Vec<usize>,
     pub edit_tx_merchant: String,
     pub edit_tx_notes: String,
     pub edit_tx_date: String,
@@ -168,6 +211,7 @@ impl TransactionsScreen {
             date_from: String::new(),
             date_to: String::new(),
             type_filter: TxTypeFilter::All,
+            ignored_filter: IgnoredFilter::All,
             account_filter_index: 0,
             category_filter_index: 0,
             tag_filter_index: 0,
@@ -185,9 +229,11 @@ impl TransactionsScreen {
             new_tx_type: TxTypeFilter::Credit,
             new_tx_account_index: 0,
             new_tx_category_index: 0,
+            new_tx_tag_indices: Vec::new(),
             new_tx_merchant: String::new(),
             new_tx_notes: String::new(),
             new_tx_date: chrono::Local::now().format("%Y-%m-%d").to_string(),
+            new_tx_ignored: false,
             new_tx_error: None,
             new_tx_field: FormField::Amount,
 
@@ -197,6 +243,7 @@ impl TransactionsScreen {
             edit_tx_description: String::new(),
             edit_tx_type: TxTypeFilter::Credit,
             edit_tx_category_index: 0,
+            edit_tx_tag_indices: Vec::new(),
             edit_tx_merchant: String::new(),
             edit_tx_notes: String::new(),
             edit_tx_date: String::new(),
@@ -287,8 +334,10 @@ impl TransactionsScreen {
             Some(self.date_to.as_str())
         };
 
+        let ignored = self.ignored_filter.api_value();
+
         match api.transactions(
-            from_date, to_date, account_id, category_id, tag_id, tx_type, None, search,
+            from_date, to_date, account_id, category_id, tag_id, tx_type, ignored, search,
             Some(50), after,
         ) {
             Ok((txns, cursor)) => {
@@ -317,6 +366,11 @@ impl TransactionsScreen {
 
         if app.pressed("tx:type_toggle") {
             self.type_filter = self.type_filter.next();
+            self.fetch_transactions(api, false);
+        }
+
+        if app.pressed("tx:ignored_toggle") {
+            self.ignored_filter = self.ignored_filter.next();
             self.fetch_transactions(api, false);
         }
 
@@ -542,6 +596,30 @@ impl TransactionsScreen {
                             }
                             return;
                         }
+                        // Tag multi-select: Enter cycles through tags, toggling selection
+                        if k.name == "enter" && self.new_tx_field == FormField::Tags {
+                            if !self.tags.is_empty() {
+                                // Find next unselected tag index to add, or remove first selected
+                                let mut found_unselected = false;
+                                for i in 0..self.tags.len() {
+                                    if !self.new_tx_tag_indices.contains(&i) {
+                                        self.new_tx_tag_indices.push(i);
+                                        found_unselected = true;
+                                        break;
+                                    }
+                                }
+                                if !found_unselected {
+                                    // All selected, clear all
+                                    self.new_tx_tag_indices.clear();
+                                }
+                            }
+                            return;
+                        }
+                        // Ignored toggle on Enter
+                        if k.name == "enter" && self.new_tx_field == FormField::Ignored {
+                            self.new_tx_ignored = !self.new_tx_ignored;
+                            return;
+                        }
                         // Text input for the currently focused text field
                         if let Some(ch) = &k.char
                             && !k.ctrl && !k.alt {
@@ -631,17 +709,22 @@ impl TransactionsScreen {
                         Some(self.new_tx_date.as_str())
                     };
 
+                    let selected_tag_ids: Vec<String> = self.new_tx_tag_indices
+                        .iter()
+                        .filter_map(|&i| self.tags.get(i).map(|t| t.id.clone()))
+                        .collect();
+
                     match api.create_transaction(
                         amount_trimmed,
                         description,
                         tx_type_str,
                         account_id,
                         category_id,
-                        &[], // tag_ids
+                        &selected_tag_ids,
                         merchant,
                         notes,
                         transacted_at,
-                        false, // ignored
+                        self.new_tx_ignored,
                     ) {
                         Ok(_tx) => {
                             self.modal_state = ModalState::None;
@@ -654,6 +737,8 @@ impl TransactionsScreen {
                             self.new_tx_type = TxTypeFilter::Credit;
                             self.new_tx_account_index = 0;
                             self.new_tx_category_index = 0;
+                            self.new_tx_tag_indices.clear();
+                            self.new_tx_ignored = false;
                             self.new_tx_field = FormField::Amount;
                             self.fetch_transactions(api, false);
                         }
@@ -1009,6 +1094,14 @@ impl TransactionsScreen {
         };
         let type_label = type_filter.label().to_string();
 
+        let ignored_filter = self.ignored_filter;
+        let ignored_variant = match ignored_filter {
+            IgnoredFilter::All => ButtonVariant::Ghost,
+            IgnoredFilter::OnlyIgnored => ButtonVariant::Danger,
+            IgnoredFilter::NotIgnored => ButtonVariant::Success,
+        };
+        let ignored_label = ignored_filter.label().to_string();
+
         ui.column(Column::new().gap(1), move |col| {
             // Filter bar
             col.panel(Panel::new().title("Filtros"), move |p| {
@@ -1083,6 +1176,17 @@ impl TransactionsScreen {
                                 ..ButtonOptions::new(type_label.clone()).variant(type_variant)
                             },
                             "tx:type_toggle",
+                        );
+                    });
+
+                    r.column(Column::new().size(Size::Cells(14)).gap(0), move |c| {
+                        c.label("Ignorado:");
+                        c.button(
+                            ButtonOptions {
+                                width: Some(14),
+                                ..ButtonOptions::new(ignored_label.clone()).variant(ignored_variant)
+                            },
+                            "tx:ignored_toggle",
                         );
                     });
 
@@ -1208,6 +1312,19 @@ impl TransactionsScreen {
                 } else {
                     "(nenhuma)"
                 };
+                let new_tx_tag_indices = self.new_tx_tag_indices.clone();
+                let new_tx_ignored = self.new_tx_ignored;
+                let tags_for_form = tags.clone();
+                let selected_tag_names: Vec<String> = new_tx_tag_indices
+                    .iter()
+                    .filter_map(|&i| tags_for_form.get(i).map(|t| t.name.clone()))
+                    .collect();
+                let tags_display = if selected_tag_names.is_empty() {
+                    "(nenhuma)".to_string()
+                } else {
+                    selected_tag_names.join(", ")
+                };
+                let ignored_display = if new_tx_ignored { "SIM" } else { "NAO" };
                 let error_line = new_tx_error.as_ref().map(|e| format!("\nERRO: {e}")).unwrap_or_default();
                 let form_message = format!(
                     "{m_amt}Valor:       {amount}\n\
@@ -1215,9 +1332,11 @@ impl TransactionsScreen {
                      {m_type}Tipo:        {type_lbl}  [Enter para alternar]\n\
                      {m_acct}Conta:       {acct}  [Enter para ciclar]\n\
                      {m_cat}Categoria:   {cat}  [Enter para ciclar]\n\
+                     {m_tags}Tags:        {tags_disp}  [Enter para selecionar]\n\
                      {m_merch}Estabelec.:  {merch}\n\
                      {m_notes}Notas:       {notes}\n\
-                     {m_date}Data:        {date}{err}",
+                     {m_date}Data:        {date}\n\
+                     {m_ign}Ignorado:    {ign}  [Enter para alternar]{err}",
                     m_amt = field_marker(FormField::Amount),
                     amount = if new_tx_amount.is_empty() { "_" } else { &new_tx_amount },
                     m_desc = field_marker(FormField::Description),
@@ -1228,19 +1347,23 @@ impl TransactionsScreen {
                     acct = account_name,
                     m_cat = field_marker(FormField::Category),
                     cat = category_name,
+                    m_tags = field_marker(FormField::Tags),
+                    tags_disp = tags_display,
                     m_merch = field_marker(FormField::Merchant),
                     merch = if new_tx_merchant.is_empty() { "_" } else { &new_tx_merchant },
                     m_notes = field_marker(FormField::Notes),
                     notes = if new_tx_notes.is_empty() { "_" } else { &new_tx_notes },
                     m_date = field_marker(FormField::Date),
                     date = if new_tx_date.is_empty() { "_" } else { &new_tx_date },
+                    m_ign = field_marker(FormField::Ignored),
+                    ign = ignored_display,
                     err = error_line,
                 );
                 ui.modal(ModalOptions {
                     title: Some("Nova Transacao".to_string()),
                     message: Some(form_message),
                     width: Some(60),
-                    height: Some(14),
+                    height: Some(16),
                     buttons: vec![
                         ModalButton::new("Cancelar"),
                         ModalButton::new("Salvar"),
@@ -1286,6 +1409,17 @@ impl TransactionsScreen {
                 } else {
                     "(nenhuma)"
                 };
+                let edit_tx_tag_indices = self.edit_tx_tag_indices.clone();
+                let tags_for_edit = tags.clone();
+                let selected_edit_tag_names: Vec<String> = edit_tx_tag_indices
+                    .iter()
+                    .filter_map(|&i| tags_for_edit.get(i).map(|t| t.name.clone()))
+                    .collect();
+                let edit_tags_display = if selected_edit_tag_names.is_empty() {
+                    "(nenhuma)".to_string()
+                } else {
+                    selected_edit_tag_names.join(", ")
+                };
                 let ignored_label = if edit_tx_ignored { "SIM" } else { "NAO" };
                 let error_line = edit_tx_error.as_ref().map(|e| format!("\nERRO: {e}")).unwrap_or_default();
                 let form_message = format!(
@@ -1293,10 +1427,11 @@ impl TransactionsScreen {
                      {m_desc}Descricao:   {desc}{ro}\n\
                      {m_type}Tipo:        {type_lbl}  [Enter para alternar]{ro}\n\
                      {m_cat}Categoria:   {cat}  [Enter para ciclar]\n\
+                     {m_tags}Tags:        {tags_disp}  [Enter para selecionar]\n\
                      {m_merch}Estabelec.:  {merch}\n\
                      {m_notes}Notas:       {notes}\n\
                      {m_date}Data:        {date}{ro}\n\
-                     Ignorado:    {ign}  [i para alternar]{err}",
+                     {m_ign}Ignorado:    {ign}  [Enter para alternar]{err}",
                     m_amt = field_marker(FormField::Amount),
                     amount = if edit_tx_amount.is_empty() { "_" } else { &edit_tx_amount },
                     ro = readonly_tag,
@@ -1306,12 +1441,15 @@ impl TransactionsScreen {
                     type_lbl = type_label,
                     m_cat = field_marker(FormField::Category),
                     cat = category_name,
+                    m_tags = field_marker(FormField::Tags),
+                    tags_disp = edit_tags_display,
                     m_merch = field_marker(FormField::Merchant),
                     merch = if edit_tx_merchant.is_empty() { "_" } else { &edit_tx_merchant },
                     m_notes = field_marker(FormField::Notes),
                     notes = if edit_tx_notes.is_empty() { "_" } else { &edit_tx_notes },
                     m_date = field_marker(FormField::Date),
                     date = if edit_tx_date.is_empty() { "_" } else { &edit_tx_date },
+                    m_ign = field_marker(FormField::Ignored),
                     ign = ignored_label,
                     err = error_line,
                 );
@@ -1319,7 +1457,7 @@ impl TransactionsScreen {
                     title: Some("Editar Transacao".to_string()),
                     message: Some(form_message),
                     width: Some(60),
-                    height: Some(14),
+                    height: Some(16),
                     buttons: vec![
                         ModalButton::new("Cancelar"),
                         ModalButton::new("Salvar"),
