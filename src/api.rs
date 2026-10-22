@@ -1,9 +1,13 @@
 use reqwest::blocking::Client;
 use serde::de::DeserializeOwned;
+use uuid::Uuid;
 
 use crate::auth::Credential;
 use crate::config;
-use crate::models::*;
+use crate::models::{
+    Account, Bill, Card, Category, Connection, Goal, InstallmentPlan, Investment,
+    InvestmentSummary, Me, Notification, Overview, RecurringExpense, Space, Tag, Transaction,
+};
 
 /// API client that reuses visor-cli's auth and config mechanisms.
 pub struct ApiClient {
@@ -281,5 +285,299 @@ impl ApiClient {
         let resp: serde_json::Value = self.get(&format!("{prefix}/transactions/{id}"))?;
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
+    }
+
+    // ── Private HTTP helpers ──
+
+    fn post(&self, path: &str, body: &serde_json::Value, idempotency_key: Option<&str>) -> Result<serde_json::Value, ApiError> {
+        let url = format!("{}{}", self.base_url, path);
+        let mut req = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.credential.bearer_token()))
+            .header("Accept", "application/json")
+            .json(body);
+        if let Some(key) = idempotency_key {
+            req = req.header("Idempotency-Key", key);
+        }
+        let resp = req.send()?;
+
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body: serde_json::Value = resp.json().unwrap_or_default();
+            let errors = body.get("errors").and_then(|e| e.as_array());
+            let (code, message) = errors
+                .and_then(|arr| arr.first())
+                .map(|e| {
+                    (
+                        e.get("code").and_then(|c| c.as_str()).unwrap_or("UNKNOWN").to_string(),
+                        e.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string(),
+                    )
+                })
+                .unwrap_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")));
+            let request_id = errors
+                .and_then(|arr| arr.first())
+                .and_then(|e| e.get("request_id"))
+                .and_then(|r| r.as_str())
+                .map(String::from);
+            return Err(ApiError::Api { status, code, message, request_id });
+        }
+
+        let text = resp.text()?;
+        if text.trim().is_empty() {
+            Ok(serde_json::Value::Null)
+        } else {
+            Ok(serde_json::from_str(&text)?)
+        }
+    }
+
+    fn patch(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value, ApiError> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .client
+            .patch(&url)
+            .header("Authorization", format!("Bearer {}", self.credential.bearer_token()))
+            .header("Accept", "application/json")
+            .json(body)
+            .send()?;
+
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body: serde_json::Value = resp.json().unwrap_or_default();
+            let errors = body.get("errors").and_then(|e| e.as_array());
+            let (code, message) = errors
+                .and_then(|arr| arr.first())
+                .map(|e| {
+                    (
+                        e.get("code").and_then(|c| c.as_str()).unwrap_or("UNKNOWN").to_string(),
+                        e.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string(),
+                    )
+                })
+                .unwrap_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")));
+            let request_id = errors
+                .and_then(|arr| arr.first())
+                .and_then(|e| e.get("request_id"))
+                .and_then(|r| r.as_str())
+                .map(String::from);
+            return Err(ApiError::Api { status, code, message, request_id });
+        }
+
+        let text = resp.text()?;
+        if text.trim().is_empty() {
+            Ok(serde_json::Value::Null)
+        } else {
+            Ok(serde_json::from_str(&text)?)
+        }
+    }
+
+    fn delete(&self, path: &str) -> Result<(), ApiError> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .client
+            .delete(&url)
+            .header("Authorization", format!("Bearer {}", self.credential.bearer_token()))
+            .header("Accept", "application/json")
+            .send()?;
+
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body: serde_json::Value = resp.json().unwrap_or_default();
+            let errors = body.get("errors").and_then(|e| e.as_array());
+            let (code, message) = errors
+                .and_then(|arr| arr.first())
+                .map(|e| {
+                    (
+                        e.get("code").and_then(|c| c.as_str()).unwrap_or("UNKNOWN").to_string(),
+                        e.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string(),
+                    )
+                })
+                .unwrap_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")));
+            let request_id = errors
+                .and_then(|arr| arr.first())
+                .and_then(|e| e.get("request_id"))
+                .and_then(|r| r.as_str())
+                .map(String::from);
+            return Err(ApiError::Api { status, code, message, request_id });
+        }
+
+        Ok(())
+    }
+
+    // ── Transaction Mutations ──
+
+    pub fn create_transaction(
+        &self,
+        amount: &str,
+        description: &str,
+        tx_type: &str,
+        account_id: &str,
+        category_id: Option<&str>,
+        tag_ids: &[String],
+        merchant_name: Option<&str>,
+        notes: Option<&str>,
+        transacted_at: Option<&str>,
+        ignored: bool,
+    ) -> Result<Transaction, ApiError> {
+        let prefix = self.space_prefix()?;
+        let idempotency_key = Uuid::new_v4().to_string();
+
+        let mut body = serde_json::Map::new();
+        body.insert("amount".into(), serde_json::Value::String(amount.to_string()));
+        body.insert("description".into(), serde_json::Value::String(description.to_string()));
+        body.insert("type".into(), serde_json::Value::String(tx_type.to_string()));
+        body.insert("account_id".into(), serde_json::Value::String(account_id.to_string()));
+        if let Some(cat) = category_id {
+            body.insert("category_id".into(), serde_json::Value::String(cat.to_string()));
+        }
+        if !tag_ids.is_empty() {
+            body.insert("tag_ids".into(), serde_json::Value::Array(
+                tag_ids.iter().map(|t| serde_json::Value::String(t.clone())).collect(),
+            ));
+        }
+        if let Some(merchant) = merchant_name {
+            body.insert("merchant_name".into(), serde_json::Value::String(merchant.to_string()));
+        }
+        if let Some(n) = notes {
+            body.insert("notes".into(), serde_json::Value::String(n.to_string()));
+        }
+        if let Some(at) = transacted_at {
+            body.insert("transacted_at".into(), serde_json::Value::String(at.to_string()));
+        }
+        if ignored {
+            body.insert("ignored".into(), serde_json::Value::Bool(true));
+        }
+
+        let resp = self.post(
+            &format!("{prefix}/transactions"),
+            &serde_json::Value::Object(body),
+            Some(&idempotency_key),
+        )?;
+        let data = resp.get("data").cloned().unwrap_or(resp);
+        Ok(serde_json::from_value(data)?)
+    }
+
+    pub fn update_transaction(
+        &self,
+        id: &str,
+        amount: Option<&str>,
+        description: Option<&str>,
+        tx_type: Option<&str>,
+        category_id: Option<&str>,
+        tag_ids: Option<&[String]>,
+        merchant_name: Option<&str>,
+        notes: Option<&str>,
+        transacted_at: Option<&str>,
+        ignored: Option<bool>,
+        clear_tags: bool,
+    ) -> Result<Transaction, ApiError> {
+        let prefix = self.space_prefix()?;
+        let mut body = serde_json::Map::new();
+
+        if let Some(v) = amount {
+            body.insert("amount".into(), serde_json::Value::String(v.to_string()));
+        }
+        if let Some(v) = description {
+            body.insert("description".into(), serde_json::Value::String(v.to_string()));
+        }
+        if let Some(v) = tx_type {
+            body.insert("type".into(), serde_json::Value::String(v.to_string()));
+        }
+        if let Some(v) = category_id {
+            body.insert("category_id".into(), serde_json::Value::String(v.to_string()));
+        }
+        if clear_tags {
+            body.insert("tag_ids".into(), serde_json::Value::Array(vec![]));
+        } else if let Some(tags) = tag_ids {
+            body.insert("tag_ids".into(), serde_json::Value::Array(
+                tags.iter().map(|t| serde_json::Value::String(t.clone())).collect(),
+            ));
+        }
+        if let Some(v) = merchant_name {
+            body.insert("merchant_name".into(), serde_json::Value::String(v.to_string()));
+        }
+        if let Some(v) = notes {
+            body.insert("notes".into(), serde_json::Value::String(v.to_string()));
+        }
+        if let Some(v) = transacted_at {
+            body.insert("transacted_at".into(), serde_json::Value::String(v.to_string()));
+        }
+        if let Some(v) = ignored {
+            body.insert("ignored".into(), serde_json::Value::Bool(v));
+        }
+
+        let resp = self.patch(
+            &format!("{prefix}/transactions/{id}"),
+            &serde_json::Value::Object(body),
+        )?;
+        let data = resp.get("data").cloned().unwrap_or(resp);
+        Ok(serde_json::from_value(data)?)
+    }
+
+    pub fn delete_transaction(&self, id: &str) -> Result<(), ApiError> {
+        let prefix = self.space_prefix()?;
+        self.delete(&format!("{prefix}/transactions/{id}"))
+    }
+
+    pub fn export_transactions_csv(
+        &self,
+        from_date: Option<&str>,
+        to_date: Option<&str>,
+        account_id: Option<&str>,
+        category_id: Option<&str>,
+        tag_id: Option<&str>,
+        tx_type: Option<&str>,
+        ignored: Option<bool>,
+        search: Option<&str>,
+        limit: Option<u32>,
+        after: Option<&str>,
+    ) -> Result<String, ApiError> {
+        let prefix = self.space_prefix()?;
+        let mut params = Vec::new();
+        if let Some(v) = from_date { params.push(format!("from_date={v}")); }
+        if let Some(v) = to_date { params.push(format!("to_date={v}")); }
+        if let Some(v) = account_id { params.push(format!("account_id={v}")); }
+        if let Some(v) = category_id { params.push(format!("category_id={v}")); }
+        if let Some(v) = tag_id { params.push(format!("tag_id={v}")); }
+        if let Some(v) = tx_type { params.push(format!("type={v}")); }
+        if let Some(v) = ignored { params.push(format!("ignored={v}")); }
+        if let Some(v) = search { params.push(format!("search={v}")); }
+        if let Some(v) = limit { params.push(format!("limit={v}")); }
+        if let Some(v) = after { params.push(format!("after={v}")); }
+        let qs = if params.is_empty() {
+            String::new()
+        } else {
+            format!("?{}", params.join("&"))
+        };
+
+        let url = format!("{}{}/transactions{}", self.base_url, prefix, qs);
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.credential.bearer_token()))
+            .header("Accept", "text/csv")
+            .send()?;
+
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            let body: serde_json::Value = resp.json().unwrap_or_default();
+            let errors = body.get("errors").and_then(|e| e.as_array());
+            let (code, message) = errors
+                .and_then(|arr| arr.first())
+                .map(|e| {
+                    (
+                        e.get("code").and_then(|c| c.as_str()).unwrap_or("UNKNOWN").to_string(),
+                        e.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string(),
+                    )
+                })
+                .unwrap_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")));
+            let request_id = errors
+                .and_then(|arr| arr.first())
+                .and_then(|e| e.get("request_id"))
+                .and_then(|r| r.as_str())
+                .map(String::from);
+            return Err(ApiError::Api { status, code, message, request_id });
+        }
+
+        Ok(resp.text()?)
     }
 }

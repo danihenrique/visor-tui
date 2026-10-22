@@ -1,5 +1,6 @@
 use hqtui::prelude::*;
 use hqtui::color::Color;
+use hqtui::input::InputEvent;
 use hqtui::widgets::{
     ButtonOptions, ButtonVariant, ModalButton, ModalOptions, SelectOptions,
     TableOptions, TableColumn, TableRow, TextInputOptions,
@@ -14,7 +15,7 @@ const COLOR_DEBIT: Color = Color::rgb(0xef, 0x44, 0x44);
 const COLOR_MUTED: Color = Color::rgb(0x94, 0xa3, 0xb8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TxTypeFilter {
+pub enum TxTypeFilter {
     All,
     Credit,
     Debit,
@@ -47,11 +48,52 @@ impl TxTypeFilter {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ModalState {
+pub enum ModalState {
     None,
     Detail,
     NewTransaction,
     DeleteConfirm,
+}
+
+/// Which form field is focused inside the NewTransaction modal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormField {
+    Amount,
+    Description,
+    Type,
+    Account,
+    Category,
+    Merchant,
+    Notes,
+    Date,
+}
+
+impl FormField {
+    fn next(self) -> Self {
+        match self {
+            Self::Amount => Self::Description,
+            Self::Description => Self::Type,
+            Self::Type => Self::Account,
+            Self::Account => Self::Category,
+            Self::Category => Self::Merchant,
+            Self::Merchant => Self::Notes,
+            Self::Notes => Self::Date,
+            Self::Date => Self::Amount,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            Self::Amount => Self::Date,
+            Self::Description => Self::Amount,
+            Self::Type => Self::Description,
+            Self::Account => Self::Type,
+            Self::Category => Self::Account,
+            Self::Merchant => Self::Category,
+            Self::Notes => Self::Merchant,
+            Self::Date => Self::Notes,
+        }
+    }
 }
 
 pub struct TransactionsScreen {
@@ -75,6 +117,18 @@ pub struct TransactionsScreen {
     pub detail_transaction: Option<Transaction>,
     pub delete_target_id: Option<String>,
     pub loaded: bool,
+
+    // New transaction form state
+    pub new_tx_amount: String,
+    pub new_tx_description: String,
+    pub new_tx_type: TxTypeFilter,
+    pub new_tx_account_index: usize,
+    pub new_tx_category_index: usize,
+    pub new_tx_merchant: String,
+    pub new_tx_notes: String,
+    pub new_tx_date: String,
+    pub new_tx_error: Option<String>,
+    pub new_tx_field: FormField,
 }
 
 impl TransactionsScreen {
@@ -100,6 +154,18 @@ impl TransactionsScreen {
             detail_transaction: None,
             delete_target_id: None,
             loaded: false,
+
+            // New transaction form defaults
+            new_tx_amount: String::new(),
+            new_tx_description: String::new(),
+            new_tx_type: TxTypeFilter::Credit,
+            new_tx_account_index: 0,
+            new_tx_category_index: 0,
+            new_tx_merchant: String::new(),
+            new_tx_notes: String::new(),
+            new_tx_date: chrono::Local::now().format("%Y-%m-%d").to_string(),
+            new_tx_error: None,
+            new_tx_field: FormField::Amount,
         }
     }
 
@@ -201,9 +267,9 @@ impl TransactionsScreen {
         }
     }
 
-    pub fn handle_input(&mut self, app: &App, api: &ApiClient) {
+    pub fn handle_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
         if self.modal_state != ModalState::None {
-            self.handle_modal_input(app);
+            self.handle_modal_input(app, api, events);
             return;
         }
 
@@ -247,11 +313,13 @@ impl TransactionsScreen {
         if scroll_delta != 0 {
             let max_offset = self.transactions.len().saturating_sub(1);
             if scroll_delta > 0 {
+                let delta = usize::try_from(scroll_delta).unwrap_or(0);
                 self.scroll_offset =
-                    (self.scroll_offset + scroll_delta as usize).min(max_offset);
+                    (self.scroll_offset + delta).min(max_offset);
             } else {
+                let delta = usize::try_from(-scroll_delta).unwrap_or(0);
                 self.scroll_offset =
-                    self.scroll_offset.saturating_sub((-scroll_delta) as usize);
+                    self.scroll_offset.saturating_sub(delta);
             }
             self.selected_index = Some(self.scroll_offset);
         }
@@ -283,7 +351,7 @@ impl TransactionsScreen {
         }
     }
 
-    fn handle_modal_input(&mut self, app: &App) {
+    fn handle_modal_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
         match self.modal_state {
             ModalState::Detail => {
                 if app.pressed("tx:detail_close") || app.pressed("tx:escape") {
@@ -292,11 +360,167 @@ impl TransactionsScreen {
                 }
             }
             ModalState::NewTransaction => {
-                if app.pressed("tx:new_cancel") || app.pressed("tx:escape") {
+                // Handle escape / cancel
+                for event in events {
+                    if let InputEvent::Key(k) = event {
+                        if k.key == "escape" {
+                            self.modal_state = ModalState::None;
+                            self.new_tx_error = None;
+                            return;
+                        }
+                        // Tab / Shift+Tab to cycle form fields
+                        if k.name == "tab" && !k.shift {
+                            self.new_tx_field = self.new_tx_field.next();
+                            return;
+                        }
+                        if k.name == "tab" && k.shift {
+                            self.new_tx_field = self.new_tx_field.prev();
+                            return;
+                        }
+                        // Type toggle on Enter when Type field is focused
+                        if k.name == "enter" && self.new_tx_field == FormField::Type {
+                            self.new_tx_type = match self.new_tx_type {
+                                TxTypeFilter::Credit => TxTypeFilter::Debit,
+                                _ => TxTypeFilter::Credit,
+                            };
+                            return;
+                        }
+                        // Account / Category select cycling on Enter
+                        if k.name == "enter" && self.new_tx_field == FormField::Account {
+                            if !self.accounts.is_empty() {
+                                self.new_tx_account_index =
+                                    (self.new_tx_account_index + 1) % self.accounts.len();
+                            }
+                            return;
+                        }
+                        if k.name == "enter" && self.new_tx_field == FormField::Category {
+                            if !self.categories.is_empty() {
+                                self.new_tx_category_index =
+                                    (self.new_tx_category_index + 1) % self.categories.len();
+                            }
+                            return;
+                        }
+                        // Text input for the currently focused text field
+                        if let Some(ch) = &k.char {
+                            if !k.ctrl && !k.alt {
+                                match self.new_tx_field {
+                                    FormField::Amount => self.new_tx_amount.push_str(ch),
+                                    FormField::Description => self.new_tx_description.push_str(ch),
+                                    FormField::Merchant => self.new_tx_merchant.push_str(ch),
+                                    FormField::Notes => self.new_tx_notes.push_str(ch),
+                                    FormField::Date => self.new_tx_date.push_str(ch),
+                                    _ => {}
+                                }
+                                return;
+                            }
+                        }
+                        if k.key == "backspace" {
+                            match self.new_tx_field {
+                                FormField::Amount => { self.new_tx_amount.pop(); }
+                                FormField::Description => { self.new_tx_description.pop(); }
+                                FormField::Merchant => { self.new_tx_merchant.pop(); }
+                                FormField::Notes => { self.new_tx_notes.pop(); }
+                                FormField::Date => { self.new_tx_date.pop(); }
+                                _ => {}
+                            }
+                            return;
+                        }
+                        if k.key == "ctrl+u" {
+                            match self.new_tx_field {
+                                FormField::Amount => self.new_tx_amount.clear(),
+                                FormField::Description => self.new_tx_description.clear(),
+                                FormField::Merchant => self.new_tx_merchant.clear(),
+                                FormField::Notes => self.new_tx_notes.clear(),
+                                FormField::Date => self.new_tx_date.clear(),
+                                _ => {}
+                            }
+                            return;
+                        }
+                    }
+                }
+
+                if app.pressed("tx:new_cancel") {
                     self.modal_state = ModalState::None;
+                    self.new_tx_error = None;
                 }
                 if app.pressed("tx:new_save") {
-                    self.modal_state = ModalState::None;
+                    // Validate amount
+                    let amount_trimmed = self.new_tx_amount.trim();
+                    if amount_trimmed.is_empty() {
+                        self.new_tx_error = Some("Valor e obrigatorio.".to_string());
+                        return;
+                    }
+                    if amount_trimmed.parse::<f64>().is_err() {
+                        self.new_tx_error = Some("Valor invalido. Use formato numerico.".to_string());
+                        return;
+                    }
+                    if self.accounts.is_empty() {
+                        self.new_tx_error = Some("Nenhuma conta disponivel.".to_string());
+                        return;
+                    }
+
+                    let account_id = &self.accounts[self.new_tx_account_index].id;
+                    let category_id = if self.new_tx_category_index < self.categories.len() {
+                        Some(self.categories[self.new_tx_category_index].id.as_str())
+                    } else {
+                        None
+                    };
+                    let tx_type_str = match self.new_tx_type {
+                        TxTypeFilter::Credit => "CREDIT",
+                        TxTypeFilter::Debit => "DEBIT",
+                        TxTypeFilter::All => "CREDIT",
+                    };
+                    let description = if self.new_tx_description.is_empty() {
+                        ""
+                    } else {
+                        self.new_tx_description.as_str()
+                    };
+                    let merchant = if self.new_tx_merchant.is_empty() {
+                        None
+                    } else {
+                        Some(self.new_tx_merchant.as_str())
+                    };
+                    let notes = if self.new_tx_notes.is_empty() {
+                        None
+                    } else {
+                        Some(self.new_tx_notes.as_str())
+                    };
+                    let transacted_at = if self.new_tx_date.is_empty() {
+                        None
+                    } else {
+                        Some(self.new_tx_date.as_str())
+                    };
+
+                    match api.create_transaction(
+                        amount_trimmed,
+                        description,
+                        tx_type_str,
+                        account_id,
+                        category_id,
+                        &[], // tag_ids
+                        merchant,
+                        notes,
+                        transacted_at,
+                        false, // ignored
+                    ) {
+                        Ok(_tx) => {
+                            self.modal_state = ModalState::None;
+                            self.new_tx_error = None;
+                            self.new_tx_amount.clear();
+                            self.new_tx_description.clear();
+                            self.new_tx_merchant.clear();
+                            self.new_tx_notes.clear();
+                            self.new_tx_date = chrono::Local::now().format("%Y-%m-%d").to_string();
+                            self.new_tx_type = TxTypeFilter::Credit;
+                            self.new_tx_account_index = 0;
+                            self.new_tx_category_index = 0;
+                            self.new_tx_field = FormField::Amount;
+                            self.fetch_transactions(api, false);
+                        }
+                        Err(e) => {
+                            self.new_tx_error = Some(format_api_error(&e));
+                        }
+                    }
                 }
             }
             ModalState::DeleteConfirm => {
@@ -305,8 +529,21 @@ impl TransactionsScreen {
                     self.delete_target_id = None;
                 }
                 if app.pressed("tx:delete_confirm") {
-                    self.modal_state = ModalState::None;
-                    self.delete_target_id = None;
+                    if let Some(ref id) = self.delete_target_id.clone() {
+                        match api.delete_transaction(id) {
+                            Ok(()) => {
+                                self.transactions.retain(|tx| &tx.id != id);
+                                self.modal_state = ModalState::None;
+                                self.delete_target_id = None;
+                                self.selected_index = None;
+                            }
+                            Err(e) => {
+                                self.error = Some(format_api_error(&e));
+                                self.modal_state = ModalState::None;
+                                self.delete_target_id = None;
+                            }
+                        }
+                    }
                 }
             }
             ModalState::None => {}
@@ -335,6 +572,18 @@ impl TransactionsScreen {
         let detail_transaction = self.detail_transaction.clone();
         let has_selected = self.selected_index.is_some();
         let tx_count = self.transactions.len();
+
+        // New transaction form state (cloned for closure capture)
+        let new_tx_amount = self.new_tx_amount.clone();
+        let new_tx_description = self.new_tx_description.clone();
+        let new_tx_type = self.new_tx_type;
+        let new_tx_account_index = self.new_tx_account_index;
+        let new_tx_category_index = self.new_tx_category_index;
+        let new_tx_merchant = self.new_tx_merchant.clone();
+        let new_tx_notes = self.new_tx_notes.clone();
+        let new_tx_date = self.new_tx_date.clone();
+        let new_tx_error = self.new_tx_error.clone();
+        let new_tx_field = self.new_tx_field;
 
         // Pre-compute table rows outside closures to avoid borrow issues
         let colored_rows: Vec<TableRow> = transactions
@@ -599,9 +848,59 @@ impl TransactionsScreen {
                 }
             }
             ModalState::NewTransaction => {
+                // Build a text-based form display for the modal message.
+                // Users navigate fields with Tab/Shift+Tab and edit via keyboard.
+                let field_marker = |f: FormField| -> &'static str {
+                    if f == new_tx_field { " > " } else { "   " }
+                };
+                let type_label = match new_tx_type {
+                    TxTypeFilter::Credit => "CREDITO",
+                    TxTypeFilter::Debit => "DEBITO",
+                    TxTypeFilter::All => "CREDITO",
+                };
+                let account_name = if !accounts.is_empty() && new_tx_account_index < accounts.len() {
+                    &accounts[new_tx_account_index].name
+                } else {
+                    "(nenhuma)"
+                };
+                let category_name = if !categories.is_empty() && new_tx_category_index < categories.len() {
+                    &categories[new_tx_category_index].name
+                } else {
+                    "(nenhuma)"
+                };
+                let error_line = new_tx_error.as_ref().map(|e| format!("\nERRO: {e}")).unwrap_or_default();
+                let form_message = format!(
+                    "{m_amt}Valor:       {amount}\n\
+                     {m_desc}Descricao:   {desc}\n\
+                     {m_type}Tipo:        {type_lbl}  [Enter para alternar]\n\
+                     {m_acct}Conta:       {acct}  [Enter para ciclar]\n\
+                     {m_cat}Categoria:   {cat}  [Enter para ciclar]\n\
+                     {m_merch}Estabelec.:  {merch}\n\
+                     {m_notes}Notas:       {notes}\n\
+                     {m_date}Data:        {date}{err}",
+                    m_amt = field_marker(FormField::Amount),
+                    amount = if new_tx_amount.is_empty() { "_" } else { &new_tx_amount },
+                    m_desc = field_marker(FormField::Description),
+                    desc = if new_tx_description.is_empty() { "_" } else { &new_tx_description },
+                    m_type = field_marker(FormField::Type),
+                    type_lbl = type_label,
+                    m_acct = field_marker(FormField::Account),
+                    acct = account_name,
+                    m_cat = field_marker(FormField::Category),
+                    cat = category_name,
+                    m_merch = field_marker(FormField::Merchant),
+                    merch = if new_tx_merchant.is_empty() { "_" } else { &new_tx_merchant },
+                    m_notes = field_marker(FormField::Notes),
+                    notes = if new_tx_notes.is_empty() { "_" } else { &new_tx_notes },
+                    m_date = field_marker(FormField::Date),
+                    date = if new_tx_date.is_empty() { "_" } else { &new_tx_date },
+                    err = error_line,
+                );
                 ui.modal(ModalOptions {
                     title: Some("Nova Transacao".to_string()),
-                    message: Some("Formulario de nova transacao (em breve).".to_string()),
+                    message: Some(form_message),
+                    width: Some(60),
+                    height: Some(14),
                     buttons: vec![
                         ModalButton::new("Cancelar"),
                         ModalButton::new("Salvar"),
@@ -684,7 +983,20 @@ fn format_api_error(err: &ApiError) -> String {
     format!("Erro: {err}")
 }
 
-/// Stateless render entry point for app.rs — creates a fresh screen, loads data, and renders.
+/// Render entry point that uses a persistent screen instance stored in app.rs.
+/// Input handling must be called separately via handle_input before rendering.
+pub fn render_with_state(
+    ui: &mut Container<'_>,
+    screen: &mut TransactionsScreen,
+    api: &ApiClient,
+) {
+    if !screen.loaded {
+        screen.load_initial(api);
+    }
+    screen.render(ui);
+}
+
+/// Legacy stateless render entry point (no form support).
 pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
     let mut screen = TransactionsScreen::new();
     screen.load_initial(api);

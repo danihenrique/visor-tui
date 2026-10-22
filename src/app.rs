@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use hqtui::prelude::*;
@@ -17,6 +18,7 @@ pub struct VisorApp {
     login_error: Option<String>,
     space_selector_visible: bool,
     spaces: Vec<crate::models::Space>,
+    transactions_screen: Rc<RefCell<screens::transactions::TransactionsScreen>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,8 +101,8 @@ impl Screen {
     }
 }
 
-/// Load token from visor.env and save as credential if no credential exists yet.
-/// This avoids runtime env var mutation (forbidden by unsafe_code = "forbid").
+/// Load token from `visor.env` and save as credential if no credential exists yet.
+/// This avoids runtime env var mutation (forbidden by `unsafe_code = "forbid"`).
 fn load_env_token() -> Option<auth::Credential> {
     let path = config::config_dir().join("visor.env");
     let contents = std::fs::read_to_string(&path).ok()?;
@@ -167,6 +169,7 @@ impl VisorApp {
             login_error: None,
             space_selector_visible,
             spaces,
+            transactions_screen: Rc::new(RefCell::new(screens::transactions::TransactionsScreen::new())),
         })
     }
 
@@ -355,22 +358,26 @@ impl VisorApp {
                 self.screen = *scr;
             }
         }
+
+        // Dispatch input to the transactions screen when it is active.
+        if self.screen == Screen::Transactions
+            && let Some(ref api) = self.api
+        {
+            self.transactions_screen.borrow_mut().handle_input(&self.app, api, events);
+        }
     }
 
     fn check_space_after_login(&mut self) {
-        if let Some(ref client) = self.api {
-            if config::active_space_id().is_none() {
-                match client.spaces() {
-                    Ok(list) => {
-                        if list.len() == 1 {
-                            let _ = config::set_default_space_id(&list[0].id);
-                            self.api = ApiClient::new().ok().map(Rc::new);
-                        } else if !list.is_empty() {
-                            self.spaces = list;
-                            self.space_selector_visible = true;
-                        }
-                    }
-                    Err(_) => {}
+        if let Some(ref client) = self.api
+            && config::active_space_id().is_none()
+        {
+            if let Ok(list) = client.spaces() {
+                if list.len() == 1 {
+                    let _ = config::set_default_space_id(&list[0].id);
+                    self.api = ApiClient::new().ok().map(Rc::new);
+                } else if !list.is_empty() {
+                    self.spaces = list;
+                    self.space_selector_visible = true;
                 }
             }
         }
@@ -393,6 +400,7 @@ impl VisorApp {
             .collect();
 
         let api = Rc::clone(self.api.as_ref().expect("api is Some at this point"));
+        let tx_screen = self.transactions_screen.clone();
 
         self.app.draw(move |f| {
             f.ui.row(Row::new().gap(0), move |row| {
@@ -422,7 +430,9 @@ impl VisorApp {
                     col.panel(Panel::new().title(current.label()), move |p| {
                         match current {
                             Screen::Overview => screens::overview::draw_overview(p, &api),
-                            Screen::Transactions => screens::transactions::render(p, &api),
+                            Screen::Transactions => {
+                                screens::transactions::render_with_state(p, &mut tx_screen.borrow_mut(), &api);
+                            }
                             Screen::Recurring => screens::recurring::render(p, &api),
                             Screen::CashFlow => screens::cash_flow::render(p, &api),
                             Screen::AccountsCards => {
