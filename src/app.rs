@@ -90,21 +90,24 @@ enum SelectorOutcome {
 
 impl ScreenSelector {
     fn handle_input(&mut self, event: &InputEvent, hits: &Interactions) -> SelectorOutcome {
-        let key = match event {
-            InputEvent::Key(key) => key.name.as_str(),
-            InputEvent::Mouse(mouse) => match hits.click(event) {
-                Some(Control::Field(index)) => {
-                    return Screen::from_index(index)
-                        .map_or(SelectorOutcome::Editing, SelectorOutcome::Selected);
-                }
-                Some(Control::Button(_)) => "escape",
-                _ if mouse.action == hqtui::input::MouseAction::Scroll => {
-                    if mouse.scroll > 0 { "down" } else { "up" }
+        let key =
+            match event {
+                InputEvent::Key(key) => key.name.as_str(),
+                InputEvent::Mouse(mouse) => {
+                    match hits.click(event) {
+                        Some(Control::Field(index)) => {
+                            return Screen::from_index(index)
+                                .map_or(SelectorOutcome::Editing, SelectorOutcome::Selected);
+                        }
+                        Some(Control::Button(_)) => "escape",
+                        _ if mouse.action == hqtui::input::MouseAction::Scroll => {
+                            if mouse.scroll > 0 { "down" } else { "up" }
+                        }
+                        _ => return SelectorOutcome::Editing,
+                    }
                 }
                 _ => return SelectorOutcome::Editing,
-            },
-            _ => return SelectorOutcome::Editing,
-        };
+            };
         match key {
             "escape" => SelectorOutcome::Cancelled,
             "enter" => Screen::from_index(self.selected)
@@ -1050,7 +1053,10 @@ mod tests {
                 SelectorOutcome::Selected(Screen::Doctor)
             );
             for (key, index) in [("up", 14), ("k", 13), ("down", 14), ("j", 15)] {
-                assert_eq!(selector.handle_input(&key_event(key), &hits), SelectorOutcome::Editing);
+                assert_eq!(
+                    selector.handle_input(&key_event(key), &hits),
+                    SelectorOutcome::Editing
+                );
                 assert_eq!(selector.selected, index);
             }
         }

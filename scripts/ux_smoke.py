@@ -804,6 +804,9 @@ def check_mouse_transactions(terminal, config, captures):
     terminal.send("18,90")
     terminal.click("Conta:")
     terminal.expect("Selecionar conta")
+    terminal.click("Esc Voltar")
+    terminal.expect("Nova transação")
+    terminal.click("Conta:")
     terminal.click("Conta principal")
     form_point = terminal.position("Conta:")
     for _ in range(10):
@@ -813,6 +816,18 @@ def check_mouse_transactions(terminal, config, captures):
     terminal.click("Categoria:")
     terminal.click("Mercado")
     form_point = terminal.position("Categoria:")
+    for _ in range(10):
+        if any("Tags:" in line for line in terminal.screen.display):
+            break
+        terminal.wheel_at(*form_point, steps=1)
+    terminal.click("Tags:")
+    terminal.expect("Selecionar tags")
+    terminal.click("Essencial")
+    terminal.expect("Selecionar tags")
+    terminal.click("Esc Voltar")
+    terminal.expect("Nova transação")
+    terminal.expect("Essencial")
+    form_point = terminal.position("Tags:")
     for _ in range(10):
         if any("Data:" in line for line in terminal.screen.display):
             break
@@ -827,6 +842,7 @@ def check_mouse_transactions(terminal, config, captures):
     assert writes[0][2]["description"] == "Compra com mouse", writes
     assert writes[0][2]["account_id"] == "account-1", writes
     assert writes[0][2]["category_id"] == "category-1", writes
+    assert writes[0][2]["tag_ids"] == ["tag-2"], writes
     assert writes[0][2]["transacted_at"].startswith("2026-10-22"), writes
     terminal.wait_until(lambda: "15 lançamentos" in terminal.text(), "Mouse save did not refresh the list")
     terminal.click("/ Busca")

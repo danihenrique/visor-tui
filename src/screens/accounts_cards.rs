@@ -361,7 +361,11 @@ fn render_content(
                                             hits.clone(),
                                             Control::Row(account_count + index),
                                             move |cell| {
-                                                card_panel(cell, card, selected_card == Some(index));
+                                                card_panel(
+                                                    cell,
+                                                    card,
+                                                    selected_card == Some(index),
+                                                );
                                             },
                                         );
                                     }
