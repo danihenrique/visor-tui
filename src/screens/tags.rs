@@ -9,9 +9,7 @@ use hqtui::widgets::{
 
 use crate::api::ApiClient;
 use crate::models::Tag;
-
-const COLOR_NEGATIVE: Color = Color::rgb(239, 68, 68);
-const COLOR_NEUTRAL: Color = Color::rgb(148, 163, 184);
+use crate::presentation::{Metric, Tone, metric_strip};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TagModalState {
@@ -383,33 +381,48 @@ impl Default for TagsScreen {
     }
 }
 
-fn parse_color(color_str: &str) -> Option<Color> {
-    let s = color_str.trim().trim_start_matches('#');
-    if s.len() == 6 {
-        let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-        let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-        let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-        Some(Color::rgb(r, g, b))
-    } else {
-        None
+fn parse_color(color: &str) -> Option<Color> {
+    let color = color.trim().strip_prefix('#').unwrap_or(color.trim());
+    if color.len() != 6 || !color.is_ascii() {
+        return None;
     }
+    u32::from_str_radix(color, 16).ok().map(Color::hex)
+}
+
+fn tag_row(tag: &Tag, theme: &Theme) -> TableRow {
+    let color = tag.color.as_deref().and_then(parse_color);
+    let mut row = TableRow::new([
+        if color.is_some() {
+            "●".into()
+        } else {
+            "○".into()
+        },
+        tag.name.clone(),
+        tag.color.clone().unwrap_or_else(|| "Padrão".into()),
+    ]);
+    row.cell_colors = vec![Some(color.unwrap_or(theme.muted)), None, Some(theme.muted)];
+    row
 }
 
 pub fn render_with_state(ui: &mut Container<'_>, screen: &mut TagsScreen, api: &ApiClient) {
     screen.load_initial(api);
 
-    let table_rows: Vec<TableRow> = screen
+    let theme = ui.theme().clone();
+    let table_rows: Vec<TableRow> = screen.tags.iter().map(|tag| tag_row(tag, &theme)).collect();
+    let colored = screen
         .tags
         .iter()
-        .map(|tag| {
-            let color_indicator = tag.color.as_deref().and_then(parse_color).map_or_else(
-                || "○".to_string(),
-                |c| format!("\x1b[38;2;{};{};{}m●\x1b[0m", c.red(), c.green(), c.blue()),
-            );
-            let color_hex = tag.color.as_deref().unwrap_or("—");
-            TableRow::new([color_indicator, tag.name.clone(), color_hex.to_string()])
-        })
-        .collect();
+        .filter(|tag| tag.color.as_deref().and_then(parse_color).is_some())
+        .count();
+    let metrics = vec![
+        Metric::new("Tags", screen.tags.len().to_string(), Tone::Accent),
+        Metric::new("Com cor", colored.to_string(), Tone::Neutral),
+        Metric::new(
+            "Cor padrão",
+            (screen.tags.len() - colored).to_string(),
+            Tone::Neutral,
+        ),
+    ];
 
     let columns = vec![
         TableColumn::new("")
@@ -435,61 +448,50 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut TagsScreen, api: &
     let delete_target_name = screen.delete_target_name.clone();
 
     ui.column(Column::new().gap(1), move |col| {
-        // Action buttons row
-        col.row(Row::new().size(Size::Cells(1)).gap(1), move |r| {
-            r.button(
-                ButtonOptions::new("Nova Tag (n)").variant(ButtonVariant::Primary),
+        metric_strip(col, metrics);
+        col.row(Row::new().size(Size::Cells(1)).gap(1), move |row| {
+            row.button(
+                ButtonOptions::new("Nova tag (n)").variant(ButtonVariant::Primary),
                 "tags:new",
             );
-            r.button(
+            row.button(
                 ButtonOptions::new("Editar (e)").variant(ButtonVariant::Ghost),
                 "tags:edit",
             );
-            r.button(
-                ButtonOptions::new("Excluir (d)").variant(ButtonVariant::Danger),
+            row.button(
+                ButtonOptions::new("Excluir (d)").variant(ButtonVariant::Ghost),
                 "tags:delete",
             );
         });
-
-        // Error display
-        if let Some(err) = error_msg {
-            col.panel(Panel::new().title("Erro"), move |p| {
-                p.styled_text(&err, TextStyle::new().fg(COLOR_NEGATIVE));
-            });
-        }
-
-        // Tags table
-        col.panel(Panel::new().title(panel_title), move |p| {
-            if loading {
-                p.text("Carregando...");
-            } else if has_rows {
-                p.table(
-                    TableOptions {
-                        follow_selection: true,
-                        columns: columns.clone(),
-                        rows: table_rows.clone(),
-                        header: true,
-                        zebra: true,
-                        selected,
-                        ..Default::default()
-                    },
-                    "",
-                );
-            } else {
-                p.styled_text(
-                    "Nenhuma tag encontrada. Pressione 'n' para criar.",
-                    TextStyle::new().fg(COLOR_NEUTRAL),
-                );
-            }
-        });
-
-        // Key hints
-        col.row(Row::new().size(Size::Cells(1)), move |r| {
-            r.styled_text(
-                "n: Nova | e: Editar | d: Excluir | ↑↓: Navegar",
-                TextStyle::new().fg(COLOR_NEUTRAL),
-            );
-        });
+        col.panel(
+            Panel::new()
+                .title(panel_title)
+                .border(BorderStyle::Rounded)
+                .footer("j/k Selecionar  n Nova  e Editar  d Excluir"),
+            move |panel| {
+                if loading {
+                    panel.label("Carregando suas tags…");
+                } else if let Some(error) = error_msg {
+                    panel.styled_text(&error, TextStyle::new().fg(theme.danger));
+                } else if has_rows {
+                    panel.table(
+                        TableOptions {
+                            columns,
+                            rows: table_rows,
+                            selected,
+                            follow_selection: true,
+                            scrollbar: true,
+                            header_color: Some(theme.muted),
+                            ..Default::default()
+                        },
+                        "tags:table",
+                    );
+                } else {
+                    panel.text("Marque lançamentos para encontrá-los depois.");
+                    panel.label("Pressione n para criar sua primeira tag.");
+                }
+            },
+        );
     });
 
     // Draw modals
@@ -564,5 +566,31 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut TagsScreen, api: &
             ui.modal(options);
         }
         TagModalState::None => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tag_colors_are_native_cells_without_escape_sequences() {
+        let tag = Tag {
+            id: "t".into(),
+            name: "Viagem".into(),
+            color: Some("#34d399".into()),
+        };
+        let row = tag_row(&tag, &crate::presentation::theme());
+        assert!(row.cells.iter().all(|cell| !cell.contains('\u{1b}')));
+        assert_eq!(row.cells[0], "●");
+        assert_eq!(row.cell_colors[0], Some(Color::hex(0x0034_d399)));
+    }
+
+    #[test]
+    fn non_ascii_or_invalid_tag_colors_fall_back_without_panicking() {
+        assert_eq!(parse_color("aéaaa"), None);
+        assert_eq!(parse_color("#zzzzzz"), None);
+        assert_eq!(parse_color("#fff"), None);
+        assert_eq!(parse_color("#112233"), Some(Color::hex(0x0011_2233)));
     }
 }
