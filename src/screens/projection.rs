@@ -90,7 +90,7 @@ pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
         }
         Err(error) => {
             // Handle API errors gracefully
-            let error_msg = format!("Erro ao carregar dados: {}", error);
+            let error_msg = format!("Erro ao carregar dados: {error}");
             let error_color = Color::rgb(200, 0, 0);
             ui.column(Column::new().gap(1), move |col| {
                 col.panel(Panel::new().title("Erro"), move |p| {
@@ -108,7 +108,7 @@ fn format_money(value: Option<&str>, currency_code: &str) -> String {
             if let Ok(amount) = v.parse::<f64>() {
                 let sign = if amount < 0.0 { "-" } else { "" };
                 let abs_amount = amount.abs();
-                let amount_str = format!("{:.2}", abs_amount);
+                let amount_str = format!("{abs_amount:.2}");
                 let parts: Vec<&str> = amount_str.split('.').collect();
                 let whole = parts[0];
                 let decimal = parts[1];
@@ -118,16 +118,16 @@ fn format_money(value: Option<&str>, currency_code: &str) -> String {
                 let chars: Vec<char> = whole.chars().collect();
                 let len = chars.len();
                 for (i, c) in chars.iter().enumerate() {
-                    if i > 0 && (len - i) % 3 == 0 {
+                    if i > 0 && (len - i).is_multiple_of(3) {
                         formatted_whole.push('.');
                     }
                     formatted_whole.push(*c);
                 }
 
-                format!("{} {}.{},{}", currency_code, sign, formatted_whole, decimal)
+                format!("{currency_code} {sign}.{formatted_whole},{decimal}")
             } else {
                 // Not a valid number, return as-is with currency code
-                format!("{} {}", currency_code, v)
+                format!("{currency_code} {v}")
             }
         }
         None => String::from("N/A"),

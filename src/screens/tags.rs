@@ -56,6 +56,7 @@ pub struct TagsScreen {
 }
 
 impl TagsScreen {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             tags: Vec::new(),
@@ -130,8 +131,8 @@ impl TagsScreen {
                     return;
                 }
                 if k.name == "e" {
-                    if let Some(idx) = self.selected_index {
-                        if idx < self.tags.len() {
+                    if let Some(idx) = self.selected_index
+                        && idx < self.tags.len() {
                             let name = self.tags[idx].name.clone();
                             let color = self.tags[idx].color.clone().unwrap_or_default();
                             self.form_name = name;
@@ -140,18 +141,16 @@ impl TagsScreen {
                             self.form_error = None;
                             self.modal_state = TagModalState::Edit;
                         }
-                    }
                     return;
                 }
                 if k.name == "d" || k.name == "delete" {
-                    if let Some(idx) = self.selected_index {
-                        if idx < self.tags.len() {
+                    if let Some(idx) = self.selected_index
+                        && idx < self.tags.len() {
                             let tag = &self.tags[idx];
                             self.delete_target_id = Some(tag.id.clone());
                             self.delete_target_name = Some(tag.name.clone());
                             self.modal_state = TagModalState::DeleteConfirm;
                         }
-                    }
                     return;
                 }
             }
@@ -161,9 +160,9 @@ impl TagsScreen {
         if app.pressed("tags:new") {
             self.open_create_modal();
         }
-        if app.pressed("tags:edit") {
-            if let Some(idx) = self.selected_index {
-                if idx < self.tags.len() {
+        if app.pressed("tags:edit")
+            && let Some(idx) = self.selected_index
+                && idx < self.tags.len() {
                     let name = self.tags[idx].name.clone();
                     let color = self.tags[idx].color.clone().unwrap_or_default();
                     self.form_name = name;
@@ -172,18 +171,14 @@ impl TagsScreen {
                     self.form_error = None;
                     self.modal_state = TagModalState::Edit;
                 }
-            }
-        }
-        if app.pressed("tags:delete") {
-            if let Some(idx) = self.selected_index {
-                if idx < self.tags.len() {
+        if app.pressed("tags:delete")
+            && let Some(idx) = self.selected_index
+                && idx < self.tags.len() {
                     let tag = &self.tags[idx];
                     self.delete_target_id = Some(tag.id.clone());
                     self.delete_target_name = Some(tag.name.clone());
                     self.modal_state = TagModalState::DeleteConfirm;
                 }
-            }
-        }
     }
 
     fn open_create_modal(&mut self) {
@@ -229,14 +224,13 @@ impl TagsScreen {
                             }
                             return;
                         }
-                        if let Some(ch) = &k.char {
-                            if !k.ctrl && !k.alt {
+                        if let Some(ch) = &k.char
+                            && !k.ctrl && !k.alt {
                                 match self.form_field {
                                     TagFormField::Name => { self.form_name.push_str(ch); }
                                     TagFormField::Color => { self.form_color.push_str(ch); }
                                 }
                             }
-                        }
                     }
                 }
             }
@@ -336,6 +330,12 @@ impl TagsScreen {
     }
 }
 
+impl Default for TagsScreen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn parse_color(color_str: &str) -> Option<Color> {
     let s = color_str.trim().trim_start_matches('#');
     if s.len() == 6 {
@@ -358,9 +358,7 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut TagsScreen, api: &
             let color_indicator = tag
                 .color
                 .as_deref()
-                .and_then(parse_color)
-                .map(|c| format!("\x1b[38;2;{};{};{}m●\x1b[0m", c.red(), c.green(), c.blue()))
-                .unwrap_or_else(|| "○".to_string());
+                .and_then(parse_color).map_or_else(|| "○".to_string(), |c| format!("\x1b[38;2;{};{};{}m●\x1b[0m", c.red(), c.green(), c.blue()));
             let color_hex = tag.color.as_deref().unwrap_or("—");
             TableRow::new([color_indicator, tag.name.clone(), color_hex.to_string()])
         })

@@ -9,9 +9,9 @@ use crate::models::{Investment, InvestmentSummary};
 /// Finance palette: greens for positive balances, reds for negative, neutral for labels.
 const COLOR_POSITIVE: Color = Color::rgb(34, 197, 94);   // green-500
 const COLOR_NEGATIVE: Color = Color::rgb(239, 68, 68);   // red-500
-const COLOR_NEUTRAL: Color = Color::rgb(148, 163, 184);  // slate-400
 const COLOR_ACCENT: Color = Color::rgb(14, 165, 233);    // sky-500
 
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn format_money(amount: Option<&str>, currency: Option<&str>) -> String {
     let raw = match amount {
         Some(s) if !s.is_empty() => s,
@@ -45,7 +45,7 @@ fn format_integer_with_dots(n: u64) -> String {
     }
     let mut result = String::with_capacity(len + len / 3);
     for (i, ch) in s.chars().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
+        if i > 0 && (len - i).is_multiple_of(3) {
             result.push('.');
         }
         result.push(ch);
@@ -69,7 +69,6 @@ struct InvestmentRowData {
     investment_type: String,
     category: String,
     balance_fmt: String,
-    balance_color: Option<Color>,
     provider: String,
 }
 
@@ -79,13 +78,11 @@ fn build_row_data(items: &[Investment]) -> Vec<InvestmentRowData> {
         .map(|inv| {
             let currency = inv.currency_code.as_deref();
             let balance_fmt = format_money(inv.balance.as_deref(), currency);
-            let balance_color = money_color(inv.balance.as_deref());
             InvestmentRowData {
                 name: inv.name.clone(),
                 investment_type: inv.investment_type.clone().unwrap_or_else(|| "—".to_string()),
                 category: inv.category.clone().unwrap_or_else(|| "—".to_string()),
                 balance_fmt,
-                balance_color,
                 provider: inv.provider_name.clone().unwrap_or_else(|| "—".to_string()),
             }
         })
@@ -110,9 +107,10 @@ fn render_error(ui: &mut Container<'_>, err: &ApiError) {
     });
 }
 
+#[allow(clippy::cast_possible_truncation)]
 pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
     match api.investments() {
-        Ok((investments, summary)) => render_net_worth_data(ui, &investments, summary),
+        Ok((investments, summary)) => render_net_worth_data(ui, &investments, summary.as_ref()),
         Err(e) => render_error(ui, &e),
     }
 }
@@ -120,7 +118,7 @@ pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
 fn render_net_worth_data(
     ui: &mut Container<'_>,
     investments: &[Investment],
-    summary: Option<InvestmentSummary>,
+    summary: Option<&InvestmentSummary>,
 ) {
     // Pre-compute summary values before closures
     let currency = summary
@@ -130,9 +128,7 @@ fn render_net_worth_data(
 
     let total_value_fmt = summary
         .as_ref()
-        .and_then(|s| s.total_value.as_deref())
-        .map(|v| format_money(Some(v), Some(&currency)))
-        .unwrap_or_else(|| "—".to_string());
+        .and_then(|s| s.total_value.as_deref()).map_or_else(|| "—".to_string(), |v| format_money(Some(v), Some(&currency)));
 
     let total_value_color = summary
         .as_ref()
@@ -143,9 +139,9 @@ fn render_net_worth_data(
     let investment_count = summary
         .as_ref()
         .and_then(|s| s.count)
-        .unwrap_or(investments.len() as u32);
+        .unwrap_or_else(|| investments.len().try_into().unwrap_or(u32::MAX));
 
-    let count_label = format!("{}", investment_count);
+    let count_label = format!("{investment_count}");
 
     // Pre-compute summary key-value rows
     let summary_rows = vec![
@@ -175,7 +171,7 @@ fn render_net_worth_data(
     let columns = table_columns();
 
     // Pre-compute footer text
-    let footer_total_label = format!("Patrimônio Líquido: {}", total_value_fmt);
+    let footer_total_label = format!("Patrimônio Líquido: {total_value_fmt}");
     let footer_color = total_value_color;
 
     ui.column(Column::new().gap(1), move |col| {

@@ -12,6 +12,7 @@ const COLOR_NEGATIVE: Color = Color::rgb(239, 68, 68);   // red-500
 const COLOR_NEUTRAL: Color = Color::rgb(148, 163, 184);  // slate-400
 const COLOR_ACCENT: Color = Color::rgb(14, 165, 233);    // sky-500
 
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn format_money(amount: Option<&str>, currency: Option<&str>) -> String {
     let raw = match amount {
         Some(s) if !s.is_empty() => s,
@@ -45,7 +46,7 @@ fn format_integer_with_dots(n: u64) -> String {
     }
     let mut result = String::with_capacity(len + len / 3);
     for (i, ch) in s.chars().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
+        if i > 0 && (len - i).is_multiple_of(3) {
             result.push('.');
         }
         result.push(ch);
@@ -92,8 +93,7 @@ fn draw_overview_data(ui: &mut Container<'_>, data: &Overview) {
     let credit_debt_fmt = format_money(data.credit_card_debt.as_deref(), Some(&currency));
     let credit_debt_positive = data.credit_card_debt.as_deref()
         .and_then(|s| s.parse::<f64>().ok())
-        .map(|v| v > 0.0)
-        .unwrap_or(false);
+        .is_some_and(|v| v > 0.0);
     let credit_debt_color = if credit_debt_positive { COLOR_NEGATIVE } else { COLOR_POSITIVE };
 
     let open_bills_fmt = format_money(data.open_bills_total.as_deref(), Some(&currency));
@@ -232,6 +232,7 @@ fn draw_overview_data(ui: &mut Container<'_>, data: &Overview) {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn draw_overview_mock(ui: &mut Container<'_>, data: &Overview) {
     draw_overview_data(ui, data);
 }

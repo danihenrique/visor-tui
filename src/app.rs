@@ -220,12 +220,11 @@ impl VisorApp {
     fn handle_input(&mut self, events: &[InputEvent]) {
         if self.show_help {
             for event in events {
-                if let InputEvent::Key(k) = event {
-                    if k.key == "escape" || k.name == "q" || k.name == "?" {
+                if let InputEvent::Key(k) = event
+                    && (k.key == "escape" || k.name == "q" || k.name == "?") {
                         self.show_help = false;
                         return;
                     }
-                }
             }
             return;
         }
@@ -237,17 +236,15 @@ impl VisorApp {
                         self.app.quit();
                         return;
                     }
-                    if let Some(ch) = &k.char {
-                        if let Ok(idx) = ch.parse::<usize>() {
-                            if idx >= 1 && idx <= self.spaces.len() {
+                    if let Some(ch) = &k.char
+                        && let Ok(idx) = ch.parse::<usize>()
+                            && idx >= 1 && idx <= self.spaces.len() {
                                 let space_id = &self.spaces[idx - 1].id;
                                 let _ = config::set_default_space_id(space_id);
                                 self.space_selector_visible = false;
                                 self.api = ApiClient::new().ok().map(Rc::new);
                                 return;
                             }
-                        }
-                    }
                 }
             }
             for i in 0..self.spaces.len() {
@@ -300,11 +297,10 @@ impl VisorApp {
                         self.login_token_input.clear();
                         return;
                     }
-                    if let Some(ch) = &k.char {
-                        if !k.ctrl && !k.alt {
+                    if let Some(ch) = &k.char
+                        && !k.ctrl && !k.alt {
                             self.login_token_input.push_str(ch);
                         }
-                    }
                 }
             }
             return;
@@ -464,11 +460,10 @@ impl VisorApp {
         if self.screen == Screen::Doctor {
             let mut rerun = false;
             for event in events {
-                if let InputEvent::Key(k) = event {
-                    if k.name == "r" {
+                if let InputEvent::Key(k) = event
+                    && k.name == "r" {
                         rerun = true;
                     }
-                }
             }
             if self.app.pressed("doctor_rerun") {
                 rerun = true;
@@ -519,8 +514,7 @@ impl VisorApp {
     fn check_space_after_login(&mut self) {
         if let Some(ref client) = self.api
             && config::active_space_id().is_none()
-        {
-            if let Ok(list) = client.spaces() {
+            && let Ok(list) = client.spaces() {
                 if list.len() == 1 {
                     let _ = config::set_default_space_id(&list[0].id);
                     self.api = ApiClient::new().ok().map(Rc::new);
@@ -529,7 +523,6 @@ impl VisorApp {
                     self.space_selector_visible = true;
                 }
             }
-        }
     }
 
     fn draw(&mut self) -> std::io::Result<()> {
@@ -724,8 +717,7 @@ mod tests {
         for scr in &screens {
             assert!(
                 keys.insert(scr.shortcut_key()),
-                "Duplicate shortcut key for {:?}",
-                scr
+                "Duplicate shortcut key for {scr:?}"
             );
         }
     }

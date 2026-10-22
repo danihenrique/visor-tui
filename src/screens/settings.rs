@@ -56,9 +56,7 @@ pub fn render(ui: &mut Container<'_>, api: &ApiClient, modal: SettingsModal) {
     // Find active space name
     let active_space_name = active_space_id
         .as_deref()
-        .and_then(|sid| spaces.iter().find(|s| s.id == sid))
-        .map(|s| format!("* {}", s.name))
-        .unwrap_or_else(|| "Nenhum espaço ativo".to_string());
+        .and_then(|sid| spaces.iter().find(|s| s.id == sid)).map_or_else(|| "Nenhum espaço ativo".to_string(), |s| format!("* {}", s.name));
 
     let has_active_space = active_space_id.is_some();
 

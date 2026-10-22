@@ -54,6 +54,7 @@ impl CategoryFormField {
 
 const CATEGORY_TYPES: &[&str] = &["income", "expense", "transfer"];
 
+#[allow(clippy::struct_excessive_bools)]
 pub struct CategoriesScreen {
     pub categories: Vec<Category>,
     pub loading: bool,
@@ -74,6 +75,7 @@ pub struct CategoriesScreen {
 }
 
 impl CategoriesScreen {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             categories: Vec::new(),
@@ -185,8 +187,8 @@ impl CategoriesScreen {
     }
 
     fn open_edit_modal(&mut self) {
-        if let Some(idx) = self.selected_index {
-            if idx < self.categories.len() {
+        if let Some(idx) = self.selected_index
+            && idx < self.categories.len() {
                 let cat = &self.categories[idx];
                 self.form_name = cat.name.clone();
                 self.form_type_index = CATEGORY_TYPES
@@ -200,18 +202,16 @@ impl CategoriesScreen {
                 self.form_error = None;
                 self.modal_state = CategoryModalState::Edit;
             }
-        }
     }
 
     fn open_delete_confirm(&mut self) {
-        if let Some(idx) = self.selected_index {
-            if idx < self.categories.len() {
+        if let Some(idx) = self.selected_index
+            && idx < self.categories.len() {
                 let cat = &self.categories[idx];
                 self.delete_target_id = Some(cat.id.clone());
                 self.delete_target_name = Some(cat.name.clone());
                 self.modal_state = CategoryModalState::DeleteConfirm;
             }
-        }
     }
 
     fn handle_modal_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
@@ -251,12 +251,11 @@ impl CategoriesScreen {
                             }
                         }
                         // Hidden field: space or y/n to toggle
-                        if self.form_field == CategoryFormField::Hidden {
-                            if k.name == "space" || k.name == "y" || k.name == "n" {
+                        if self.form_field == CategoryFormField::Hidden
+                            && (k.name == "space" || k.name == "y" || k.name == "n") {
                                 self.form_hidden = !self.form_hidden;
                                 return;
                             }
-                        }
                         // Text fields: backspace, ctrl+u, char input
                         if k.key == "backspace" {
                             match self.form_field {
@@ -276,8 +275,8 @@ impl CategoriesScreen {
                             }
                             return;
                         }
-                        if let Some(ch) = &k.char {
-                            if !k.ctrl && !k.alt {
+                        if let Some(ch) = &k.char
+                            && !k.ctrl && !k.alt {
                                 match self.form_field {
                                     CategoryFormField::Name => { self.form_name.push_str(ch); }
                                     CategoryFormField::Parent => { self.form_parent_id.push_str(ch); }
@@ -285,7 +284,6 @@ impl CategoriesScreen {
                                     _ => {}
                                 }
                             }
-                        }
                     }
                 }
             }
@@ -349,12 +347,11 @@ impl CategoriesScreen {
         };
 
         // Validate parent_id references an existing category
-        if let Some(pid) = parent_id {
-            if !self.categories.iter().any(|c| c.id == pid) {
+        if let Some(pid) = parent_id
+            && !self.categories.iter().any(|c| c.id == pid) {
                 self.form_error = Some(format!("Categoria pai nao encontrada: {pid}"));
                 return;
             }
-        }
 
         let kind = if self.form_kind.trim().is_empty() {
             None
@@ -395,7 +392,13 @@ impl CategoriesScreen {
     }
 }
 
-/// Build a flat display list with indentation based on parent_id hierarchy.
+impl Default for CategoriesScreen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Build a flat display list with indentation based on `parent_id` hierarchy.
 fn build_tree_rows(categories: &[Category]) -> Vec<TableRow> {
     // Build adjacency: parent_id -> children indices
     let mut children_map: std::collections::HashMap<Option<&str>, Vec<usize>> =
@@ -551,22 +554,18 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut CategoriesScreen, 
 
             let parent_display = if form_field == CategoryFormField::Parent {
                 format!("{form_parent_id}_")
+            } else if form_parent_id.is_empty() {
+                "(nenhuma)".to_string()
             } else {
-                if form_parent_id.is_empty() {
-                    "(nenhuma)".to_string()
-                } else {
-                    form_parent_id.clone()
-                }
+                form_parent_id.clone()
             };
 
             let kind_display = if form_field == CategoryFormField::Kind {
                 format!("{form_kind}_")
+            } else if form_kind.is_empty() {
+                "(nenhum)".to_string()
             } else {
-                if form_kind.is_empty() {
-                    "(nenhum)".to_string()
-                } else {
-                    form_kind.clone()
-                }
+                form_kind.clone()
             };
 
             let hidden_display = if form_field == CategoryFormField::Hidden {

@@ -49,6 +49,7 @@ pub struct DoctorState {
 }
 
 impl DoctorState {
+    #[must_use]
     pub fn new() -> Self {
         Self { checks: Vec::new() }
     }
@@ -79,12 +80,18 @@ impl DoctorState {
     }
 }
 
+impl Default for DoctorState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn check_version() -> CheckResult {
     let version = env!("CARGO_PKG_VERSION");
     CheckResult {
         name: "Version".to_string(),
         outcome: Outcome::Ok,
-        message: format!("{version}"),
+        message: version.to_string(),
     }
 }
 

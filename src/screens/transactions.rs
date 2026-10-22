@@ -12,7 +12,6 @@ use crate::models::{Account, Category, Tag, Transaction};
 
 const COLOR_CREDIT: Color = Color::rgb(0x22, 0xc5, 0x5e);
 const COLOR_DEBIT: Color = Color::rgb(0xef, 0x44, 0x44);
-const COLOR_MUTED: Color = Color::rgb(0x94, 0xa3, 0xb8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxTypeFilter {
@@ -57,7 +56,7 @@ pub enum ModalState {
     ExportSuccess,
 }
 
-/// Which form field is focused inside the NewTransaction modal.
+/// Which form field is focused inside the `NewTransaction` modal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormField {
     Amount,
@@ -98,6 +97,10 @@ impl FormField {
     }
 }
 
+// This struct holds all UI state for the transactions screen including filter,
+// form, and export state. The bool count reflects independent UI flags that
+// cannot be meaningfully grouped without adding indirection.
+#[allow(clippy::struct_excessive_bools)]
 pub struct TransactionsScreen {
     pub transactions: Vec<Transaction>,
     pub next_cursor: Option<String>,
@@ -152,6 +155,7 @@ pub struct TransactionsScreen {
 }
 
 impl TransactionsScreen {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             transactions: Vec::new(),
@@ -379,23 +383,21 @@ impl TransactionsScreen {
             }
         }
 
-        if app.pressed("tx:delete") {
-            if let Some(idx) = self.selected_index {
-                if idx < self.transactions.len() {
+        if app.pressed("tx:delete")
+            && let Some(idx) = self.selected_index
+                && idx < self.transactions.len() {
                     self.delete_target_id = Some(self.transactions[idx].id.clone());
                     self.modal_state = ModalState::DeleteConfirm;
                 }
-            }
-        }
 
         // Edit transaction trigger: 'e' key when a transaction is selected
         // Only trigger if not already exporting (to avoid conflict with export 'e')
         let edit_triggered = events.iter().any(|ev| {
             matches!(ev, InputEvent::Key(k) if k.key == "e" && !k.ctrl && !k.alt && !k.shift)
         });
-        if edit_triggered && !self.exporting {
-            if let Some(idx) = self.selected_index {
-                if idx < self.transactions.len() {
+        if edit_triggered && !self.exporting
+            && let Some(idx) = self.selected_index
+                && idx < self.transactions.len() {
                     let tx = &self.transactions[idx];
                     self.edit_tx_id = tx.id.clone();
                     self.edit_tx_amount = tx.amount.clone();
@@ -419,8 +421,6 @@ impl TransactionsScreen {
                     self.edit_tx_source = tx.source.clone();
                     self.modal_state = ModalState::EditTransaction;
                 }
-            }
-        }
 
         // CSV export trigger: button or 'e' key
         let export_triggered = app.pressed("tx:export")
@@ -474,11 +474,9 @@ impl TransactionsScreen {
                 Ok(csv_data) => {
                     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
                     let filename = format!("transactions_{today}.csv");
-                    let path = dirs::home_dir()
-                        .map(|h| h.join("Downloads").join(&filename))
-                        .unwrap_or_else(|| std::path::PathBuf::from(&filename));
+                    let path = dirs::home_dir().map_or_else(|| std::path::PathBuf::from(&filename), |h| h.join("Downloads").join(&filename));
                     match std::fs::write(&path, csv_data.as_bytes()) {
-                        Ok(_) => {
+                        Ok(()) => {
                             self.export_success_path = Some(path.display().to_string());
                             self.modal_state = ModalState::ExportSuccess;
                         }
@@ -545,8 +543,8 @@ impl TransactionsScreen {
                             return;
                         }
                         // Text input for the currently focused text field
-                        if let Some(ch) = &k.char {
-                            if !k.ctrl && !k.alt {
+                        if let Some(ch) = &k.char
+                            && !k.ctrl && !k.alt {
                                 match self.new_tx_field {
                                     FormField::Amount => self.new_tx_amount.push_str(ch),
                                     FormField::Description => self.new_tx_description.push_str(ch),
@@ -557,7 +555,6 @@ impl TransactionsScreen {
                                 }
                                 return;
                             }
-                        }
                         if k.key == "backspace" {
                             match self.new_tx_field {
                                 FormField::Amount => { self.new_tx_amount.pop(); }
@@ -610,9 +607,8 @@ impl TransactionsScreen {
                         None
                     };
                     let tx_type_str = match self.new_tx_type {
-                        TxTypeFilter::Credit => "CREDIT",
+                        TxTypeFilter::Credit | TxTypeFilter::All => "CREDIT",
                         TxTypeFilter::Debit => "DEBIT",
-                        TxTypeFilter::All => "CREDIT",
                     };
                     let description = if self.new_tx_description.is_empty() {
                         ""
@@ -671,7 +667,7 @@ impl TransactionsScreen {
                 // Determine if fields are read-only based on source
                 let is_immutable = matches!(
                     self.edit_tx_source.as_deref(),
-                    Some("connected") | Some("apple_pay")
+                    Some("connected" | "apple_pay")
                 );
 
                 for event in events {
@@ -713,13 +709,11 @@ impl TransactionsScreen {
                             return;
                         }
                         // Text input for the currently focused text field (skip immutable fields)
-                        if let Some(ch) = &k.char {
-                            if !k.ctrl && !k.alt {
+                        if let Some(ch) = &k.char
+                            && !k.ctrl && !k.alt {
                                 let can_edit = match self.edit_tx_field {
                                     FormField::Amount | FormField::Description | FormField::Date => !is_immutable,
-                                    FormField::Type => false, // toggled via Enter
-                                    FormField::Account => false, // not editable in edit mode
-                                    FormField::Category => false, // cycled via Enter
+                                    FormField::Type | FormField::Account | FormField::Category => false,
                                     _ => true,
                                 };
                                 if can_edit {
@@ -734,7 +728,6 @@ impl TransactionsScreen {
                                 }
                                 return;
                             }
-                        }
                         if k.key == "backspace" {
                             let can_edit = match self.edit_tx_field {
                                 FormField::Amount | FormField::Description | FormField::Date => !is_immutable,
@@ -796,9 +789,8 @@ impl TransactionsScreen {
                         None
                     };
                     let tx_type_str = match self.edit_tx_type {
-                        TxTypeFilter::Credit => "credit",
+                        TxTypeFilter::Credit | TxTypeFilter::All => "credit",
                         TxTypeFilter::Debit => "debit",
-                        TxTypeFilter::All => "credit",
                     };
                     let description = if self.edit_tx_description.is_empty() {
                         None
@@ -850,8 +842,8 @@ impl TransactionsScreen {
                     self.modal_state = ModalState::None;
                     self.delete_target_id = None;
                 }
-                if app.pressed("tx:delete_confirm") {
-                    if let Some(ref id) = self.delete_target_id.clone() {
+                if app.pressed("tx:delete_confirm")
+                    && let Some(ref id) = self.delete_target_id.clone() {
                         match api.delete_transaction(id) {
                             Ok(()) => {
                                 self.transactions.retain(|tx| &tx.id != id);
@@ -866,7 +858,6 @@ impl TransactionsScreen {
                             }
                         }
                     }
-                }
             }
             ModalState::ExportSuccess => {
                 if app.pressed("tx:export_ok") || app.pressed("tx:escape")
@@ -1204,9 +1195,8 @@ impl TransactionsScreen {
                     if f == new_tx_field { " > " } else { "   " }
                 };
                 let type_label = match new_tx_type {
-                    TxTypeFilter::Credit => "CREDITO",
+                    TxTypeFilter::Credit | TxTypeFilter::All => "CREDITO",
                     TxTypeFilter::Debit => "DEBITO",
-                    TxTypeFilter::All => "CREDITO",
                 };
                 let account_name = if !accounts.is_empty() && new_tx_account_index < accounts.len() {
                     &accounts[new_tx_account_index].name
@@ -1281,16 +1271,15 @@ impl TransactionsScreen {
             ModalState::EditTransaction => {
                 let is_immutable = matches!(
                     edit_tx_source.as_deref(),
-                    Some("connected") | Some("apple_pay")
+                    Some("connected" | "apple_pay")
                 );
                 let field_marker = |f: FormField| -> &'static str {
                     if f == edit_tx_field { " > " } else { "   " }
                 };
                 let readonly_tag = if is_immutable { " [somente leitura]" } else { "" };
                 let type_label = match edit_tx_type {
-                    TxTypeFilter::Credit => "CREDITO",
+                    TxTypeFilter::Credit | TxTypeFilter::All => "CREDITO",
                     TxTypeFilter::Debit => "DEBITO",
-                    TxTypeFilter::All => "CREDITO",
                 };
                 let category_name = if !categories.is_empty() && edit_tx_category_index < categories.len() {
                     &categories[edit_tx_category_index].name
@@ -1343,8 +1332,15 @@ impl TransactionsScreen {
     }
 }
 
+impl Default for TransactionsScreen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn format_amount(amount: &str, tx_type: &str) -> String {
-    let raw = if !amount.is_empty() { amount } else { return "—".to_string(); };
+    let raw = if amount.is_empty() { return "—".to_string(); } else { amount };
     match raw.parse::<f64>() {
         Ok(v) => {
             let abs = v.abs();
@@ -1383,9 +1379,7 @@ fn resolve_category_name(categories: &[Category], id: Option<&str>) -> String {
     match id {
         Some(cid) => categories
             .iter()
-            .find(|c| c.id == cid)
-            .map(|c| c.name.clone())
-            .unwrap_or_else(|| "-".to_string()),
+            .find(|c| c.id == cid).map_or_else(|| "-".to_string(), |c| c.name.clone()),
         None => "-".to_string(),
     }
 }
@@ -1393,9 +1387,7 @@ fn resolve_category_name(categories: &[Category], id: Option<&str>) -> String {
 fn resolve_account_name(accounts: &[Account], id: &str) -> String {
     accounts
         .iter()
-        .find(|a| a.id == id)
-        .map(|a| a.name.clone())
-        .unwrap_or_else(|| "-".to_string())
+        .find(|a| a.id == id).map_or_else(|| "-".to_string(), |a| a.name.clone())
 }
 
 fn format_api_error(err: &ApiError) -> String {
@@ -1403,7 +1395,7 @@ fn format_api_error(err: &ApiError) -> String {
 }
 
 /// Render entry point that uses a persistent screen instance stored in app.rs.
-/// Input handling must be called separately via handle_input before rendering.
+/// Input handling must be called separately via `handle_input` before rendering.
 pub fn render_with_state(
     ui: &mut Container<'_>,
     screen: &mut TransactionsScreen,

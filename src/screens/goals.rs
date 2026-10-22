@@ -10,7 +10,6 @@ use crate::api::ApiClient;
 use crate::models::Goal;
 
 const COLOR_NEGATIVE: Color = Color::rgb(239, 68, 68);
-const COLOR_POSITIVE: Color = Color::rgb(34, 197, 94);
 
 const KIND_OPTIONS: &[&str] = &["savings", "debt", "investment", "custom"];
 const STATUS_OPTIONS: &[&str] = &["active", "archived", "completed"];
@@ -53,19 +52,17 @@ impl GoalFormField {
     fn prev(self, is_create: bool) -> Self {
         if is_create {
             match self {
-                Self::Name => Self::TargetDate,
+                Self::Name | Self::Status => Self::TargetDate,
                 Self::TargetAmount => Self::Name,
                 Self::Kind => Self::TargetAmount,
                 Self::TargetDate => Self::Kind,
-                Self::Status => Self::Name,
             }
         } else {
             match self {
-                Self::Name => Self::TargetDate,
+                Self::Name | Self::Kind => Self::TargetDate,
                 Self::TargetAmount => Self::Name,
                 Self::Status => Self::TargetAmount,
                 Self::TargetDate => Self::Status,
-                Self::Kind => Self::Name,
             }
         }
     }
@@ -91,6 +88,7 @@ pub struct GoalsScreen {
 }
 
 impl GoalsScreen {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             goals: Vec::new(),
@@ -156,44 +154,38 @@ impl GoalsScreen {
                 }
                 if k.name == "n" { self.open_create_modal(); return; }
                 if k.name == "e" {
-                    if let Some(idx) = self.selected_index {
-                        if idx < self.goals.len() { self.populate_edit_form(idx); }
-                    }
+                    if let Some(idx) = self.selected_index
+                        && idx < self.goals.len() { self.populate_edit_form(idx); }
                     return;
                 }
                 if k.name == "d" || k.name == "delete" {
-                    if let Some(idx) = self.selected_index {
-                        if idx < self.goals.len() {
+                    if let Some(idx) = self.selected_index
+                        && idx < self.goals.len() {
                             let goal = &self.goals[idx];
                             self.delete_target_id = Some(goal.id.clone());
                             self.delete_target_name = Some(goal.name.clone());
                             let pct = goal.progress_percent.unwrap_or(0.0);
-                            self.delete_target_progress = Some(format!("{:.1}%", pct));
+                            self.delete_target_progress = Some(format!("{pct:.1}%"));
                             self.modal_state = GoalModalState::DeleteConfirm;
                         }
-                    }
                     return;
                 }
             }
         }
         if app.pressed("goals:new") { self.open_create_modal(); }
-        if app.pressed("goals:edit") {
-            if let Some(idx) = self.selected_index {
-                if idx < self.goals.len() { self.populate_edit_form(idx); }
-            }
-        }
-        if app.pressed("goals:delete") {
-            if let Some(idx) = self.selected_index {
-                if idx < self.goals.len() {
+        if app.pressed("goals:edit")
+            && let Some(idx) = self.selected_index
+                && idx < self.goals.len() { self.populate_edit_form(idx); }
+        if app.pressed("goals:delete")
+            && let Some(idx) = self.selected_index
+                && idx < self.goals.len() {
                     let goal = &self.goals[idx];
                     self.delete_target_id = Some(goal.id.clone());
                     self.delete_target_name = Some(goal.name.clone());
                     let pct = goal.progress_percent.unwrap_or(0.0);
-                    self.delete_target_progress = Some(format!("{:.1}%", pct));
+                    self.delete_target_progress = Some(format!("{pct:.1}%"));
                     self.modal_state = GoalModalState::DeleteConfirm;
                 }
-            }
-        }
     }
 
     fn populate_edit_form(&mut self, idx: usize) {
@@ -265,8 +257,8 @@ impl GoalsScreen {
                             }
                             return;
                         }
-                        if let Some(ch) = &k.char {
-                            if !k.ctrl && !k.alt {
+                        if let Some(ch) = &k.char
+                            && !k.ctrl && !k.alt {
                                 match self.form_field {
                                     GoalFormField::Name => { self.form_name.push_str(ch); }
                                     GoalFormField::TargetAmount => { self.form_target_amount.push_str(ch); }
@@ -274,7 +266,6 @@ impl GoalsScreen {
                                     _ => {}
                                 }
                             }
-                        }
                     }
                 }
                 if app.pressed("goal_form_cancel") { self.modal_state = GoalModalState::None; }
@@ -372,14 +363,18 @@ impl GoalsScreen {
     }
 }
 
+impl Default for GoalsScreen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn format_brl(amount_str: &str) -> String {
     let amount_str = amount_str.trim();
     let clean_str = amount_str
-        .replace('.', "")
-        .replace(',', "")
-        .replace(' ', "");
+        .replace(['.', ',', ' '], "");
     if let Ok(amount) = clean_str.parse::<f64>() {
-        let formatted = format!("{:.2}", amount);
+        let formatted = format!("{amount:.2}");
         let parts: Vec<&str> = formatted.split('.').collect();
         if parts.len() == 2 {
             let integer_part = parts[0];
@@ -387,12 +382,12 @@ fn format_brl(amount_str: &str) -> String {
             let mut result = String::new();
             let chars: Vec<char> = integer_part.chars().collect();
             for (i, c) in chars.iter().enumerate() {
-                if i > 0 && (chars.len() - i) % 3 == 0 {
+                if i > 0 && (chars.len() - i).is_multiple_of(3) {
                     result.push('.');
                 }
                 result.push(*c);
             }
-            format!("{},{}", result, decimal_part)
+            format!("{result},{decimal_part}")
         } else {
             format!("{},00", parts[0])
         }
@@ -448,21 +443,17 @@ pub fn render_with_state(
             let status_text = status_badge(goal.status.as_deref());
             let target_display = goal
                 .target_amount
-                .as_ref()
-                .map(|s| format!("R$ {}", format_brl(s)))
-                .unwrap_or_else(|| "N\u{e3}o definido".to_string());
+                .as_ref().map_or_else(|| "N\u{e3}o definido".to_string(), |s| format!("R$ {}", format_brl(s)));
             let current_display = goal
                 .current_amount
-                .as_ref()
-                .map(|s| format!("R$ {}", format_brl(s)))
-                .unwrap_or_else(|| "R$ 0,00".to_string());
+                .as_ref().map_or_else(|| "R$ 0,00".to_string(), |s| format!("R$ {}", format_brl(s)));
             let currency = goal
                 .currency_code
                 .clone()
                 .unwrap_or_else(|| "BRL".to_string());
             let progress_pct = goal.progress_percent.unwrap_or(0.0);
-            let progress_ratio = (progress_pct / 100.0).max(0.0).min(1.0);
-            let pct_text = format!("{:.1}%", progress_pct);
+            let progress_ratio = (progress_pct / 100.0).clamp(0.0, 1.0);
+            let pct_text = format!("{progress_pct:.1}%");
             let target_date = goal
                 .target_date
                 .clone()
@@ -471,7 +462,7 @@ pub fn render_with_state(
                 .created_at
                 .clone()
                 .unwrap_or_else(|| "Desconhecido".to_string());
-            let item_title = format!("{} - {}", name, status_text);
+            let item_title = format!("{name} - {status_text}");
             (
                 is_selected,
                 item_title,

@@ -85,7 +85,7 @@ impl Credential {
             Self::PersonalToken { .. } => "N/A".to_string(),
             Self::OAuth { expires_at, .. } => match expires_at {
                 Some(ts) => {
-                    let secs = (*ts).max(0) as u64;
+                    let secs: u64 = (*ts).max(0).try_into().unwrap_or(0);
                     let days = secs / 86400;
                     let hours = (secs % 86400) / 3600;
                     let mins = (secs % 3600) / 60;
@@ -156,16 +156,16 @@ pub fn redact_token(token: &str) -> String {
 
 /// Load credential from env override, keyring, or file store.
 ///
-/// Priority: VISOR_TOKEN env var > resolved store (keyring or file).
+/// Priority: `VISOR_TOKEN` env var > resolved store (keyring or file).
 /// When the store is Keyring and keyring access fails, falls back to file
 /// store with a warning rather than crashing.
+#[must_use]
 pub fn load_credential() -> Option<Credential> {
     // Env override takes precedence
-    if let Ok(token) = std::env::var("VISOR_TOKEN") {
-        if !token.is_empty() {
+    if let Ok(token) = std::env::var("VISOR_TOKEN")
+        && !token.is_empty() {
             return Some(Credential::PersonalToken { token });
         }
-    }
 
     let store = resolve_store();
     load_from_store(&store)
@@ -339,9 +339,9 @@ fn authorize_url(
     redirect_uri: &str,
     challenge: &str,
     state: &str,
-) -> Result<String, String> {
+) -> String {
     let base = auth_url.trim_end_matches('/');
-    let url = format!(
+    format!(
         "{base}/oauth/authorize?\
          response_type=code&\
          client_id={client_id}&\
@@ -353,11 +353,11 @@ fn authorize_url(
         redirect_uri = urlencoded(redirect_uri),
         challenge = urlencoded(challenge),
         state = urlencoded(state),
-    );
-    Ok(url)
+    )
 }
 
 /// Minimal percent-encoding for query parameter values.
+#[allow(clippy::format_push_string)]
 fn urlencoded(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -366,7 +366,7 @@ fn urlencoded(s: &str) -> String {
                 out.push(b as char);
             }
             _ => {
-                out.push_str(&format!("%{:02X}", b));
+                out.push_str(&format!("%{b:02X}"));
             }
         }
     }
@@ -399,7 +399,7 @@ fn login_with_browser_at(auth_url: &str, open_browser: bool) -> Result<Credentia
 
     let pkce = Pkce::new()?;
     let state = random_token(16)?;
-    let url = authorize_url(auth_url, &redirect_uri, &pkce.challenge, &state)?;
+    let url = authorize_url(auth_url, &redirect_uri, &pkce.challenge, &state);
 
     if open_browser {
         let opened = open_in_browser(&url);
@@ -608,8 +608,8 @@ fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(val) = u8::from_str_radix(
+        if bytes[i] == b'%' && i + 2 < bytes.len()
+            && let Ok(val) = u8::from_str_radix(
                 &s[i + 1..i + 3],
                 16,
             ) {
@@ -617,7 +617,6 @@ fn percent_decode(s: &str) -> String {
                 i += 3;
                 continue;
             }
-        }
         if bytes[i] == b'+' {
             out.push(b' ');
         } else {
@@ -780,6 +779,7 @@ pub fn refresh_token(auth_url: &str, credential: &Credential) -> Result<Credenti
 
 /// Returns true when the credential's access token has expired (or is about
 /// to expire within the safety margin).
+#[must_use]
 pub fn is_expired(credential: &Credential) -> bool {
     match credential {
         Credential::PersonalToken { .. } => false,
@@ -823,8 +823,7 @@ mod tests {
             "http://127.0.0.1:5000/callback",
             "ch",
             "st",
-        )
-        .unwrap();
+        );
         assert!(url.contains("/oauth/authorize"));
         assert!(url.contains("response_type=code"));
         assert!(url.contains(&format!("client_id={CLIENT_ID}")));

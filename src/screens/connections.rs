@@ -22,6 +22,7 @@ pub struct ConnectionsScreen {
 }
 
 impl ConnectionsScreen {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             connections: Vec::new(),
@@ -98,7 +99,13 @@ impl ConnectionsScreen {
     }
 }
 
-fn format_date(date_str: &Option<String>) -> String {
+impl Default for ConnectionsScreen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn format_date(date_str: Option<&str>) -> String {
     match date_str {
         Some(s) => {
             if s.len() >= 16 {
@@ -107,25 +114,25 @@ fn format_date(date_str: &Option<String>) -> String {
             } else if s.len() >= 10 {
                 s[..10].to_string()
             } else {
-                s.clone()
+                s.to_string()
             }
         }
         None => "—".to_string(),
     }
 }
 
-fn status_display(status: &Option<String>, paused: bool, requires_reauth: bool) -> (String, Color) {
+fn status_display(status: Option<&str>, paused: bool, requires_reauth: bool) -> (String, Color) {
     if requires_reauth {
         return ("● Reautenticar".to_string(), COLOR_NEGATIVE);
     }
     if paused {
         return ("● Pausado".to_string(), COLOR_WARNING);
     }
-    match status.as_deref() {
-        Some("connected") | Some("active") | Some("syncing") => {
+    match status {
+        Some("connected" | "active" | "syncing") => {
             ("● Ativo".to_string(), COLOR_SUCCESS)
         }
-        Some("error") | Some("failed") => {
+        Some("error" | "failed") => {
             ("● Erro".to_string(), COLOR_NEGATIVE)
         }
         Some(other) => {
@@ -143,9 +150,9 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut ConnectionsScreen,
         .iter()
         .map(|c| {
             let provider = c.provider_name.as_deref().unwrap_or("(desconhecido)").to_string();
-            let (status_text, _status_color) = status_display(&c.status, c.paused, c.requires_reauth);
-            let last_sync = format_date(&c.last_successful_sync_at);
-            let next_sync = format_date(&c.next_auto_sync_at);
+            let (status_text, _status_color) = status_display(c.status.as_deref(), c.paused, c.requires_reauth);
+            let last_sync = format_date(c.last_successful_sync_at.as_deref());
+            let next_sync = format_date(c.next_auto_sync_at.as_deref());
             let accounts_count = c.account_ids.len().to_string();
             TableRow::new([provider, status_text, last_sync, next_sync, accounts_count])
         })
@@ -162,7 +169,7 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut ConnectionsScreen,
     let has_rows = !table_rows.is_empty();
     let conn_count = screen.connections.len();
     let active_count = screen.connections.iter().filter(|c| {
-        !c.paused && !c.requires_reauth && matches!(c.status.as_deref(), Some("connected") | Some("active") | Some("syncing"))
+        !c.paused && !c.requires_reauth && matches!(c.status.as_deref(), Some("connected" | "active" | "syncing"))
     }).count();
     let header_label = format!("Conexões ({conn_count} total, {active_count} ativas)");
     let error_msg = screen.error.clone();

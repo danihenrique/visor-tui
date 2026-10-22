@@ -99,14 +99,12 @@ impl ApiClient {
             let body: serde_json::Value = resp.json().unwrap_or_default();
             let errors = body.get("errors").and_then(|e| e.as_array());
             let (code, message) = errors
-                .and_then(|arr| arr.first())
-                .map(|e| {
+                .and_then(|arr| arr.first()).map_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")), |e| {
                     (
                         e.get("code").and_then(|c| c.as_str()).unwrap_or("UNKNOWN").to_string(),
                         e.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string(),
                     )
-                })
-                .unwrap_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")));
+                });
             let request_id = body
                 .get("errors")
                 .and_then(|e| e.as_array())
@@ -334,14 +332,12 @@ impl ApiClient {
             let body: serde_json::Value = resp.json().unwrap_or_default();
             let errors = body.get("errors").and_then(|e| e.as_array());
             let (code, message) = errors
-                .and_then(|arr| arr.first())
-                .map(|e| {
+                .and_then(|arr| arr.first()).map_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")), |e| {
                     (
                         e.get("code").and_then(|c| c.as_str()).unwrap_or("UNKNOWN").to_string(),
                         e.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string(),
                     )
-                })
-                .unwrap_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")));
+                });
             let request_id = errors
                 .and_then(|arr| arr.first())
                 .and_then(|e| e.get("request_id"))
@@ -373,14 +369,12 @@ impl ApiClient {
             let body: serde_json::Value = resp.json().unwrap_or_default();
             let errors = body.get("errors").and_then(|e| e.as_array());
             let (code, message) = errors
-                .and_then(|arr| arr.first())
-                .map(|e| {
+                .and_then(|arr| arr.first()).map_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")), |e| {
                     (
                         e.get("code").and_then(|c| c.as_str()).unwrap_or("UNKNOWN").to_string(),
                         e.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string(),
                     )
-                })
-                .unwrap_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")));
+                });
             let request_id = errors
                 .and_then(|arr| arr.first())
                 .and_then(|e| e.get("request_id"))
@@ -411,14 +405,12 @@ impl ApiClient {
             let body: serde_json::Value = resp.json().unwrap_or_default();
             let errors = body.get("errors").and_then(|e| e.as_array());
             let (code, message) = errors
-                .and_then(|arr| arr.first())
-                .map(|e| {
+                .and_then(|arr| arr.first()).map_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")), |e| {
                     (
                         e.get("code").and_then(|c| c.as_str()).unwrap_or("UNKNOWN").to_string(),
                         e.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string(),
                     )
-                })
-                .unwrap_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")));
+                });
             let request_id = errors
                 .and_then(|arr| arr.first())
                 .and_then(|e| e.get("request_id"))
@@ -914,14 +906,12 @@ impl ApiClient {
             let body: serde_json::Value = resp.json().unwrap_or_default();
             let errors = body.get("errors").and_then(|e| e.as_array());
             let (code, message) = errors
-                .and_then(|arr| arr.first())
-                .map(|e| {
+                .and_then(|arr| arr.first()).map_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")), |e| {
                     (
                         e.get("code").and_then(|c| c.as_str()).unwrap_or("UNKNOWN").to_string(),
                         e.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string(),
                     )
-                })
-                .unwrap_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")));
+                });
             let request_id = errors
                 .and_then(|arr| arr.first())
                 .and_then(|e| e.get("request_id"))

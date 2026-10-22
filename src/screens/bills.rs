@@ -4,21 +4,19 @@ use hqtui::widgets::{TableOptions, TableColumn, TableRow, SelectOptions};
 use hqtui::unicode::Align;
 
 use crate::api::ApiClient;
-use crate::models::{Card, Bill};
+use crate::models::Card;
 
 /// Format a decimal string as BRL-style currency (dots for thousands, comma for decimal).
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn format_money(value: Option<&str>, currency: Option<&str>, is_estimate: bool) -> String {
     let raw = match value {
         Some(v) if !v.is_empty() => v,
         _ => return "-".to_string(),
     };
     let code = currency.unwrap_or("BRL");
-    let amount: f64 = match raw.parse() {
-        Ok(n) => n,
-        Err(_) => {
-            let prefix = if is_estimate { "~" } else { "" };
-            return format!("{prefix}{raw} {code}");
-        }
+    let amount: f64 = if let Ok(n) = raw.parse() { n } else {
+        let prefix = if is_estimate { "~" } else { "" };
+        return format!("{prefix}{raw} {code}");
     };
     let negative = amount < 0.0;
     let abs = amount.abs();

@@ -44,28 +44,28 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 | `--ignored` | Show/hide ignored toggle | ⬜ |
 | `--search` | Search input field | ✅ |
 | `--limit` / `--after` / `--all` | Pagination controls (load more / infinite scroll) | ✅ |
-| `--csv` | Export action: download/save CSV | ⬜ |
+| `--csv` | Export action: download/save CSV | ✅ |
 | `visor transactions get <id>` | Transaction detail modal/screen | ✅ |
-| `visor transactions add` | New transaction form (all fields) | 🚧 |
-| `--amount` | Amount input (decimal, accepts BR grouping) | ⬜ |
-| `-d/--description` | Description text input | ⬜ |
-| `-c/--category` | Category selector (hierarchical list) | ⬜ |
-| `-a/--account` | Account selector | ⬜ |
-| `--type` (debit\|credit) | Type radio/toggle | ⬜ |
-| `--at` | Date/time picker (defaults to now) | ⬜ |
-| `--merchant` | Merchant name input | ⬜ |
-| `--notes` | Notes textarea | ⬜ |
+| `visor transactions add` | New transaction form (all fields) | ✅ |
+| `--amount` | Amount input (decimal, accepts BR grouping) | ✅ |
+| `-d/--description` | Description text input | ✅ |
+| `-c/--category` | Category selector (hierarchical list) | ✅ |
+| `-a/--account` | Account selector | ✅ |
+| `--type` (debit\|credit) | Type radio/toggle | ✅ |
+| `--at` | Date/time picker (defaults to now) | ✅ |
+| `--merchant` | Merchant name input | ✅ |
+| `--notes` | Notes textarea | ✅ |
 | `--tag` (repeatable) | Tag multi-select | ⬜ |
 | `--ignored` | Ignored checkbox | ⬜ |
-| `--idempotency-key` | Auto-generated, hidden from user | ⬜ |
-| `visor transactions edit <id>` | Edit transaction form (respects source immutability) | ⬜ |
-| `--amount` (manual only) | Amount input (disabled for connected/apple_pay) | ⬜ |
-| `-d/--description` (manual only) | Description input (disabled for connected/apple_pay) | ⬜ |
-| `--type` (manual only) | Type toggle (disabled for connected/apple_pay) | ⬜ |
-| `--at` (manual only) | Date/time picker (disabled for connected/apple_pay) | ⬜ |
-| `--clear-tags` | Clear tags button | ⬜ |
-| `visor transactions delete <id>` | Delete confirmation modal | ⬜ |
-| `-y/--yes` | Skip confirmation (TUI always confirms) | ⬜ |
+| `--idempotency-key` | Auto-generated, hidden from user | ✅ |
+| `visor transactions edit <id>` | Edit transaction form (respects source immutability) | ✅ |
+| `--amount` (manual only) | Amount input (disabled for connected/apple_pay) | ✅ |
+| `-d/--description` (manual only) | Description input (disabled for connected/apple_pay) | ✅ |
+| `--type` (manual only) | Type toggle (disabled for connected/apple_pay) | ✅ |
+| `--at` (manual only) | Date/time picker (disabled for connected/apple_pay) | ✅ |
+| `--clear-tags` | Clear tags button | ✅ |
+| `visor transactions delete <id>` | Delete confirmation modal | ✅ |
+| `-y/--yes` | Skip confirmation (TUI always confirms) | ✅ |
 
 ### Accounts & Cards
 
@@ -129,10 +129,10 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 
 | CLI Command | TUI Screen / Action | Status |
 |---|---|---|
-| `visor connections list` | Connections/Integrations screen: sync status per provider | ⬜ |
-| `visor notifications list` | Notifications panel/screen: paginated list | ⬜ |
-| `--unread` | Filter unread toggle | ⬜ |
-| `--limit` / `--after` / `--all` | Pagination (load more) | ⬜ |
+| `visor connections list` | Connections/Integrations screen: sync status per provider | ✅ |
+| `visor notifications list` | Notifications panel/screen: paginated list | ✅ |
+| `--unread` | Filter unread toggle | ✅ |
+| `--limit` / `--after` / `--all` | Pagination (load more) | ✅ |
 
 ### Utilities
 
@@ -149,7 +149,7 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 | Method | Path | TUI Screen / Action | Status |
 |---|---|---|---|
 | GET | `/v1/me` | Sidebar user info, Profile screen, Auth status | ✅ |
-| GET | `/v1/notifications` | Notifications screen with pagination | ⬜ |
+| GET | `/v1/notifications` | Notifications screen with pagination | ✅ |
 | GET | `/v1/spaces` | Space selector, space resolution | ✅ |
 
 ### Space-Scoped Reads
@@ -160,7 +160,7 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 | GET | `/v1/spaces/{id}/cards` | Contas e Cartões cards section | ✅ |
 | GET | `/v1/spaces/{id}/cards/{id}/bills` | Faturas screen | ✅ |
 | GET | `/v1/spaces/{id}/categories` | Categorias screen, category filter dropdowns | ✅ |
-| GET | `/v1/spaces/{id}/connections` | Connections screen | ⬜ |
+| GET | `/v1/spaces/{id}/connections` | Connections screen | ✅ |
 | GET | `/v1/spaces/{id}/fixed-bills` | Recorrentes > Contas fixas | ✅ |
 | GET | `/v1/spaces/{id}/goals` | Metas screen | ✅ |
 | GET | `/v1/spaces/{id}/installment-plans` | Contas a pagar screen | ✅ |
@@ -176,15 +176,15 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 | GET | `/v1/spaces/{id}/transactions` | Transações list with filters + pagination | ✅ |
 | POST | `/v1/spaces/{id}/transactions` | New transaction form submit (with Idempotency-Key) | ✅ |
 | GET | `/v1/spaces/{id}/transactions/{id}` | Transaction detail view | ✅ |
-| PATCH | `/v1/spaces/{id}/transactions/{id}` | Edit transaction form submit | 🚧 |
+| PATCH | `/v1/spaces/{id}/transactions/{id}` | Edit transaction form submit | ✅ |
 | DELETE | `/v1/spaces/{id}/transactions/{id}` | Delete with confirmation modal | ✅ |
 
 ### OAuth Token Endpoints
 
 | Method | Path | TUI Action | Status |
 |---|---|---|---|
-| POST | `/oauth/token` (auth code exchange) | OAuth login flow backend | ⬜ |
-| POST | `/oauth/token` (refresh) | Auto-refresh on token expiry (transparent) | ⬜ |
+| POST | `/oauth/token` (auth code exchange) | OAuth login flow backend | ✅ |
+| POST | `/oauth/token` (refresh) | Auto-refresh on token expiry (transparent) | ✅ |
 
 ---
 
@@ -215,13 +215,13 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 
 | Feature | TUI Implementation | Status |
 |---|---|---|
-| `config.toml` with `default_space` | Read/write on space switch | ⬜ |
-| `credentials.json` (file store) | Match CLI format and permissions | ⬜ |
+| `config.toml` with `default_space` | Read/write on space switch | ✅ |
+| `credentials.json` (file store) | Match CLI format and permissions | ✅ |
 | `update-check.json` | Background update check (cached 24h) | ⬜ |
-| VISOR_SPACE env override | Override active space on startup | ⬜ |
-| VISOR_API_URL env override | Override API base URL | ⬜ |
-| VISOR_AUTH_URL env override | Override OAuth auth server URL | ⬜ |
-| VISOR_DEBUG env | Debug panel or stderr logging toggle | ⬜ |
+| VISOR_SPACE env override | Override active space on startup | ✅ |
+| VISOR_API_URL env override | Override API base URL | ✅ |
+| VISOR_AUTH_URL env override | Override OAuth auth server URL | ✅ |
+| VISOR_DEBUG env | Debug panel or stderr logging toggle | ✅ |
 | VISOR_NO_UPDATE_NOTIFIER | Skip update check | ⬜ |
 | NO_COLOR | Disable ANSI colors | ⬜ |
 
@@ -231,17 +231,17 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 
 | Feature | TUI Implementation | Status |
 |---|---|---|
-| Table output (default) | Native TUI tables via HQTUI | ⬜ |
+| Table output (default) | Native TUI tables via HQTUI | ✅ |
 | JSON output (`--json`) | Raw JSON view/export option | ⬜ |
-| CSV export (`--csv` on transactions) | Export action in Transações screen | ⬜ |
-| Key-value display (me, overview, tx get) | Detail views with aligned fields | ⬜ |
-| Money formatting (`amount CURRENCY`, negative for debits) | Consistent currency formatting | ⬜ |
-| Date formatting (RFC 3339 → local timezone) | Localized date display | ⬜ |
-| Hierarchical categories (indentation) | Tree view in Categorias | ⬜ |
-| Active space marker (`*`) | Highlight in space selector | ⬜ |
-| Investment summary footer | Summary row in Patrimônio | ⬜ |
-| Pagination hints | "Load more" indicators | ⬜ |
-| Activity spinner | Loading states on async operations | ⬜ |
+| CSV export (`--csv` on transactions) | Export action in Transações screen | ✅ |
+| Key-value display (me, overview, tx get) | Detail views with aligned fields | ✅ |
+| Money formatting (`amount CURRENCY`, negative for debits) | Consistent currency formatting | ✅ |
+| Date formatting (RFC 3339 → local timezone) | Localized date display | ✅ |
+| Hierarchical categories (indentation) | Tree view in Categorias | ✅ |
+| Active space marker (`*`) | Highlight in space selector | ✅ |
+| Investment summary footer | Summary row in Patrimônio | ✅ |
+| Pagination hints | "Load more" indicators | ✅ |
+| Activity spinner | Loading states on async operations | ✅ |
 
 ---
 
@@ -250,17 +250,17 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 | Feature | TUI Implementation | Status |
 |---|---|---|
 | Update checker (background, 24h cache) | Toast/banner on new version | ⬜ |
-| Doctor command (4 checks) | Diagnostics screen | ⬜ |
+| Doctor command (4 checks) | Diagnostics screen | ✅ |
 | Banner (pixel art, TrueColor/Ansi256/None) | Splash/loading screen | ⬜ |
 | Color mode detection (NO_COLOR, COLORTERM, TERM=dumb) | Theme selection respecting env | ⬜ |
 | Shell completions | N/A (CLI-only) | ⬜ N/A |
 | Debug mode (HTTP request logging) | Debug panel showing requests | ⬜ |
 | HTTP retries (429 with Retry-After, 5xx exponential) | Built into API client | ⬜ |
 | Rate limit handling (60 req/min) | Rate limit indicator / backoff | ⬜ |
-| Idempotency (POST transactions) | Auto-generated keys in client | ⬜ |
-| Name-or-ID resolution (accounts, categories, tags, spaces) | Fuzzy matching in filter dropdowns | ⬜ |
-| Input validation (amounts, dates, UUIDs, idempotency keys) | Client-side form validation | ⬜ |
-| Brazilian amount formatting (`1.234,56` → `1234.56`) | Accept both formats in forms | ⬜ |
+| Idempotency (POST transactions) | Auto-generated keys in client | ✅ |
+| Name-or-ID resolution (accounts, categories, tags, spaces) | Fuzzy matching in filter dropdowns | ✅ |
+| Input validation (amounts, dates, UUIDs, idempotency keys) | Client-side form validation | ✅ |
+| Brazilian amount formatting (`1.234,56` → `1234.56`) | Accept both formats in forms | ✅ |
 
 ---
 
@@ -312,12 +312,12 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 
 | Category | Total Items | Done | In Progress | Not Started |
 |---|---|---|---|---|
-| Commands → Screens | 62 | 42 | 1 | 19 |
-| API Endpoints | 19 | 17 | 1 | 1 |
+| Commands → Screens | 62 | 56 | 0 | 6 |
+| API Endpoints | 19 | 19 | 0 | 0 |
 | Auth Flow | 16 | 15 | 0 | 1 |
-| Config & State | 9 | 5 | 0 | 4 |
-| Output & Display | 12 | 3 | 0 | 9 |
-| Other Features | 13 | 3 | 0 | 10 |
+| Config & State | 9 | 6 | 0 | 3 |
+| Output & Display | 11 | 10 | 0 | 1 |
+| Other Features | 12 | 7 | 0 | 5 |
 | Exit Codes & Errors | 16 | 0 | 0 | 16 |
 | Dashboard Screens | 11 | 11 | 0 | 0 |
-| **Total** | **158** | **96** | **2** | **60** |
+| **Total** | **156** | **124** | **0** | **32** |

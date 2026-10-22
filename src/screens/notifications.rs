@@ -22,6 +22,7 @@ pub struct NotificationsScreen {
 }
 
 impl NotificationsScreen {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             notifications: Vec::new(),
@@ -93,8 +94,8 @@ impl NotificationsScreen {
                     return;
                 }
                 if k.name == "m" || k.name == "enter" {
-                    if let Some(idx) = self.selected_index {
-                        if idx < self.notifications.len() {
+                    if let Some(idx) = self.selected_index
+                        && idx < self.notifications.len() {
                             let id = self.notifications[idx].id.clone();
                             match api.mark_notification_read(&id) {
                                 Ok(()) => {
@@ -105,7 +106,6 @@ impl NotificationsScreen {
                                 }
                             }
                         }
-                    }
                     return;
                 }
                 if k.name == "r" {
@@ -122,14 +122,20 @@ impl NotificationsScreen {
     }
 }
 
-fn format_date(date_str: &Option<String>) -> String {
+impl Default for NotificationsScreen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn format_date(date_str: Option<&str>) -> String {
     match date_str {
         Some(s) => {
             // Take just the date portion (YYYY-MM-DD) from ISO timestamps
             if s.len() >= 10 {
                 s[..10].to_string()
             } else {
-                s.clone()
+                s.to_string()
             }
         }
         None => "—".to_string(),
@@ -145,7 +151,7 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut NotificationsScree
         .map(|n| {
             let title = n.title.as_deref().unwrap_or("(sem título)").to_string();
             let topic = n.topic.as_deref().unwrap_or("—").to_string();
-            let date = format_date(&n.created_at);
+            let date = format_date(n.created_at.as_deref());
             let read_status = if n.read { "✓" } else { "●" }.to_string();
             TableRow::new([title, topic, date, read_status])
         })

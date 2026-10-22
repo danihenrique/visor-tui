@@ -79,8 +79,7 @@ impl RecurringFormField {
                 Self::Frequency => Self::Amount,
                 Self::AccountId => Self::Frequency,
                 Self::CategoryId => Self::AccountId,
-                Self::Active => Self::CategoryId,
-                Self::ServiceName => Self::CategoryId,
+                Self::Active | Self::ServiceName => Self::CategoryId,
             }
         }
     }
@@ -109,6 +108,7 @@ pub struct RecurringScreen {
 }
 
 impl RecurringScreen {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             active_tab: Tab::Subscriptions,
@@ -226,61 +226,53 @@ impl RecurringScreen {
                     return;
                 }
                 if k.name == "e" {
-                    if let Some(idx) = self.selected_index {
-                        if idx < self.current_items().len() {
+                    if let Some(idx) = self.selected_index
+                        && idx < self.current_items().len() {
                             self.populate_edit_form(idx);
                         }
-                    }
                     return;
                 }
                 if k.name == "d" || k.name == "delete" {
-                    if let Some(idx) = self.selected_index {
-                        if idx < self.current_items().len() {
+                    if let Some(idx) = self.selected_index
+                        && idx < self.current_items().len() {
                             let id = self.current_items()[idx].id.clone();
                             let name = self.current_items()[idx].name.clone();
                             self.delete_target_id = Some(id);
                             self.delete_target_name = Some(name);
                             self.modal_state = RecurringModalState::DeleteConfirm;
                         }
-                    }
                     return;
                 }
             }
         }
 
-        if app.pressed("tab_subscriptions") {
-            if self.active_tab != Tab::Subscriptions {
+        if app.pressed("tab_subscriptions")
+            && self.active_tab != Tab::Subscriptions {
                 self.active_tab = Tab::Subscriptions;
                 self.selected_index = None;
             }
-        }
-        if app.pressed("tab_fixed_bills") {
-            if self.active_tab != Tab::FixedBills {
+        if app.pressed("tab_fixed_bills")
+            && self.active_tab != Tab::FixedBills {
                 self.active_tab = Tab::FixedBills;
                 self.selected_index = None;
             }
-        }
         if app.pressed("recurring:new") {
             self.open_create_modal();
         }
-        if app.pressed("recurring:edit") {
-            if let Some(idx) = self.selected_index {
-                if idx < self.current_items().len() {
+        if app.pressed("recurring:edit")
+            && let Some(idx) = self.selected_index
+                && idx < self.current_items().len() {
                     self.populate_edit_form(idx);
                 }
-            }
-        }
-        if app.pressed("recurring:delete") {
-            if let Some(idx) = self.selected_index {
-                if idx < self.current_items().len() {
+        if app.pressed("recurring:delete")
+            && let Some(idx) = self.selected_index
+                && idx < self.current_items().len() {
                     let id = self.current_items()[idx].id.clone();
                     let name = self.current_items()[idx].name.clone();
                     self.delete_target_id = Some(id);
                     self.delete_target_name = Some(name);
                     self.modal_state = RecurringModalState::DeleteConfirm;
                 }
-            }
-        }
     }
 
     fn open_create_modal(&mut self) {
@@ -327,7 +319,6 @@ impl RecurringScreen {
     fn handle_modal_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
         match self.modal_state {
             RecurringModalState::CreateSubscription | RecurringModalState::EditSubscription => {
-                let _is_create = self.modal_state == RecurringModalState::CreateSubscription;
                 let is_sub = self.is_subscription_tab();
                 for event in events {
                     if let InputEvent::Key(k) = event {
@@ -362,12 +353,11 @@ impl RecurringScreen {
                                 return;
                             }
                         }
-                        if self.form_field == RecurringFormField::Active {
-                            if k.name == "space" || k.name == "right" || k.name == "left" {
+                        if self.form_field == RecurringFormField::Active
+                            && (k.name == "space" || k.name == "right" || k.name == "left") {
                                 self.form_active = !self.form_active;
                                 return;
                             }
-                        }
                         if k.key == "backspace" {
                             match self.form_field {
                                 RecurringFormField::Name => { self.form_name.pop(); }
@@ -390,8 +380,8 @@ impl RecurringScreen {
                             }
                             return;
                         }
-                        if let Some(ch) = &k.char {
-                            if !k.ctrl && !k.alt {
+                        if let Some(ch) = &k.char
+                            && !k.ctrl && !k.alt {
                                 match self.form_field {
                                     RecurringFormField::Name => { self.form_name.push_str(ch); }
                                     RecurringFormField::Amount => { self.form_amount.push_str(ch); }
@@ -401,7 +391,6 @@ impl RecurringScreen {
                                     _ => {}
                                 }
                             }
-                        }
                     }
                 }
                 if app.pressed("recurring_form_cancel") {
@@ -534,14 +523,18 @@ impl RecurringScreen {
     }
 }
 
+impl Default for RecurringScreen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn format_money(amount_str: &str) -> String {
     let amount_str = amount_str.trim();
     let clean_str = amount_str
-        .replace('.', "")
-        .replace(',', "")
-        .replace(' ', "");
+        .replace(['.', ',', ' '], "");
     if let Ok(amount) = clean_str.parse::<f64>() {
-        let formatted = format!("{:.2}", amount);
+        let formatted = format!("{amount:.2}");
         let parts: Vec<&str> = formatted.split('.').collect();
         if parts.len() == 2 {
             let integer_part = parts[0];
@@ -549,17 +542,17 @@ fn format_money(amount_str: &str) -> String {
             let mut result = String::new();
             let chars: Vec<char> = integer_part.chars().collect();
             for (i, c) in chars.iter().enumerate() {
-                if i > 0 && (chars.len() - i) % 3 == 0 {
+                if i > 0 && (chars.len() - i).is_multiple_of(3) {
                     result.push('.');
                 }
                 result.push(*c);
             }
-            format!("R$ {},{}", result, decimal_part)
+            format!("R$ {result},{decimal_part}")
         } else {
             format!("R$ {},00", parts[0])
         }
     } else {
-        format!("R$ {}", amount_str)
+        format!("R$ {amount_str}")
     }
 }
 
@@ -586,6 +579,8 @@ pub fn render_with_state(
     screen: &mut RecurringScreen,
     api: &ApiClient,
 ) {
+    use std::fmt::Write;
+
     screen.load_initial(api);
 
     let active_tab = screen.active_tab;
@@ -613,9 +608,7 @@ pub fn render_with_state(
             let name = item.name.clone();
             let amount_display = item
                 .amount
-                .as_ref()
-                .map(|a| format_money(a))
-                .unwrap_or_else(|| "N/A".to_string());
+                .as_ref().map_or_else(|| "N/A".to_string(), |a| format_money(a));
             let freq = format_frequency(item.frequency.as_deref());
             let next_due = format_date(item.next_due_date.as_deref());
             let last_paid = format_date(item.last_paid_date.as_deref());
@@ -634,7 +627,7 @@ pub fn render_with_state(
         Tab::FixedBills => "Nova Conta Fixa",
     };
     let item_count = items.len();
-    let panel_title = format!("{} ({})", tab_label, item_count);
+    let panel_title = format!("{tab_label} ({item_count})");
     let is_sub_tab = active_tab == Tab::Subscriptions;
 
     ui.column(Column::new().gap(1), move |col| {
@@ -642,7 +635,7 @@ pub fn render_with_state(
             // Tab bar
             let sub_marker = if active_tab == Tab::Subscriptions { "[Assinaturas]" } else { " Assinaturas " };
             let fb_marker = if active_tab == Tab::FixedBills { "[Contas Fixas]" } else { " Contas Fixas " };
-            p.text(&format!("{}  {}  (\u{2190}/\u{2192} para trocar)", sub_marker, fb_marker));
+            p.text(&format!("{sub_marker}  {fb_marker}  (\u{2190}/\u{2192} para trocar)"));
             p.button(
                 ButtonOptions::new("").variant(ButtonVariant::Ghost),
                 "tab_subscriptions",
@@ -672,9 +665,9 @@ pub fn render_with_state(
 
             for (is_selected, name, amount_display, freq, next_due, last_paid, active_text, service) in items.clone() {
                 if is_selected {
-                    p.styled_text(&format!("> {}", name), TextStyle::new().bold());
+                    p.styled_text(&format!("> {name}"), TextStyle::new().bold());
                 } else {
-                    p.text(&format!("  {}", name));
+                    p.text(&format!("  {name}"));
                 }
                 p.key_values(hqtui::widgets::KeyValueOptions {
                     rows: vec![
@@ -715,28 +708,28 @@ pub fn render_with_state(
             };
 
             let name_display = if form_field == RecurringFormField::Name {
-                format!("{}_", form_name)
+                format!("{form_name}_")
             } else {
                 form_name.clone()
             };
             let amount_display = if form_field == RecurringFormField::Amount {
-                format!("{}_", form_amount)
+                format!("{form_amount}_")
             } else {
                 form_amount.clone()
             };
             let freq_label = FREQUENCY_OPTIONS.get(form_frequency_index).copied().unwrap_or("monthly");
             let freq_display = if form_field == RecurringFormField::Frequency {
-                format!("< {} >", freq_label)
+                format!("< {freq_label} >")
             } else {
                 freq_label.to_string()
             };
             let account_display = if form_field == RecurringFormField::AccountId {
-                format!("{}_", form_account_id)
+                format!("{form_account_id}_")
             } else {
                 form_account_id.clone()
             };
             let category_display = if form_field == RecurringFormField::CategoryId {
-                format!("{}_", form_category_id)
+                format!("{form_category_id}_")
             } else {
                 form_category_id.clone()
             };
@@ -749,21 +742,20 @@ pub fn render_with_state(
             };
 
             let mut msg = format!(
-                "Nome: {}\nValor: {}\nFrequ\u{ea}ncia: {}\nConta (ID): {}\nCategoria (ID): {}",
-                name_display, amount_display, freq_display, account_display, category_display
+                "Nome: {name_display}\nValor: {amount_display}\nFrequ\u{ea}ncia: {freq_display}\nConta (ID): {account_display}\nCategoria (ID): {category_display}"
             );
             if is_sub_tab {
                 let svc_display = if form_field == RecurringFormField::ServiceName {
-                    format!("{}_", form_service_name)
+                    format!("{form_service_name}_")
                 } else {
                     form_service_name.clone()
                 };
-                msg.push_str(&format!("\nServi\u{e7}o: {}", svc_display));
+                let _ = write!(msg, "\nServi\u{e7}o: {svc_display}");
             }
-            msg.push_str(&format!("\nAtivo: {}", active_display));
+            let _ = write!(msg, "\nAtivo: {active_display}");
             msg.push_str("\n\nTab: pr\u{f3}ximo campo | Enter: salvar | Esc: cancelar");
             if let Some(ref err) = form_error {
-                msg.push_str(&format!("\n\n{}", err));
+                let _ = write!(msg, "\n\n{err}");
             }
 
             ui.modal(ModalOptions {
@@ -781,8 +773,7 @@ pub fn render_with_state(
             ui.modal(ModalOptions {
                 title: Some("Confirmar Exclus\u{e3}o".to_string()),
                 message: Some(format!(
-                    "Tem certeza que deseja excluir \"{}\"?\n\nEsta a\u{e7}\u{e3}o n\u{e3}o pode ser desfeita.",
-                    target
+                    "Tem certeza que deseja excluir \"{target}\"?\n\nEsta a\u{e7}\u{e3}o n\u{e3}o pode ser desfeita."
                 )),
                 buttons: vec![
                     ModalButton::new("Cancelar"),

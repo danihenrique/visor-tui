@@ -11,6 +11,7 @@ const COLOR_NEGATIVE: Color = Color::rgb(239, 68, 68);   // red-500
 const COLOR_NEUTRAL: Color = Color::rgb(148, 163, 184);  // slate-400
 const COLOR_ACCENT: Color = Color::rgb(14, 165, 233);    // sky-500
 
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn format_money(amount: Option<&str>, currency: Option<&str>) -> String {
     let raw = match amount {
         Some(s) if !s.is_empty() => s,
@@ -44,7 +45,7 @@ fn format_integer_with_dots(n: u64) -> String {
     }
     let mut result = String::with_capacity(len + len / 3);
     for (i, ch) in s.chars().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
+        if i > 0 && (len - i).is_multiple_of(3) {
             result.push('.');
         }
         result.push(ch);

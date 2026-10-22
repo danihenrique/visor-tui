@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
 /// Resolve the Visor config directory using the same precedence as visor-cli:
-/// 1. $VISOR_CONFIG_DIR
-/// 2. $XDG_CONFIG_HOME/visor
+/// 1. $`VISOR_CONFIG_DIR`
+/// 2. $`XDG_CONFIG_HOME/visor`
 /// 3. ~/.config/visor
+#[must_use]
 pub fn config_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("VISOR_CONFIG_DIR") {
         return PathBuf::from(dir);
@@ -11,9 +12,7 @@ pub fn config_dir() -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         return PathBuf::from(xdg).join("visor");
     }
-    dirs::config_dir()
-        .map(|d| d.join("visor"))
-        .unwrap_or_else(|| PathBuf::from(".config/visor"))
+    dirs::config_dir().map_or_else(|| PathBuf::from(".config/visor"), |d| d.join("visor"))
 }
 
 /// Read the default space ID from config.toml, if present.
@@ -36,7 +35,7 @@ pub fn set_default_space_id(space_id: &str) -> std::io::Result<()> {
     std::fs::write(&path, contents)
 }
 
-/// Return the active space ID, respecting VISOR_SPACE env override.
+/// Return the active space ID, respecting `VISOR_SPACE` env override.
 pub fn active_space_id() -> Option<String> {
     std::env::var("VISOR_SPACE")
         .ok()
@@ -44,7 +43,8 @@ pub fn active_space_id() -> Option<String> {
         .or_else(default_space_id)
 }
 
-/// Return the API base URL, respecting VISOR_API_URL env override.
+/// Return the API base URL, respecting `VISOR_API_URL` env override.
+#[must_use]
 pub fn api_base_url() -> String {
     std::env::var("VISOR_API_URL")
         .ok()
@@ -52,7 +52,8 @@ pub fn api_base_url() -> String {
         .unwrap_or_else(|| "https://api.visorfinance.app".to_string())
 }
 
-/// Return the OAuth authorization server URL, respecting VISOR_AUTH_URL env override.
+/// Return the OAuth authorization server URL, respecting `VISOR_AUTH_URL` env override.
+#[must_use]
 pub fn auth_base_url() -> String {
     std::env::var("VISOR_AUTH_URL")
         .ok()
@@ -60,9 +61,9 @@ pub fn auth_base_url() -> String {
         .unwrap_or_else(|| "https://dashboard.visorfinance.app".to_string())
 }
 
-/// Check whether debug mode is enabled via VISOR_DEBUG.
+/// Check whether debug mode is enabled via `VISOR_DEBUG`.
+#[must_use]
 pub fn debug_enabled() -> bool {
     std::env::var("VISOR_DEBUG")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }

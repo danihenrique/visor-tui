@@ -9,6 +9,7 @@ use crate::api::ApiClient;
 use crate::models::{Account, Card};
 
 /// Format a decimal string as currency with BRL-style grouping.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn format_money(value: Option<&str>, currency: Option<&str>) -> String {
     let raw = match value {
         Some(v) if !v.is_empty() => v,
@@ -53,6 +54,7 @@ fn balance_color(balance: Option<&str>, theme: &Theme) -> Color {
 }
 
 /// Render the Accounts & Cards screen content into a container.
+#[allow(clippy::cast_possible_truncation)]
 pub fn render(ui: &mut Container<'_>, api: &ApiClient, show_hidden: bool) {
     let accounts_result = api.accounts(show_hidden);
     let cards_result = api.cards();
@@ -72,6 +74,19 @@ pub fn render(ui: &mut Container<'_>, api: &ApiClient, show_hidden: bool) {
             });
         }
     }
+}
+
+/// Pre-computed card display data to avoid lifetime issues in closures.
+struct CardData {
+    name: String,
+    provider: String,
+    limit_fmt: String,
+    used_fmt: String,
+    available_fmt: String,
+    close_date: String,
+    due_date: String,
+    meter_ratio: Option<f64>,
+    meter_pct: String,
 }
 
 fn render_content(ui: &mut Container<'_>, accounts: &[Account], cards: &[Card], show_hidden: bool) {
@@ -101,20 +116,10 @@ fn render_content(ui: &mut Container<'_>, accounts: &[Account], cards: &[Card], 
             .color(bal_color)
         })
         .collect();
+
     let has_accounts = !accounts.is_empty();
 
     // Pre-compute card data
-    struct CardData {
-        name: String,
-        provider: String,
-        limit_fmt: String,
-        used_fmt: String,
-        available_fmt: String,
-        close_date: String,
-        due_date: String,
-        meter_ratio: Option<f64>,
-        meter_pct: String,
-    }
     let card_data_list: Vec<CardData> = cards
         .iter()
         .map(|card| {
@@ -124,6 +129,7 @@ fn render_content(ui: &mut Container<'_>, accounts: &[Account], cards: &[Card], 
 
             let meter_info = if limit_val > 0.0 {
                 let ratio = (used_val / limit_val).clamp(0.0, 1.0);
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 let pct = (ratio * 100.0).round() as i64;
                 Some((ratio, format!("{pct}%")))
             } else {
