@@ -147,6 +147,12 @@ impl ApiClient {
         Ok(serde_json::from_value(data)?)
     }
 
+    pub fn mark_notification_read(&self, id: &str) -> Result<(), ApiError> {
+        let body = serde_json::json!({ "read": true });
+        let _ = self.patch(&format!("/v1/notifications/{id}"), &body)?;
+        Ok(())
+    }
+
     // ── Space-Scoped Reads ──
 
     pub fn accounts(&self, include_hidden: bool) -> Result<Vec<Account>, ApiError> {

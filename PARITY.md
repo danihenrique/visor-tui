@@ -312,12 +312,12 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 
 | Category | Total Items | Done | In Progress | Not Started |
 |---|---|---|---|---|
-| Commands → Screens | 62 | 22 | 1 | 39 |
-| API Endpoints | 19 | 14 | 1 | 4 |
+| Commands → Screens | 62 | 42 | 1 | 19 |
+| API Endpoints | 19 | 17 | 1 | 1 |
 | Auth Flow | 16 | 15 | 0 | 1 |
 | Config & State | 9 | 5 | 0 | 4 |
-| Output & Display | 12 | 1 | 0 | 11 |
-| Other Features | 13 | 1 | 0 | 12 |
+| Output & Display | 12 | 3 | 0 | 9 |
+| Other Features | 13 | 3 | 0 | 10 |
 | Exit Codes & Errors | 16 | 0 | 0 | 16 |
-| Dashboard Screens | 11 | 10 | 1 | 0 |
-| **Total** | **158** | **68** | **3** | **87** |
+| Dashboard Screens | 11 | 11 | 0 | 0 |
+| **Total** | **158** | **96** | **2** | **60** |
