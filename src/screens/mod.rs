@@ -1,6 +1,7 @@
 pub mod accounts_cards;
 pub mod overview;
 pub mod transactions;
+pub mod period_picker;
 pub mod recurring;
 pub mod cash_flow;
 pub mod categories;

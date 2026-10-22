@@ -8,5 +8,6 @@ pub mod auth;
 pub mod config;
 pub mod keymap;
 pub mod models;
+pub mod period;
 pub mod presentation;
 pub mod screens;
