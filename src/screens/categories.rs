@@ -226,7 +226,7 @@ impl CategoriesScreen {
         if let Some(idx) = self.selected_index
             && idx < self.categories.len()
         {
-            let cat = &self.categories[idx];
+            let cat = &self.categories[category_order(&self.categories)[idx].0];
             self.form_name = cat.name.clone();
             self.form_type_index = CATEGORY_TYPES
                 .iter()
@@ -245,7 +245,7 @@ impl CategoriesScreen {
         if let Some(idx) = self.selected_index
             && idx < self.categories.len()
         {
-            let cat = &self.categories[idx];
+            let cat = &self.categories[category_order(&self.categories)[idx].0];
             self.delete_target_id = Some(cat.id.clone());
             self.delete_target_name = Some(cat.name.clone());
             self.modal_state = CategoryModalState::DeleteConfirm;
@@ -425,7 +425,9 @@ impl CategoriesScreen {
             CategoryModalState::Edit => {
                 if let Some(idx) = self.selected_index {
                     if idx < self.categories.len() {
-                        let cat_id = self.categories[idx].id.clone();
+                        let cat_id = self.categories[category_order(&self.categories)[idx].0]
+                            .id
+                            .clone();
                         api.update_category(&cat_id, Some(name), parent_id, Some(self.form_hidden))
                     } else {
                         self.form_error = Some("Categoria nao encontrada.".to_string());
@@ -457,50 +459,51 @@ impl Default for CategoriesScreen {
     }
 }
 
-/// Build a flat display list with indentation based on `parent_id` hierarchy.
-fn build_tree_rows(categories: &[Category]) -> Vec<TableRow> {
-    // Build adjacency: parent_id -> children indices
-    let mut children_map: std::collections::HashMap<Option<&str>, Vec<usize>> =
-        std::collections::HashMap::new();
-    for (i, cat) in categories.iter().enumerate() {
-        children_map
-            .entry(cat.parent_id.as_deref())
-            .or_default()
-            .push(i);
-    }
-
-    let mut rows = Vec::new();
-    let mut stack: Vec<(usize, usize)> = Vec::new(); // (category index, depth)
-
-    // Start with root categories (no parent)
-    if let Some(roots) = children_map.get(&None) {
-        for &idx in roots {
-            stack.push((idx, 0));
-        }
-    }
-
-    while let Some((idx, depth)) = stack.pop() {
-        let cat = &categories[idx];
-        let indent = "  ".repeat(depth);
-        let type_label = cat.category_type.as_deref().unwrap_or("—");
-        let hidden_mark = if cat.hidden { " (oculta)" } else { "" };
-        let display_name = format!("{indent}{}{hidden_mark}", cat.name);
-
-        rows.push(TableRow::new([
-            display_name,
-            type_label.to_string(),
-            cat.kind.clone().unwrap_or_else(|| "—".to_string()),
-        ]));
-
-        // Push children in reverse order so they pop in original order
-        if let Some(children) = children_map.get(&Some(cat.id.as_str())) {
-            for &child_idx in children.iter().rev() {
-                stack.push((child_idx, depth + 1));
+fn category_order(categories: &[Category]) -> Vec<(usize, usize)> {
+    let mut result = Vec::with_capacity(categories.len());
+    let mut visited = std::collections::HashSet::new();
+    let roots = categories
+        .iter()
+        .enumerate()
+        .filter(|(_, category)| {
+            category
+                .parent_id
+                .as_deref()
+                .is_none_or(|parent| !categories.iter().any(|candidate| candidate.id == parent))
+        })
+        .map(|(index, _)| index)
+        .chain(0..categories.len());
+    for root in roots {
+        let mut stack = vec![(root, 0usize)];
+        while let Some((index, depth)) = stack.pop() {
+            if !visited.insert(index) {
+                continue;
+            }
+            result.push((index, depth));
+            let parent = &categories[index].id;
+            for (child, category) in categories.iter().enumerate().rev() {
+                if category.parent_id.as_ref() == Some(parent) {
+                    stack.push((child, depth + 1));
+                }
             }
         }
     }
+    result
+}
 
-    rows
+fn build_tree_rows(categories: &[Category]) -> Vec<TableRow> {
+    category_order(categories)
+        .into_iter()
+        .map(|(index, depth)| {
+            let category = &categories[index];
+            let hidden = if category.hidden { " (oculta)" } else { "" };
+            TableRow::new([
+                format!("{}{}{hidden}", "  ".repeat(depth.min(8)), category.name),
+                category.category_type.clone().unwrap_or_else(|| "—".into()),
+                category.kind.clone().unwrap_or_else(|| "—".into()),
+            ])
+        })
+        .collect()
 }
 
 pub fn render_with_state(ui: &mut Container<'_>, screen: &mut CategoriesScreen, api: &ApiClient) {
@@ -670,5 +673,49 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut CategoriesScreen, 
             ui.modal(options);
         }
         CategoryModalState::None => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edit_and_delete_follow_the_displayed_hierarchy() {
+        let mut screen = CategoriesScreen::new();
+        screen.categories = serde_json::from_value(serde_json::json!([
+            {"id": "child", "name": "Child", "parent_id": "alpha"},
+            {"id": "alpha", "name": "Alpha"},
+            {"id": "beta", "name": "Beta"},
+            {"id": "orphan", "name": "Orphan", "parent_id": "missing"}
+        ]))
+        .unwrap();
+        let order = category_order(&screen.categories);
+        assert_eq!(order, vec![(1, 0), (0, 1), (2, 0), (3, 0)]);
+        for (row, id) in ["alpha", "child", "beta", "orphan"].iter().enumerate() {
+            screen.selected_index = Some(row);
+            screen.open_edit_modal();
+            assert_eq!(
+                screen.form_name,
+                screen
+                    .categories
+                    .iter()
+                    .find(|category| &category.id == id)
+                    .unwrap()
+                    .name
+            );
+            screen.open_delete_confirm();
+            assert_eq!(screen.delete_target_id.as_deref(), Some(*id));
+        }
+    }
+
+    #[test]
+    fn malformed_category_cycles_remain_selectable_once() {
+        let categories: Vec<Category> = serde_json::from_value(serde_json::json!([
+            {"id": "a", "name": "A", "parent_id": "b"},
+            {"id": "b", "name": "B", "parent_id": "a"}
+        ]))
+        .unwrap();
+        assert_eq!(category_order(&categories), vec![(0, 0), (1, 1)]);
     }
 }

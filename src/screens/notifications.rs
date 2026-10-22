@@ -118,6 +118,7 @@ impl NotificationsScreen {
 
         // Button press for refresh
         if app.pressed("notifications:refresh") {
+            api.invalidate_cache();
             self.fetch(api);
         }
     }

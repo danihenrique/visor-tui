@@ -99,6 +99,7 @@ impl ConnectionsScreen {
         }
 
         if app.pressed("connections:refresh") {
+            api.invalidate_cache();
             self.fetch(api);
         }
     }

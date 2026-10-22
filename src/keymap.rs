@@ -153,9 +153,9 @@ impl Screen {
                 "j/k ou ↑/↓  Selecionar\nu Somente não lidas\nm ou Enter  Marcar como lida"
             }
             Self::Connections => "j/k ou ↑/↓  Selecionar conexão",
-            Self::Settings => "s Trocar espaço  l Sair da conta",
+            Self::Settings => "j/k Rolar informações\ns Trocar espaço  l Sair da conta",
             Self::Doctor => "r Executar diagnóstico novamente",
-            _ => "r Atualizar dados",
+            _ => "j/k ou ↑/↓ Rolar informações\nr Atualizar dados",
         }
     }
 }

@@ -1,15 +1,6 @@
-use hqtui::color::Color;
 use hqtui::prelude::*;
-use hqtui::widgets::{
-    ButtonOptions, ButtonVariant, DividerOptions, KeyValueOptions, KeyValueRow, ModalButton,
-    ModalOptions, TextStyle,
-};
 
-use crate::api::{ApiClient, ApiError};
-
-const COLOR_NEGATIVE: Color = Color::rgb(239, 68, 68);
-const COLOR_ACCENT: Color = Color::rgb(34, 197, 94);
-const COLOR_NEUTRAL: Color = Color::rgb(148, 163, 184);
+use crate::api::ApiClient;
 
 /// Whether the logout confirmation modal is currently visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,127 +9,83 @@ pub enum SettingsModal {
     LogoutConfirm,
 }
 
-fn draw_error(ui: &mut Container<'_>, err: &ApiError) {
-    let err_msg = format!("Falha ao carregar configurações: {err}");
-    ui.panel(Panel::new().title("Erro"), move |p| {
-        p.styled_text(&err_msg, TextStyle::new().fg(COLOR_NEGATIVE));
-        p.label("Verifique sua conexão e credenciais.");
-    });
+pub fn render(ui: &mut Container<'_>, api: &ApiClient, modal: SettingsModal) {
+    render_scrolled(ui, api, modal, 0);
 }
 
-pub fn render(ui: &mut Container<'_>, api: &ApiClient, modal: SettingsModal) {
-    // Load user profile
-    let me = match api.me() {
-        Ok(data) => data,
-        Err(ref e) => {
-            draw_error(ui, e);
-            return;
-        }
-    };
-
-    // Load spaces
-    let spaces = match api.spaces() {
-        Ok(data) => data,
-        Err(ref e) => {
-            draw_error(ui, e);
-            return;
-        }
-    };
-
-    // Pre-compute all strings before entering closures
-    let user_name = me.name.clone();
-    let user_email = me.email.clone();
-    let user_locale = me.locale.clone().unwrap_or_else(|| "—".to_string());
-    let user_currency = me
-        .display_currency_code
-        .clone()
-        .unwrap_or_else(|| "—".to_string());
-    let user_plan = me.plan.clone().unwrap_or_else(|| "—".to_string());
-    let active_space_id = api
-        .space_id()
-        .map(str::to_owned)
-        .or_else(|| me.active_space_id.clone());
-
-    // Find active space name
-    let active_space_name = active_space_id
-        .as_deref()
-        .and_then(|sid| spaces.iter().find(|s| s.id == sid))
-        .map_or_else(
-            || "Nenhum espaço ativo".to_string(),
-            |s| format!("* {}", s.name),
-        );
-
-    let has_active_space = active_space_id.is_some();
-
-    // Build key-value rows for profile panel
-    let profile_rows = vec![
-        KeyValueRow::new("Nome", user_name),
-        KeyValueRow::new("Email", user_email),
-        KeyValueRow::new("Locale", user_locale),
-        KeyValueRow::new("Moeda", user_currency),
-        KeyValueRow::new("Plano", user_plan),
-    ];
-
-    // Auth status details from credential
-    let cred = api.credential();
-    let token_type = cred.kind_label().to_string();
-    let redacted_token = cred.redacted();
-    let expiry_display = cred.expiry_display();
-    let store_type = "File (~/.config/visor/credentials.json)".to_string();
-
-    let auth_rows = vec![
-        KeyValueRow::new("Tipo", token_type),
-        KeyValueRow::new("Token", redacted_token),
-        KeyValueRow::new("Expiração", expiry_display),
-        KeyValueRow::new("Armazenamento", store_type),
-    ];
-
-    ui.column(Column::new().gap(1), move |col| {
-        // Perfil panel
-        col.panel(Panel::new().title("Perfil"), move |p| {
-            p.key_values(KeyValueOptions {
-                rows: profile_rows.clone(),
-                ..Default::default()
-            });
-        });
-
-        // Espaço Ativo panel
-        col.panel(Panel::new().title("Espaço Ativo"), move |p| {
-            if has_active_space {
-                p.styled_text(&active_space_name, TextStyle::new().fg(COLOR_ACCENT));
-            } else {
-                p.styled_text(&active_space_name, TextStyle::new().fg(COLOR_NEUTRAL));
+pub fn render_scrolled(
+    ui: &mut Container<'_>,
+    api: &ApiClient,
+    modal: SettingsModal,
+    selected: usize,
+) {
+    let mut rows = Vec::new();
+    match api.me() {
+        Ok(me) => {
+            for (label, value) in [
+                ("Nome", Some(me.name)),
+                ("Email", Some(me.email)),
+                ("Locale", me.locale),
+                ("Moeda", me.display_currency_code),
+                ("Plano", me.plan),
+            ] {
+                rows.push(TableRow::new([
+                    label.to_string(),
+                    value.unwrap_or_else(|| "—".into()),
+                ]));
             }
-        });
-
-        // Autenticação panel
-        col.panel(Panel::new().title("Autenticação"), move |p| {
-            p.key_values(KeyValueOptions {
-                rows: auth_rows.clone(),
-                ..Default::default()
-            });
-        });
-
-        // Divider before logout
-        col.row(Row::new(), move |r| {
-            r.divider(DividerOptions::default());
-        });
-
-        // Sair button
-        col.row(Row::new(), move |r| {
-            r.button(
+        }
+        Err(error) => rows.push(TableRow::new(["Perfil".into(), format!("{error}")])),
+    }
+    let space = api.spaces().map_or_else(
+        |error| error.to_string(),
+        |spaces| {
+            spaces
+                .into_iter()
+                .find(|space| Some(space.id.as_str()) == api.space_id())
+                .map_or_else(|| "Nenhum espaço ativo".into(), |space| space.name)
+        },
+    );
+    rows.push(TableRow::new(["Espaço".into(), space]));
+    let credential = api.credential();
+    for (label, value) in [
+        ("Autenticação", credential.kind_label().to_string()),
+        ("Token", credential.redacted()),
+        ("Expiração", credential.expiry_display()),
+        ("Armazenamento", "~/.config/visor/credentials.json".into()),
+    ] {
+        rows.push(TableRow::new([label.to_string(), value]));
+    }
+    let selected = Some(selected.min(rows.len().saturating_sub(1)));
+    ui.column(Column::new().gap(1), move |col| {
+        col.row(Row::new().size(Size::Cells(1)).gap(1), move |row| {
+            row.button(ButtonOptions::new("Trocar espaço (s)"), "change_space");
+            row.button(
                 ButtonOptions::new("Sair da conta (l)").variant(ButtonVariant::Danger),
                 "logout",
             );
-            r.button(ButtonOptions::new("Trocar espaço (s)"), "change_space");
         });
+        col.table(
+            TableOptions {
+                columns: vec![
+                    TableColumn::new("Campo").width(Size::Cells(14)),
+                    TableColumn::new("Valor").width(Size::Fill),
+                ],
+                rows,
+                selected,
+                follow_selection: true,
+                zebra: true,
+                ..Default::default()
+            },
+            "settings:table",
+        );
+        col.text("j/k ou ↑/↓ Rolar todas as informações");
     });
-
-    // Draw logout confirmation modal overlay
     if modal == SettingsModal::LogoutConfirm {
         ui.modal(logout_dialog());
     }
 }
+
 #[must_use]
 pub fn logout_dialog() -> ModalOptions {
     ModalOptions {
@@ -153,4 +100,43 @@ pub fn logout_dialog() -> ModalOptions {
             ],
             ..Default::default()
         }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_and_authentication_remain_reachable_in_a_small_terminal() {
+        let mut server = mockito::Server::new();
+        let me = server
+            .mock("GET", "/v1/me")
+            .with_status(200)
+            .with_body(r#"{"id":"u","name":"Daniel","email":"daniel@example.test","plan":"Pro"}"#)
+            .create();
+        let spaces = server
+            .mock("GET", "/v1/spaces")
+            .with_status(200)
+            .with_body(r#"{"data":[{"id":"s","name":"Pessoal"}]}"#)
+            .create();
+        let api = ApiClient::for_test(
+            &server.url(),
+            crate::auth::Credential::PersonalToken {
+                token: "test-only".into(),
+            },
+            "s",
+        )
+        .unwrap();
+        let first = hqtui::testing::render_to_text(56, 10, "dark", |ui| {
+            render_scrolled(ui, &api, SettingsModal::None, 0)
+        });
+        assert!(first.contains("Daniel"), "{first}");
+        assert!(first.contains("daniel@example.test"), "{first}");
+        let last = hqtui::testing::render_to_text(56, 10, "dark", |ui| {
+            render_scrolled(ui, &api, SettingsModal::None, 9)
+        });
+        assert!(last.contains("credentials.json"), "{last}");
+        me.assert();
+        spaces.assert();
+    }
 }
