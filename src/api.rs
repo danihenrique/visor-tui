@@ -70,6 +70,21 @@ impl ApiClient {
         })
     }
 
+    /// Create a test client with explicit base URL, credential, and space ID.
+    #[cfg(test)]
+    fn for_test(base_url: &str, credential: Credential, space_id: &str) -> Result<Self, ApiError> {
+        let client = Client::builder()
+            .user_agent(format!("visor-tui/{}", env!("CARGO_PKG_VERSION")))
+            .build()?;
+
+        Ok(Self {
+            client,
+            base_url: base_url.to_string(),
+            credential,
+            space_id: Some(space_id.to_string()),
+        })
+    }
+
     fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self
@@ -916,5 +931,238 @@ impl ApiClient {
         }
 
         Ok(resp.text()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::Credential;
+    use serde_json::json;
+
+    fn test_client(server: &mockito::Server) -> ApiClient {
+        let cred = Credential::PersonalToken {
+            token: "visor_pat_test_secret".to_string(),
+        };
+        ApiClient::for_test(&server.url(), cred, "s").unwrap()
+    }
+
+    #[test]
+    fn test_create_transaction_sends_correct_request() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("POST", "/v1/spaces/s/transactions")
+            .match_header("authorization", "Bearer visor_pat_test_secret")
+            .match_header("accept", "application/json")
+            .match_header("idempotency-key", mockito::Matcher::Any)
+            .match_body(mockito::Matcher::Json(json!({
+                "amount": "42.50",
+                "description": "Coffee",
+                "type": "expense",
+                "account_id": "acc-1"
+            })))
+            .with_status(201)
+            .with_body(
+                json!({
+                    "data": {
+                        "id": "tx-new",
+                        "account_id": "acc-1",
+                        "amount": "42.50",
+                        "type": "expense",
+                        "description": "Coffee",
+                        "tag_ids": [],
+                        "ignored": false
+                    }
+                })
+                .to_string(),
+            )
+            .create();
+
+        let client = test_client(&server);
+        let tx = client
+            .create_transaction("42.50", "Coffee", "expense", "acc-1", None, &[], None, None, None, false)
+            .unwrap();
+
+        assert_eq!(tx.id, "tx-new");
+        assert_eq!(tx.amount, "42.50");
+        assert_eq!(tx.description.as_deref(), Some("Coffee"));
+        assert_eq!(tx.tx_type, "expense");
+        assert_eq!(tx.account_id, "acc-1");
+        mock.assert();
+    }
+
+    #[test]
+    fn test_update_transaction_sends_sparse_body() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("PATCH", "/v1/spaces/s/transactions/t123")
+            .match_header("authorization", "Bearer visor_pat_test_secret")
+            .match_body(mockito::Matcher::Json(json!({
+                "amount": "99.00",
+                "description": "Updated coffee"
+            })))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "data": {
+                        "id": "t123",
+                        "account_id": "acc-1",
+                        "amount": "99.00",
+                        "type": "expense",
+                        "description": "Updated coffee",
+                        "tag_ids": [],
+                        "ignored": false
+                    }
+                })
+                .to_string(),
+            )
+            .create();
+
+        let client = test_client(&server);
+        let tx = client
+            .update_transaction(
+                "t123",
+                Some("99.00"),
+                Some("Updated coffee"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(tx.id, "t123");
+        assert_eq!(tx.amount, "99.00");
+        assert_eq!(tx.description.as_deref(), Some("Updated coffee"));
+        mock.assert();
+    }
+
+    #[test]
+    fn test_delete_transaction_handles_204() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("DELETE", "/v1/spaces/s/transactions/t123")
+            .match_header("authorization", "Bearer visor_pat_test_secret")
+            .with_status(204)
+            .create();
+
+        let client = test_client(&server);
+        let result = client.delete_transaction("t123");
+
+        assert!(result.is_ok());
+        mock.assert();
+    }
+
+    #[test]
+    fn test_create_tag_with_idempotency() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("POST", "/v1/spaces/s/tags")
+            .match_header("authorization", "Bearer visor_pat_test_secret")
+            .match_header("idempotency-key", mockito::Matcher::Any)
+            .match_body(mockito::Matcher::Json(json!({
+                "name": "Food",
+                "color": "#ff0000"
+            })))
+            .with_status(201)
+            .with_body(
+                json!({
+                    "data": {
+                        "id": "tag-new",
+                        "name": "Food",
+                        "color": "#ff0000"
+                    }
+                })
+                .to_string(),
+            )
+            .create();
+
+        let client = test_client(&server);
+        let tag = client.create_tag("Food", Some("#ff0000")).unwrap();
+
+        assert_eq!(tag.id, "tag-new");
+        assert_eq!(tag.name, "Food");
+        assert_eq!(tag.color.as_deref(), Some("#ff0000"));
+        mock.assert();
+    }
+
+    #[test]
+    fn test_create_goal_sends_correct_body() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("POST", "/v1/spaces/s/goals")
+            .match_header("authorization", "Bearer visor_pat_test_secret")
+            .match_header("idempotency-key", mockito::Matcher::Any)
+            .match_body(mockito::Matcher::Json(json!({
+                "name": "Emergency Fund",
+                "target_amount": "10000.00",
+                "kind": "savings"
+            })))
+            .with_status(201)
+            .with_body(
+                json!({
+                    "data": {
+                        "id": "goal-new",
+                        "name": "Emergency Fund",
+                        "target_amount": "10000.00",
+                        "kind": "savings"
+                    }
+                })
+                .to_string(),
+            )
+            .create();
+
+        let client = test_client(&server);
+        let goal = client
+            .create_goal("Emergency Fund", "10000.00", Some("savings"), None, None)
+            .unwrap();
+
+        assert_eq!(goal.id, "goal-new");
+        assert_eq!(goal.name, "Emergency Fund");
+        assert_eq!(goal.target_amount.as_deref(), Some("10000.00"));
+        assert_eq!(goal.kind.as_deref(), Some("savings"));
+        mock.assert();
+    }
+
+    #[test]
+    fn test_api_error_parsing() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("POST", "/v1/spaces/s/transactions")
+            .with_status(422)
+            .with_body(
+                json!({
+                    "errors": [{
+                        "code": "VALIDATION_FAILED",
+                        "message": "Amount is required"
+                    }]
+                })
+                .to_string(),
+            )
+            .create();
+
+        let client = test_client(&server);
+        let err = client
+            .create_transaction("", "", "expense", "acc-1", None, &[], None, None, None, false)
+            .unwrap_err();
+
+        match err {
+            ApiError::Api {
+                status,
+                code,
+                message,
+                ..
+            } => {
+                assert_eq!(status, 422);
+                assert_eq!(code, "VALIDATION_FAILED");
+                assert_eq!(message, "Amount is required");
+            }
+            other => panic!("expected ApiError::Api, got: {other:?}"),
+        }
+        mock.assert();
     }
 }
