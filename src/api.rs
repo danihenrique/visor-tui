@@ -521,9 +521,23 @@ impl ApiClient {
         )
     }
 
+    fn check_cooldown(&self) -> Result<(), ApiError> {
+        let state = self.requests.lock().unwrap();
+        if let Some(remaining) = state
+            .cooldown_until
+            .and_then(|until| until.checked_duration_since(Instant::now()))
+        {
+            return Err(Self::cooldown_error(remaining));
+        }
+        Ok(())
+    }
+
     fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ApiError> {
         let text = self.get_response(path, "application/json")?;
-        Ok(serde_json::from_str(&text)?)
+        serde_json::from_str(&text).map_err(|error| {
+            self.requests.lock().unwrap().last_failed = true;
+            ApiError::Json(error)
+        })
     }
 
     fn get_response(&self, path: &str, accept: &str) -> Result<String, ApiError> {
@@ -544,13 +558,8 @@ impl ApiClient {
                     "Sem dados em cache. Pressione r para atualizar.".to_owned(),
                 ));
             }
-            if let Some(remaining) = state
-                .cooldown_until
-                .and_then(|until| until.checked_duration_since(Instant::now()))
-            {
-                return Err(Self::cooldown_error(remaining));
-            }
         }
+        self.check_cooldown()?;
 
         let response = self.fetch_response(path, accept);
         let cached = response
@@ -881,6 +890,7 @@ impl ApiClient {
         body: &serde_json::Value,
         idempotency_key: Option<&str>,
     ) -> Result<serde_json::Value, ApiError> {
+        self.check_cooldown()?;
         let url = format!("{}{}", self.base_url, path);
         let mut req = self
             .client
@@ -900,6 +910,7 @@ impl ApiClient {
     }
 
     fn patch(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value, ApiError> {
+        self.check_cooldown()?;
         let url = format!("{}{}", self.base_url, path);
         let resp = self
             .client
@@ -916,6 +927,7 @@ impl ApiClient {
     }
 
     fn delete(&self, path: &str) -> Result<(), ApiError> {
+        self.check_cooldown()?;
         let url = format!("{}{}", self.base_url, path);
         let resp = self
             .client
@@ -981,7 +993,6 @@ impl ApiClient {
         transacted_at: Option<&str>,
         ignored: bool,
     ) -> Result<Transaction, ApiError> {
-        let prefix = self.space_prefix()?;
         let idempotency_key = Uuid::new_v4().to_string();
 
         let mut body = serde_json::Map::new();
@@ -1037,10 +1048,20 @@ impl ApiClient {
             body.insert("ignored".into(), serde_json::Value::Bool(true));
         }
 
+        self.create_transaction_payload(&serde_json::Value::Object(body), &idempotency_key)
+    }
+
+    /// Reuse the draft's key when retrying after an uncertain create response.
+    pub fn create_transaction_payload(
+        &self,
+        body: &serde_json::Value,
+        idempotency_key: &str,
+    ) -> Result<Transaction, ApiError> {
+        let prefix = self.space_prefix()?;
         let resp = self.post(
             &format!("{prefix}/transactions"),
-            &serde_json::Value::Object(body),
-            Some(&idempotency_key),
+            body,
+            Some(idempotency_key),
         )?;
         let data = resp.get("data").cloned().unwrap_or(resp);
         Ok(serde_json::from_value(data)?)
@@ -2487,6 +2508,104 @@ mod tests {
         client.tags().unwrap();
         limited.assert();
         recovered.assert();
+    }
+
+    #[test]
+    fn transaction_create_can_reuse_a_draft_key_after_an_uncertain_response() {
+        let mut server = mockito::Server::new();
+        let payload = json!({"amount":"18.90", "description":"Padaria", "type":"debit", "account_id":"a", "category_id":"c", "transacted_at":"2026-10-22T12:00:00Z"});
+        let first = server
+            .mock("POST", "/v1/spaces/s/transactions")
+            .match_header("idempotency-key", "draft-key")
+            .match_body(mockito::Matcher::Json(payload.clone()))
+            .with_status(201)
+            .with_body("incomplete response")
+            .expect(1)
+            .create();
+        let replay = server
+            .mock("POST", "/v1/spaces/s/transactions")
+            .match_header("idempotency-key", "draft-key")
+            .match_body(mockito::Matcher::Json(payload.clone()))
+            .with_body(
+                json!({"data":{"id":"tx1", "account_id":"a", "amount":"18.90", "type":"debit"}})
+                    .to_string(),
+            )
+            .expect(1)
+            .create();
+        let client = test_client(&server);
+        assert!(
+            client
+                .create_transaction_payload(&payload, "draft-key")
+                .is_err()
+        );
+        assert_eq!(
+            client
+                .create_transaction_payload(&payload, "draft-key")
+                .unwrap()
+                .id,
+            "tx1"
+        );
+        first.assert();
+        replay.assert();
+    }
+
+    #[test]
+    fn writes_observe_an_active_rate_limit() {
+        let mut server = mockito::Server::new();
+        let limited = server
+            .mock("POST", "/v1/spaces/s/tags")
+            .with_status(429)
+            .with_header("retry-after", "60")
+            .with_body(r#"{"errors":[{"code":"RATE_LIMITED"}]}"#)
+            .expect(1)
+            .create();
+        let patch = server
+            .mock("PATCH", "/v1/spaces/s/tags/t1")
+            .expect(0)
+            .create();
+        let delete = server
+            .mock("DELETE", "/v1/spaces/s/tags/t1")
+            .expect(0)
+            .create();
+        let client = test_client(&server);
+        assert_eq!(
+            client.create_tag("test", None).unwrap_err().http_status(),
+            Some(429)
+        );
+        for result in [
+            client.post("/v1/spaces/s/tags", &json!({}), None),
+            client.patch("/v1/spaces/s/tags/t1", &json!({})),
+        ] {
+            assert_eq!(result.unwrap_err().http_status(), Some(429));
+        }
+        assert_eq!(
+            client
+                .delete("/v1/spaces/s/tags/t1")
+                .unwrap_err()
+                .http_status(),
+            Some(429)
+        );
+        limited.assert();
+        patch.assert();
+        delete.assert();
+    }
+
+    #[test]
+    fn invalid_json_marks_sync_failed() {
+        let mut server = mockito::Server::new();
+        let invalid = server
+            .mock("GET", "/v1/spaces/s/tags")
+            .with_body("not json")
+            .expect(1)
+            .create();
+        let client = test_client(&server);
+        assert!(client.tags().is_err());
+        assert!(
+            client.request_status().contains("falha"),
+            "{}",
+            client.request_status()
+        );
+        invalid.assert();
     }
 
     #[test]
