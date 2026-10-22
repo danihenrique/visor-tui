@@ -321,6 +321,7 @@ class Terminal:
         self.screen = pyte.Screen(columns, rows)
         self.stream = pyte.Stream(self.screen)
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self.output = bytearray()
         self.master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
         env = dict(os.environ)
@@ -354,6 +355,7 @@ class Terminal:
                     break
                 if not data:
                     break
+                self.output.extend(data)
                 self.stream.feed(self.decoder.decode(data))
 
     def wait_until(self, predicate, message, timeout=5):
@@ -379,13 +381,51 @@ class Terminal:
     def expect(self, text):
         assert text in self.text(), f"Missing {text!r} at {self.columns}x{self.rows}:\n{self.text()}"
 
-    def click(self, label):
-        for y, line in enumerate(self.screen.display):
-            x = line.find(label)
-            if x >= 0:
-                self.send(f"\x1b[<0;{x + 1};{y + 1}M\x1b[<0;{x + 1};{y + 1}m")
-                return
-        raise AssertionError(f"Click target {label!r} is not visible:\n{self.text()}")
+    def position(self, label, occurrence=0):
+        assert label
+        matches = []
+        for y in range(self.rows):
+            cells = [self.screen.buffer[y][x].data for x in range(self.columns)]
+            line = "".join(cells)
+            columns = [x for x, cell in enumerate(cells) for _ in cell]
+            start = 0
+            while (x := line.find(label, start)) >= 0:
+                matches.append(((columns[x] + columns[x + len(label) - 1]) // 2, y))
+                start = x + len(label)
+        assert matches, f"Mouse target {label!r} is not visible:\n{self.text()}"
+        assert -len(matches) <= occurrence < len(matches), (label, occurrence, matches)
+        return matches[occurrence]
+
+    def click_at(self, x, y, double=False):
+        assert 0 <= x < self.columns and 0 <= y < self.rows, (x, y)
+        event = self.click_event(x, y)
+        os.write(self.master, event.encode())
+        if double:
+            self.read(0.06)
+            os.write(self.master, event.encode())
+        self.read()
+
+    def click(self, label, occurrence=0, double=False):
+        self.click_at(*self.position(label, occurrence), double=double)
+
+    @staticmethod
+    def click_event(x, y):
+        return f"\x1b[<0;{x + 1};{y + 1}M\x1b[<0;{x + 1};{y + 1}m"
+
+    def wheel_at(self, x, y, steps):
+        assert 0 <= x < self.columns and 0 <= y < self.rows, (x, y)
+        button = 65 if steps > 0 else 64
+        self.send(f"\x1b[<{button};{x + 1};{y + 1}M" * abs(steps))
+
+    def wheel(self, label, steps, occurrence=0):
+        self.wheel_at(*self.position(label, occurrence), steps)
+
+    def resize(self, columns, rows):
+        self.columns, self.rows = columns, rows
+        self.screen.resize(lines=rows, columns=columns)
+        fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+        self.process.send_signal(signal.SIGWINCH)
+        self.read()
 
     def capture(self, directory, name):
         if directory:
@@ -641,13 +681,359 @@ def capture_screens(terminal, captures, screens, verify_navigation=True):
             terminal.send("\x1b[D")
 
 
-def run(binary, captures, baseline=False, check_ttl=False, visual_only=False, screens=None, sizes=None):
+def check_mouse_periods(terminal, captures):
+    terminal.send("2")
+    october(terminal)
+    terminal.click("◀")
+    terminal.expect("Setembro 2026")
+    terminal.expect("2 lançamentos")
+    terminal.click("▶")
+    terminal.expect("Outubro 2026")
+    terminal.expect("14 lançamentos")
+    terminal.click("Outubro 2026")
+    terminal.expect("Selecionar período")
+    terminal.click("Personalizado")
+    terminal.expect("Período personalizado")
+    terminal.click("Fim:")
+    terminal.send("\x0130/09/2026")
+    terminal.click("Início:")
+    terminal.send("\x0101/09/2026")
+    terminal.click("Aplicar", occurrence=-1)
+    terminal.expect("2 lançamentos")
+    expect_last_range(("2026-09-01", "2026-09-30"))
+    october(terminal)
+    for name in ("overview", "transactions", "cash-flow", "categories", "bills", "payables"):
+        terminal.send(SCREENS[name][0])
+        label_x, label_y = terminal.position("Outubro 2026")
+        left_x, left_y = terminal.position("◀")
+        right_x, right_y = terminal.position("▶")
+        assert left_y == label_y == right_y, f"Period controls are not on the same bar on {name}"
+        assert left_x < label_x < right_x, f"Period label is outside its arrows on {name}"
+        assert label_y >= 3, f"Period bar is crammed into the title on {name}"
+        assert terminal.screen.buffer[label_y][label_x].bold, f"Period label is not prominent on {name}"
+        background = terminal.screen.buffer[label_y][label_x].bg
+        bar_start, bar_end = label_x, label_x
+        while bar_start > 0 and terminal.screen.buffer[label_y][bar_start - 1].bg == background:
+            bar_start -= 1
+        while bar_end + 1 < terminal.columns and terminal.screen.buffer[label_y][bar_end + 1].bg == background:
+            bar_end += 1
+        assert abs(label_x - (bar_start + bar_end) // 2) <= 1, f"Period label is not centered in its rendered bar on {name}"
+        terminal.click("Outubro 2026")
+        terminal.expect("Selecionar período")
+        terminal.click("Cancelar", occurrence=-1)
+        assert "Selecionar período" not in terminal.text(), "Period cancel did not close the picker"
+    terminal.capture(captures, "mouse-period-bar")
+
+
+def check_mouse_transactions(terminal, config, captures):
+    terminal.send("2")
+    terminal.send("k" * 40)
+    new_position = terminal.position("n Nova")
+    terminal.click_at(*new_position)
+    cancel_position = terminal.position("Esc Cancelar")
+    terminal.click_at(*cancel_position)
+    terminal.send(Terminal.click_event(*new_position) + Terminal.click_event(*cancel_position) + "f")
+    terminal.expect("Filtrar transações")
+    assert "Nova transação" not in terminal.text(), "Batched input replayed an earlier click"
+    terminal.click("Esc Voltar")
+    terminal.click("/ Busca")
+    terminal.expect("Buscar transações")
+    terminal.send("Mercado")
+    terminal.click("Enter Buscar")
+    terminal.expect("1 lançamentos")
+    assert parse_qs(urlsplit(transaction_requests()[-1][1]).query)["search"] == ["Mercado"]
+    terminal.click("Mercado de teste")
+    assert "Detalhes da transação" not in terminal.text(), "Single click opened transaction details"
+    terminal.send("\r")
+    terminal.expect("Detalhes da transação")
+    terminal.expect("Mercado de teste")
+    terminal.click("Esc Voltar")
+    terminal.click("Mercado de teste", double=True)
+    terminal.expect("Detalhes da transação")
+    terminal.click("Esc Voltar")
+    terminal.send("c")
+    terminal.send("k" * 40)
+    before = terminal.body_cells()
+    table_position = terminal.position("Último dia outubro")
+    terminal.wheel_at(*table_position, steps=40)
+    assert terminal.body_cells() != before, "Mouse wheel did not scroll the transaction list"
+    terminal.expect("Primeiro dia outubro")
+    terminal.wheel_at(*table_position, steps=-40)
+    assert terminal.body_cells() == before, "Mouse wheel did not return to the first transaction"
+    terminal.click("f Filtros")
+    terminal.expect("Filtrar transações")
+    terminal.click("Categoria:")
+    terminal.expect("Selecionar categoria")
+    terminal.click("Transporte")
+    terminal.click("Ctrl-S Aplicar")
+    query = parse_qs(urlsplit(transaction_requests()[-1][1]).query)
+    assert query.get("category_id") == ["category-2"], query
+    terminal.expect("1 lançamentos")
+    terminal.click("E CSV")
+    terminal.expect("CSV exportado")
+    exports = list(Path(config).glob("transactions_*.csv"))
+    assert len(exports) == 1 and "Mock transaction,18.90" in exports[0].read_text(), "Mouse CSV export failed"
+    assert parse_qs(urlsplit(Fixture.requests[-1][1]).query).get("category_id") == ["category-2"], "Mouse CSV lost filters"
+    terminal.click("Enter Fechar")
+    terminal.send("c")
+    request_count = len(Fixture.requests)
+    terminal.click("r Atualizar")
+    terminal.wait_until(lambda: len(Fixture.requests) > request_count, "Mouse refresh did not fetch")
+    terminal.wait_until(lambda: "14 lançamentos" in terminal.text(), "Mouse refresh did not complete")
+    background_arrow = terminal.position("◀")
+    background_sidebar = terminal.position("5 Contas") if terminal.columns >= 110 else None
+    terminal.click("n Nova")
+    terminal.expect("Nova transação")
+    request_count = len(Fixture.requests)
+    terminal.click_at(*background_arrow)
+    if background_sidebar:
+        terminal.click_at(*background_sidebar)
+        terminal.wheel_at(*background_sidebar, steps=3)
+    terminal.expect("Nova transação")
+    assert len(Fixture.requests) == request_count, "Modal mouse input leaked to background controls"
+    terminal.click("Esc Cancelar")
+    terminal.expect("Outubro 2026")
+    terminal.expect("14 lançamentos")
+    terminal.click("n Nova")
+    terminal.click("Ctrl-S Salvar")
+    terminal.expect("Nova transação")
+    assert not any(request[0] != "GET" for request in Fixture.requests), "Invalid mouse submission made a write"
+    terminal.click("Descrição:")
+    terminal.send("Compra com mouse")
+    terminal.click("Valor (")
+    terminal.send("18,90")
+    terminal.click("Conta:")
+    terminal.expect("Selecionar conta")
+    terminal.click("Conta principal")
+    form_point = terminal.position("Conta:")
+    for _ in range(10):
+        if any("Categoria:" in line for line in terminal.screen.display):
+            break
+        terminal.wheel_at(*form_point, steps=1)
+    terminal.click("Categoria:")
+    terminal.click("Mercado")
+    form_point = terminal.position("Categoria:")
+    for _ in range(10):
+        if any("Data:" in line for line in terminal.screen.display):
+            break
+        terminal.wheel_at(*form_point, steps=1)
+    terminal.click("Data:")
+    terminal.send("\x1522/10/2026")
+    terminal.capture(captures, "mouse-form")
+    terminal.click("Ctrl-S Salvar")
+    writes = [request for request in Fixture.requests if request[0] == "POST"]
+    assert len(writes) == 1, f"Mouse save did not create exactly one transaction: {writes}\n{terminal.text()}"
+    assert writes[0][2]["amount"] == "18.90", writes
+    assert writes[0][2]["description"] == "Compra com mouse", writes
+    assert writes[0][2]["account_id"] == "account-1", writes
+    assert writes[0][2]["category_id"] == "category-1", writes
+    assert writes[0][2]["transacted_at"].startswith("2026-10-22"), writes
+    terminal.wait_until(lambda: "15 lançamentos" in terminal.text(), "Mouse save did not refresh the list")
+    terminal.click("/ Busca")
+    terminal.send("Compra com mouse")
+    terminal.click("Enter Buscar")
+    terminal.click("Compra com mouse", occurrence=-1, double=True)
+    terminal.expect("Detalhes da transação")
+    terminal.click("d Excluir")
+    terminal.expect("Excluir transação?")
+    terminal.click("Esc Cancelar")
+    assert not any(request[0] == "DELETE" for request in Fixture.requests), "Mouse cancel deleted a transaction"
+    terminal.send("c")
+
+
+def check_mouse_screens(terminal, captures):
+    for key, row_label, new_label, title, field, value in (
+        ("t", "Essencial", "Nova tag", "Nova Tag", "Cor (hex):", "#123456"),
+        ("6", "Transporte", "Nova categoria", "Nova Categoria", "Pai (ID):", "category-parent"),
+        ("7", "Reserva de emergência", "Nova meta", "Nova Meta", "Valor alvo:", "1200"),
+        ("3", "Netflix", "Nova assinatura", "Nova Assinatura", "Valor:", "19.90"),
+    ):
+        terminal.send(key)
+        terminal.send("k" * 40)
+        initial = terminal.body_cells()
+        terminal.click(row_label)
+        assert terminal.body_cells() != initial, f"Mouse did not select {row_label}"
+        selected = terminal.body_cells()
+        point = terminal.position(row_label)
+        terminal.wheel_at(*point, steps=1)
+        assert terminal.body_cells() != selected, f"Mouse wheel did not advance from {row_label}"
+        terminal.wheel_at(*point, steps=-1)
+        assert terminal.body_cells() == selected, f"Mouse wheel did not restore {row_label}"
+        terminal.send("e")
+        name_line = next(line for line in terminal.screen.display if "Nome:" in line)
+        assert row_label in name_line, f"Mouse selected a different row: {name_line}"
+        terminal.click("Cancelar", occurrence=-1)
+        background_sidebar = terminal.position("5 Contas") if terminal.columns >= 110 else None
+        terminal.click(new_label)
+        terminal.expect(title)
+        if background_sidebar:
+            request_count = len(Fixture.requests)
+            terminal.click_at(*background_sidebar)
+            terminal.expect(title)
+            assert len(Fixture.requests) == request_count, f"Click behind {title} navigated the screen"
+        terminal.click(field)
+        terminal.send(value)
+        field_line = next(line for line in terminal.screen.display if field in line)
+        assert value in field_line, f"Click did not focus {field}: {field_line}"
+        writes = [request for request in Fixture.requests if request[0] != "GET"]
+        terminal.click("Salvar")
+        terminal.expect(title)
+        terminal.expect("obrigat")
+        assert [request for request in Fixture.requests if request[0] != "GET"] == writes, f"Invalid {title} form made a request"
+        terminal.capture(captures, f"mouse-form-{key}")
+        terminal.click("Cancelar", occurrence=-1)
+        assert title not in terminal.text(), f"Mouse cancel did not close {title}"
+    terminal.click("Contas fixas")
+    terminal.expect("Aluguel")
+    assert "Internet fibra" not in terminal.text(), "Recurring tab did not switch"
+    terminal.click("Assinaturas")
+    terminal.expect("Internet fibra")
+    terminal.send("-")
+    terminal.click("Concluídos")
+    terminal.expect("Sofá da sala")
+    assert "Bicicleta" not in terminal.text(), "Completed tab retained active payable"
+    terminal.click("Ativos")
+    terminal.expect("Bicicleta")
+    assert "Sofá da sala" not in terminal.text(), "Active tab retained completed payable"
+    terminal.click("Curso de idiomas")
+    terminal.expect("Parcela 250,00")
+    terminal.send("0")
+    terminal.click("2026-10-18")
+    terminal.expect("Fechamento 2026-10-10")
+    terminal.click("→")
+    terminal.expect("Itaú Personnalité")
+    assert any("/cards/card-2/bills" in request[1] for request in Fixture.requests), "Mouse did not change the bill card"
+    terminal.click("←")
+    terminal.expect("Nubank Ultravioleta")
+    terminal.send("N")
+    terminal.click("Reconecte o Banco Inter")
+    terminal.expect("A autorização expirou")
+    terminal.send("x")
+    terminal.click("Banco Inter")
+    terminal.expect("Renove a autorização")
+    terminal.send("=")
+    if "s Trocar espaço" not in terminal.text():
+        terminal.wheel("Perfil", 1)
+    terminal.click("s Trocar espaço")
+    terminal.expect("Selecionar Espaço")
+    terminal.click("Outro espaço")
+    terminal.send("2")
+    terminal.wait_until(lambda: "15 lançamentos" in terminal.text(), "Mouse space selection did not load the period")
+    expect_last_range(OCTOBER, "smoke-alt")
+    terminal.capture(captures, "mouse-space")
+    if terminal.columns >= 110:
+        for label, title in (("5 Contas", "Contas e Cartões"), ("7 Metas", "Viagem ao Japão"), ("2 Transações", "Lançamentos")):
+            terminal.click(label)
+            terminal.expect(title)
+
+
+def check_mouse_reports(terminal, captures):
+    terminal.send("5")
+    terminal.send("k" * 40)
+    terminal.click("Reserva de emergência")
+    terminal.expect("2 de 7")
+    terminal.click("Nubank Ultravioleta")
+    terminal.expect("5 de 7")
+    account_point = terminal.position("Nubank Ultravioleta")
+    terminal.wheel_at(*account_point, steps=40)
+    terminal.expect("7 de 7")
+    terminal.expect("Inter Black")
+    terminal.wheel_at(*account_point, steps=-40)
+    terminal.expect("1 de 7")
+    for key, anchor, expected in (
+        ("4", "31/10/2026", "j/k Dias e previsão atual · 2/"),
+        ("8", "Receita esperada", "j/k Seções  ·  2/2"),
+        ("9", "Distribuição da carteira", "j/k Alocação e posições  ·  2/"),
+    ):
+        terminal.send(key)
+        terminal.send("k" * 40)
+        before = terminal.body_cells()
+        point = terminal.position(anchor)
+        request_count = len(Fixture.requests)
+        terminal.wheel_at(*point, steps=1)
+        terminal.expect(expected)
+        terminal.wheel_at(*point, steps=-1)
+        assert terminal.body_cells() == before, f"Mouse wheel did not restore screen {key}"
+        assert len(Fixture.requests) == request_count, "Report wheel made a request"
+    terminal.send("=")
+    terminal.send("k" * 40)
+    before = terminal.body_cells()
+    point = terminal.position("Perfil")
+    terminal.wheel_at(*point, steps=1)
+    terminal.expect("s Trocar espaço")
+    assert terminal.body_cells() != before, "Mouse wheel did not select the space section"
+    terminal.wheel_at(*point, steps=-1)
+    assert terminal.body_cells() == before, "Mouse wheel did not restore the profile section"
+    terminal.capture(captures, "mouse-reports")
+
+
+def check_mouse_navigation(terminal):
+    if terminal.columns >= 110:
+        terminal.click("5 Contas")
+    else:
+        terminal.click("Telas")
+        terminal.click("Contas e Cartões", occurrence=-1)
+    terminal.expect("Contas e Cartões")
+    terminal.expect("Conta principal")
+    terminal.click("Telas")
+    terminal.click("Transações", occurrence=-1)
+    terminal.expect("Lançamentos")
+    header_point = terminal.position("Telas")
+    terminal.click("Telas")
+    terminal.click_at(*header_point)
+    terminal.expect("Cancelar")
+    terminal.click("Cancelar")
+    terminal.expect("Outubro 2026")
+
+
+def check_mouse(binary, config, server, columns, rows, captures):
+    terminal = Terminal(binary, config, server, columns, rows)
+    try:
+        assert b"\x1b[?1006h" in terminal.output, "SGR mouse reporting was not enabled"
+        assert any(sequence in terminal.output for sequence in (b"\x1b[?1000h", b"\x1b[?1002h", b"\x1b[?1003h")), "Mouse capture was not enabled"
+        check_mouse_periods(terminal, captures)
+        check_mouse_transactions(terminal, config, captures)
+        check_mouse_screens(terminal, captures)
+        check_mouse_reports(terminal, captures)
+        check_mouse_navigation(terminal)
+        resized = (80, 24) if columns >= 110 else (120, 40)
+        terminal.resize(*resized)
+        terminal.send("2")
+        if resized[0] >= 110:
+            terminal.click("5 Contas")
+            terminal.expect("Contas e Cartões")
+            terminal.click("2 Transações")
+        terminal.click("◀")
+        terminal.expect("Setembro 2026")
+        terminal.click("▶")
+        terminal.expect("Outubro 2026")
+        terminal.click("n Nova")
+        terminal.expect("Nova transação")
+        terminal.click("Esc Cancelar")
+        terminal.resize(columns, rows)
+        terminal.capture(captures, "mouse-resized")
+        terminal.send("q")
+        terminal.process.wait(timeout=3)
+        assert terminal.process.returncode == 0
+        assert not Fixture.errors, Fixture.errors
+        print(f"PASS {columns}x{rows}: mouse capture, period bar, picker, rows, wheel, toolbar, forms, modals, tabs, spaces, resize", flush=True)
+    finally:
+        terminal.close()
+
+
+def run(binary, captures, baseline=False, check_ttl=False, visual_only=False, screens=None, sizes=None, mouse_only=False):
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Fixture)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         for columns, rows in sizes or [(120, 40), (80, 24), (60, 18)]:
             Fixture.reset()
+            if not baseline and not visual_only and columns >= 80:
+                with tempfile.TemporaryDirectory(prefix="visor-mouse-") as config:
+                    check_mouse(binary, config, server, columns, rows, captures)
+                Fixture.reset()
+            if mouse_only:
+                continue
             with tempfile.TemporaryDirectory(prefix="visor-ux-") as config:
                 terminal = Terminal(binary, config, server, columns, rows)
                 try:
@@ -812,6 +1198,7 @@ if __name__ == "__main__":
     parser.add_argument("--baseline", action="store_true", help="Capture pre-redesign visuals without selection assertions; in full smoke reproduce the old form bug")
     parser.add_argument("--check-ttl", action="store_true", help="Idle beyond the 60-second cache TTL at 120x40")
     parser.add_argument("--visual-only", action="store_true", help="Render and navigate screens without exercising mutations")
+    parser.add_argument("--mouse-only", action="store_true", help="Exercise mouse controls against the fixture at widths of at least 80 cells")
     parser.add_argument("--screens", help=f"Comma-separated visual review screens: {','.join(SCREENS)}")
     parser.add_argument("--sizes", help="Comma-separated terminal sizes, for example 120x40,80x24 (default also includes 60x18)")
     args = parser.parse_args()
@@ -821,6 +1208,8 @@ if __name__ == "__main__":
         parser.error(f"Unknown screens: {', '.join(sorted(unknown))}")
     if args.screens and not args.visual_only:
         parser.error("--screens requires --visual-only")
+    if args.mouse_only and (args.visual_only or args.baseline):
+        parser.error("--mouse-only cannot be combined with --visual-only or --baseline")
     sizes = None
     if args.sizes:
         try:
@@ -829,4 +1218,4 @@ if __name__ == "__main__":
                 raise ValueError
         except ValueError:
             parser.error("--sizes must contain WIDTHxHEIGHT pairs of at least 10 cells")
-    run(args.binary.resolve(), args.captures, args.baseline, args.check_ttl, args.visual_only, screens, sizes)
+    run(args.binary.resolve(), args.captures, args.baseline, args.check_ttl, args.visual_only, screens, sizes, args.mouse_only)
