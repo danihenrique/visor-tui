@@ -1,3 +1,4 @@
+use crate::interaction::{Interactions, Interactive};
 use hqtui::color::Color;
 use hqtui::prelude::*;
 use hqtui::widgets::{ButtonOptions, ButtonVariant, TextStyle};
@@ -170,7 +171,12 @@ fn check_space(api: &ApiClient) -> CheckResult {
 }
 
 pub fn render(ui: &mut Container<'_>, state: &DoctorState) {
+    render_interactive(ui, state, &Interactions::default());
+}
+
+pub fn render_interactive(ui: &mut Container<'_>, state: &DoctorState, hits: &Interactions) {
     use crate::presentation::{Metric, Tone, metric_strip};
+    hits.clear();
     let ok = state
         .checks
         .iter()
@@ -189,48 +195,55 @@ pub fn render(ui: &mut Container<'_>, state: &DoctorState) {
     let checks = state.checks.clone();
     let show_metrics = ui.height() >= 15;
     let muted = ui.theme().muted;
-    ui.column(Column::new().gap(1), move |col| {
-        if show_metrics {
-            metric_strip(
-                col,
-                vec![
-                    Metric::new("Verificações OK", ok.to_string(), Tone::Positive),
-                    Metric::new("Avisos", warnings.to_string(), Tone::Warning),
-                    Metric::new("Falhas", failures.to_string(), Tone::Negative),
-                ],
-            );
-        }
-        col.panel(Panel::new().title("Saúde do aplicativo"), move |panel| {
-            if checks.is_empty() {
-                panel.text("As verificações ainda não foram executadas.");
-            }
-            for check in checks {
-                let name = match check.name.as_str() {
-                    "Version" => "Versão instalada",
-                    "Login" => "Autenticação",
-                    "Space" => "Espaço ativo",
-                    other => other,
-                };
-                panel.styled_text(
-                    &format!("{}  {name}", check.outcome.indicator()),
-                    TextStyle::new().fg(check.outcome.color()).bold(),
+    ui.column(Column::new().gap(1), {
+        let hits = hits.clone();
+        move |col| {
+            if show_metrics {
+                metric_strip(
+                    col,
+                    vec![
+                        Metric::new("Verificações OK", ok.to_string(), Tone::Positive),
+                        Metric::new("Avisos", warnings.to_string(), Tone::Warning),
+                        Metric::new("Falhas", failures.to_string(), Tone::Negative),
+                    ],
                 );
-                for line in hqtui::unicode::wrap(&check.message, panel.width())
-                    .into_iter()
-                    .take(2)
-                {
-                    panel.styled_text(&line, TextStyle::new().fg(muted));
-                }
-                if show_metrics {
-                    panel.spacer(Size::Cells(1));
-                }
             }
-        });
-        col.row(Row::new().size(Size::Cells(1)), move |row| {
-            row.button(
-                ButtonOptions::new("r Executar verificações").variant(ButtonVariant::Ghost),
-                "doctor_rerun",
-            );
-        });
+            col.panel(Panel::new().title("Saúde do aplicativo"), move |panel| {
+                if checks.is_empty() {
+                    panel.text("As verificações ainda não foram executadas.");
+                }
+                for check in checks {
+                    let name = match check.name.as_str() {
+                        "Version" => "Versão instalada",
+                        "Login" => "Autenticação",
+                        "Space" => "Espaço ativo",
+                        other => other,
+                    };
+                    panel.styled_text(
+                        &format!("{}  {name}", check.outcome.indicator()),
+                        TextStyle::new().fg(check.outcome.color()).bold(),
+                    );
+                    for line in hqtui::unicode::wrap(&check.message, panel.width())
+                        .into_iter()
+                        .take(2)
+                    {
+                        panel.styled_text(&line, TextStyle::new().fg(muted));
+                    }
+                    if show_metrics {
+                        panel.spacer(Size::Cells(1));
+                    }
+                }
+            });
+            col.row(Row::new().size(Size::Cells(1)), {
+                let hits = hits.clone();
+                move |row| {
+                    row.mouse_button(
+                        ButtonOptions::new("r Executar verificações").variant(ButtonVariant::Ghost),
+                        "doctor_rerun",
+                        &hits,
+                    );
+                }
+            });
+        }
     });
 }

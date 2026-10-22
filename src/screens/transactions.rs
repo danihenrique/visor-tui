@@ -1,5 +1,3 @@
-use std::{cell::RefCell, rc::Rc};
-
 use hqtui::{
     input::{InputEvent, KeyEvent, MouseAction, MouseButton},
     prelude::*,
@@ -59,7 +57,8 @@ pub struct TransactionsScreen {
     pub loaded: bool,
     pub filters: TransactionFilters,
     pub mode: TransactionMode,
-    hitboxes: Rc<RefCell<Vec<view::Hitbox>>>,
+    hitboxes: crate::interaction::HitMap<view::Action>,
+    double_click: crate::interaction::DoubleClick,
 }
 
 impl TransactionsScreen {
@@ -73,7 +72,17 @@ impl TransactionsScreen {
         !matches!(self.mode, TransactionMode::List)
     }
 
+    pub fn reset_click_sequence(&mut self) {
+        self.double_click.reset();
+    }
+
+    pub fn invalidate_mouse(&mut self) {
+        self.hitboxes.clear();
+        self.double_click.reset();
+    }
+
     pub fn on_enter(&mut self, api: &ApiClient, period: &Period) {
+        self.invalidate_mouse();
         self.period = *period;
         self.load_initial(api);
     }
@@ -101,6 +110,7 @@ impl TransactionsScreen {
     }
 
     pub fn fetch_transactions(&mut self, api: &ApiClient) {
+        self.invalidate_mouse();
         self.loading = true;
         self.error = None;
         let previous_id = self
@@ -136,10 +146,13 @@ impl TransactionsScreen {
         self.reload_requested = true;
     }
 
-    pub fn handle_input(&mut self, _app: &App, api: &ApiClient, events: &[InputEvent]) {
+    pub fn handle_input(&mut self, api: &ApiClient, events: &[InputEvent]) {
         for event in events {
             let effect = match event {
-                InputEvent::Key(key) => self.reduce_key(key),
+                InputEvent::Key(key) => {
+                    self.double_click.reset();
+                    self.reduce_key(key)
+                }
                 InputEvent::Paste(paste) => {
                     self.insert_text(&paste.text);
                     Effect::None
@@ -147,20 +160,56 @@ impl TransactionsScreen {
                 InputEvent::Mouse(mouse)
                     if mouse.action == MouseAction::Press && mouse.button == MouseButton::Left =>
                 {
-                    let hit = self
-                        .hitboxes
-                        .borrow()
-                        .iter()
-                        .rev()
-                        .find(|hit| hit.contains(mouse.x, mouse.y))
-                        .cloned();
-                    hit.map_or(Effect::None, |hit| self.click(hit.action))
+                    let hit = self.hitboxes.at(mouse.x, mouse.y);
+                    if let Some(view::Action::Row(index)) = &hit {
+                        if self.double_click.click(*index, std::time::Instant::now()) {
+                            self.selected_index = Some(*index);
+                            self.list_key(&hqtui::input::KeyEvent {
+                                name: "enter".into(),
+                                key: "enter".into(),
+                                raw: String::new(),
+                                char: None,
+                                ctrl: false,
+                                alt: false,
+                                shift: false,
+                            })
+                        } else {
+                            hit.map_or(Effect::None, |action| self.click(action))
+                        }
+                    } else {
+                        self.double_click.reset();
+                        hit.map_or(Effect::None, |action| self.click(action))
+                    }
                 }
-                InputEvent::Mouse(mouse)
-                    if mouse.action == MouseAction::Scroll && !self.is_modal_open() =>
-                {
-                    self.move_selection(if mouse.scroll > 0 { 3 } else { -3 });
-                    Effect::None
+                InputEvent::Mouse(mouse) if mouse.action == MouseAction::Scroll => {
+                    self.double_click.reset();
+                    if self.hitboxes.at(mouse.x, mouse.y).is_none() {
+                        return;
+                    }
+                    if self.picker().is_some() {
+                        let InputEvent::Key(key) =
+                            crate::interaction::key_event(if mouse.scroll > 0 {
+                                "down"
+                            } else {
+                                "up"
+                            })
+                        else {
+                            unreachable!()
+                        };
+                        self.picker_key(&key)
+                    } else {
+                        match &mut self.mode {
+                            TransactionMode::Form(form) if form.pending_create.is_none() => {
+                                form.move_focus(mouse.scroll < 0);
+                            }
+                            TransactionMode::Filters(form) => form.move_focus(mouse.scroll < 0),
+                            TransactionMode::List => {
+                                self.move_selection(if mouse.scroll > 0 { 3 } else { -3 });
+                            }
+                            _ => {}
+                        }
+                        Effect::None
+                    }
                 }
                 _ => Effect::None,
             };
@@ -611,6 +660,7 @@ impl TransactionsScreen {
 
     fn click(&mut self, action: view::Action) -> Effect {
         match action {
+            view::Action::Scroll => Effect::None,
             view::Action::Key(key) => self.reduce_key(&KeyEvent {
                 name: key.clone(),
                 key,

@@ -1,3 +1,4 @@
+use crate::interaction::{Interactions, Interactive};
 use hqtui::input::InputEvent;
 use hqtui::prelude::*;
 use hqtui::unicode::Align;
@@ -9,6 +10,7 @@ use crate::presentation::{Metric, Tone, amount, format_currency, metric_strip, m
 
 #[derive(Default)]
 pub struct BillsScreen {
+    interactions: Interactions,
     cards: Vec<Card>,
     bills: Vec<Bill>,
     selected_card: usize,
@@ -57,7 +59,11 @@ impl BillsScreen {
         }
     }
 
-    pub fn handle_input(&mut self, app: &App, events: &[InputEvent]) {
+    pub fn handle_input(&mut self, events: &[InputEvent]) {
+        let mapped_events = self
+            .interactions
+            .list_events(events, &mut self.selected_bill);
+        let events = mapped_events.as_slice();
         let mut change = 0;
         for event in events {
             if let InputEvent::Key(key) = event {
@@ -76,10 +82,10 @@ impl BillsScreen {
                 }
             }
         }
-        if app.pressed("bills:previous") {
+        if self.interactions.pressed(events, "bills:previous") {
             change = -1;
         }
-        if app.pressed("bills:next") {
+        if self.interactions.pressed(events, "bills:next") {
             change = 1;
         }
         if change != 0 && !self.cards.is_empty() {
@@ -118,6 +124,8 @@ fn paid_ratio(bill: &Bill) -> Option<f64> {
 }
 
 pub fn render_with_state(ui: &mut Container<'_>, screen: &BillsScreen) {
+    screen.interactions.clear();
+    let hits = screen.interactions.clone();
     let theme = ui.theme().clone();
     let compact = ui.width() < 85;
     let card = screen.cards.get(screen.selected_card).map_or_else(
@@ -202,7 +210,7 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &BillsScreen) {
     let error = screen.error.clone();
     let selected = screen.selected_bill;
     let selected_bill = selected.and_then(|index| screen.bills.get(index)).cloned();
-    let show_detail = ui.height() >= 16;
+    let show_detail = ui.height() >= 22;
     let compact_detail = selected_bill.as_ref().map(|bill| {
         format!(
             "Fechamento {} · Mínimo {}",
@@ -213,90 +221,106 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &BillsScreen) {
             )
         )
     });
-    ui.column(Column::new().gap(usize::from(show_detail)), move |col| {
-        if show_detail {
-            metric_strip(col, metrics);
-        }
-        col.row(Row::new().size(Size::Cells(1)).gap(1), move |row| {
-            row.sized(Size::Cells(3), |button| {
-                button.button(ButtonOptions::new("←"), "bills:previous");
-            });
-            row.sized(Size::Fill, move |name| {
-                name.styled_text(&card, TextStyle::new().fg(theme.accent).bold());
-            });
-            row.sized(Size::Cells(3), |button| {
-                button.button(ButtonOptions::new("→"), "bills:next");
-            });
-        });
-        col.panel(
-            Panel::new()
-                .title("Faturas com vencimento no período")
-                .border(BorderStyle::Rounded)
-                .footer("←/→ Cartão  j/k Faturas  ~ Valor estimado"),
-            move |panel| {
-                if let Some(error) = error {
-                    panel.styled_text(&error, TextStyle::new().fg(theme.danger));
-                } else if rows.is_empty() {
-                    panel.text("Nenhuma fatura neste cartão.");
-                    panel.label("Use ←/→ para consultar outro cartão.");
-                } else {
-                    let mut columns = vec![
-                        TableColumn::new("Status").width(Size::Fill),
-                        TableColumn::new("Vencimento").width(Size::Cells(10)),
-                        TableColumn::new("Total")
-                            .width(Size::Cells(17))
-                            .align(Align::Right),
-                        TableColumn::new("Pago")
-                            .width(Size::Cells(17))
-                            .align(Align::Right),
-                    ];
-                    if !compact {
-                        columns.push(
-                            TableColumn::new("Mínimo")
-                                .width(Size::Cells(16))
-                                .align(Align::Right),
-                        );
-                    }
-                    panel.table(
-                        TableOptions {
-                            columns,
-                            rows,
-                            selected,
-                            follow_selection: true,
-                            scrollbar: true,
-                            header_color: Some(theme.muted),
-                            ..Default::default()
-                        },
-                        "bills:table",
-                    );
+    ui.column(Column::new().gap(usize::from(show_detail)), {
+        let hits = hits.clone();
+        move |col| {
+            if show_detail {
+                metric_strip(col, metrics);
+            }
+            col.row(Row::new().size(Size::Cells(1)).gap(1), {
+                let hits = hits.clone();
+                move |row| {
+                    row.sized(Size::Cells(3), {
+                        let hits = hits.clone();
+                        move |button| {
+                            button.mouse_button(ButtonOptions::new("←"), "bills:previous", &hits);
+                        }
+                    });
+                    row.sized(Size::Fill, move |name| {
+                        name.styled_text(&card, TextStyle::new().fg(theme.accent).bold());
+                    });
+                    row.sized(Size::Cells(3), {
+                        let hits = hits.clone();
+                        move |button| {
+                            button.mouse_button(ButtonOptions::new("→"), "bills:next", &hits);
+                        }
+                    });
                 }
-            },
-        );
-        if show_detail && let Some(bill) = selected_bill {
+            });
             col.panel(
                 Panel::new()
-                    .title("Pagamento da fatura selecionada")
+                    .title("Faturas com vencimento no período")
                     .border(BorderStyle::Rounded)
-                    .size(Size::Cells(4)),
-                move |panel| {
-                    if let Some(ratio) = paid_ratio(&bill) {
-                        panel.meter(MeterOptions::new(ratio).label("Pago").color(theme.success));
-                    } else {
-                        panel.label("Pagamento indisponível");
+                    .footer("←/→ Cartão  j/k Faturas  ~ Valor estimado"),
+                {
+                    let hits = hits.clone();
+                    move |panel| {
+                        if let Some(error) = error {
+                            panel.styled_text(&error, TextStyle::new().fg(theme.danger));
+                        } else if rows.is_empty() {
+                            panel.text("Nenhuma fatura neste cartão.");
+                            panel.label("Use ←/→ para consultar outro cartão.");
+                        } else {
+                            let mut columns = vec![
+                                TableColumn::new("Status").width(Size::Fill),
+                                TableColumn::new("Vencimento").width(Size::Cells(10)),
+                                TableColumn::new("Total")
+                                    .width(Size::Cells(17))
+                                    .align(Align::Right),
+                                TableColumn::new("Pago")
+                                    .width(Size::Cells(17))
+                                    .align(Align::Right),
+                            ];
+                            if !compact {
+                                columns.push(
+                                    TableColumn::new("Mínimo")
+                                        .width(Size::Cells(16))
+                                        .align(Align::Right),
+                                );
+                            }
+                            panel.mouse_table(
+                                TableOptions {
+                                    columns,
+                                    rows,
+                                    selected,
+                                    follow_selection: true,
+                                    scrollbar: true,
+                                    header_color: Some(theme.muted),
+                                    ..Default::default()
+                                },
+                                &hits,
+                            );
+                        }
                     }
-                    panel.label(&format!(
-                        "Fechamento {} · Mínimo {}",
-                        bill.close_date.as_deref().unwrap_or("—"),
-                        format_currency(
-                            bill.minimum_payment.as_deref(),
-                            bill.currency_code.as_deref()
-                        )
-                    ));
                 },
             );
-        }
-        if !show_detail && let Some(detail) = compact_detail {
-            col.label(&detail);
+            if show_detail && let Some(bill) = selected_bill {
+                col.panel(
+                    Panel::new()
+                        .title("Pagamento da fatura selecionada")
+                        .border(BorderStyle::Rounded)
+                        .size(Size::Cells(4)),
+                    move |panel| {
+                        if let Some(ratio) = paid_ratio(&bill) {
+                            panel
+                                .meter(MeterOptions::new(ratio).label("Pago").color(theme.success));
+                        } else {
+                            panel.label("Pagamento indisponível");
+                        }
+                        panel.label(&format!(
+                            "Fechamento {} · Mínimo {}",
+                            bill.close_date.as_deref().unwrap_or("—"),
+                            format_currency(
+                                bill.minimum_payment.as_deref(),
+                                bill.currency_code.as_deref()
+                            )
+                        ));
+                    },
+                );
+            }
+            if !show_detail && let Some(detail) = compact_detail {
+                col.label(&detail);
+            }
         }
     });
 }

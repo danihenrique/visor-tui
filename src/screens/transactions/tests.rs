@@ -6,6 +6,7 @@ use crate::{
 use hqtui::{buffer::FrameBuffer, input::InputParser};
 use model::{format_amount, parse_amount, parse_date};
 use serde_json::json;
+use std::{cell::RefCell, rc::Rc};
 
 fn transaction() -> Transaction {
     serde_json::from_value(json!({"id":"tx-1","account_id":"a-1","category_id":"c-1", "tag_ids":["t-1"],
@@ -578,7 +579,7 @@ fn rendering_keeps_focused_field_and_controls_visible_at_small_sizes() {
             text.contains("Salvar"),
             "save action hidden at {width}x{height}"
         );
-        assert!(!state.hitboxes.borrow().is_empty());
+        assert!((0..height).any(|y| (0..width).any(|x| state.hitboxes.at(x, y).is_some())));
     }
 }
 
@@ -781,11 +782,10 @@ fn selected_transaction_has_a_marker_highlight_and_click_target() {
             .expect("selection marker");
         let y = selected / width;
         assert_eq!(buffer.bg[selected + 1], theme.selection);
-        assert!(
-            state.hitboxes.borrow().iter().any(
-                |hitbox| hitbox.contains(3, y) && matches!(hitbox.action, view::Action::Row(0))
-            )
-        );
+        assert!(matches!(
+            state.hitboxes.at(3, y),
+            Some(view::Action::Row(0))
+        ));
         if width >= 65 {
             assert!(buffer.chars.chunks(width).any(|cells| {
                 cells
@@ -824,14 +824,16 @@ fn daily_headers_do_not_change_transaction_selection_or_mouse_targets() {
     keys(&mut state, "j");
     let lines = transaction_lines(&state, 93, 20);
     assert!(lines.join("\n").contains("21/10/2026"));
-    let hit = state
-        .hitboxes
-        .borrow()
-        .iter()
-        .find(|hit| matches!(hit.action, view::Action::Row(1)))
-        .cloned()
+    let hit = (0..20)
+        .flat_map(|y| (0..93).map(move |x| (x, y)))
+        .find_map(|(x, y)| {
+            state
+                .hitboxes
+                .at(x, y)
+                .filter(|action| matches!(action, view::Action::Row(1)))
+        })
         .unwrap();
-    state.click(hit.action);
+    state.click(hit);
     keys(&mut state, "e");
     assert!(
         matches!(&state.mode, TransactionMode::Form(form) if form.original.as_ref().unwrap().id == "second")
@@ -861,4 +863,43 @@ fn account_and_category_fit_actual_content_width_and_compact_totals_remain_visib
     ] {
         assert!(compact.contains(value), "missing {value}\n{compact}");
     }
+}
+
+#[test]
+fn mouse_row_double_click_opens_detail_and_modal_clicks_do_not_reach_the_list() {
+    use crate::interaction::test_support::{click, click_text};
+    let api = ApiClient::for_test(
+        "http://127.0.0.1:1",
+        Credential::PersonalToken {
+            token: "test-only".into(),
+        },
+        "s",
+    )
+    .unwrap();
+    let mut state = screen();
+    let text = transaction_lines(&state, 80, 20).join("\n");
+    let row = click_text(&text, "Mercado");
+    state.handle_input(&api, std::slice::from_ref(&row));
+    assert!(matches!(state.mode, TransactionMode::List));
+    state.handle_input(&api, &[row]);
+    assert!(matches!(state.mode, TransactionMode::Detail(_)));
+    transaction_lines(&state, 80, 20);
+    state.handle_input(&api, &[click(0, 0)]);
+    assert!(matches!(state.mode, TransactionMode::Detail(_)));
+    state.handle_input(&api, &[crate::interaction::key_event("escape")]);
+    let text = transaction_lines(&state, 80, 17).join("\n");
+    state.handle_input(&api, &[click_text(&text, "n Nova")]);
+    let text = transaction_lines(&state, 80, 17).join("\n");
+    let mut wheel = click_text(&text, "Valor");
+    if let InputEvent::Mouse(mouse) = &mut wheel {
+        mouse.action = MouseAction::Scroll;
+        mouse.scroll = 1;
+    }
+    for _ in 0..4 {
+        state.handle_input(&api, std::slice::from_ref(&wheel));
+        transaction_lines(&state, 80, 17);
+    }
+    assert!(
+        matches!(&state.mode, TransactionMode::Form(form) if form.focused == FormField::Category)
+    );
 }

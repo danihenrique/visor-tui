@@ -1,3 +1,4 @@
+use crate::interaction::{Control, Interactions, Interactive, coord};
 use hqtui::prelude::*;
 
 use crate::keymap::Screen;
@@ -198,11 +199,29 @@ fn format_minor_units(value: i128, currency: &str) -> String {
 
 #[derive(Debug, Default)]
 pub struct TableSelection {
+    pub hits: Interactions,
     index: usize,
     row_count: usize,
 }
 
 impl TableSelection {
+    pub fn handle_mouse(&mut self, events: &[hqtui::input::InputEvent]) {
+        for event in events {
+            if let Some(Control::Row(index)) = self.hits.click(event) {
+                self.index = index.min(self.row_count.saturating_sub(1));
+            }
+            if let hqtui::input::InputEvent::Mouse(mouse) = event
+                && mouse.action == hqtui::input::MouseAction::Scroll
+                && matches!(
+                    self.hits.at(mouse.x, mouse.y),
+                    Some(Control::Row(_) | Control::Scroll)
+                )
+            {
+                self.move_by(if mouse.scroll > 0 { 1 } else { -1 });
+            }
+        }
+    }
+
     pub fn set_row_count(&mut self, row_count: usize) {
         self.row_count = row_count;
         self.index = self.index.min(row_count.saturating_sub(1));
@@ -259,6 +278,28 @@ pub fn shell<'a>(
     modal_open: bool,
     content: impl FnOnce(&mut Container<'a>) + 'a,
 ) {
+    shell_interactive(
+        ui,
+        current,
+        space,
+        status,
+        period,
+        modal_open,
+        Interactions::default(),
+        content,
+    );
+}
+
+pub fn shell_interactive<'a>(
+    ui: &mut Container<'a>,
+    current: Screen,
+    space: String,
+    status: String,
+    period: String,
+    modal_open: bool,
+    hits: Interactions,
+    content: impl FnOnce(&mut Container<'a>) + 'a,
+) {
     let compact = ui.width() <= 100;
     let wide = ui.width() >= 110 && ui.height() >= 24;
     let grouped = ui.height() >= 30;
@@ -266,6 +307,7 @@ pub fn shell<'a>(
     let muted = ui.theme().muted;
     let accent = ui.theme().accent;
     let surface = ui.theme().surface;
+    let header_hits = hits.clone();
     ui.column(Column::new().gap(0), move |col| {
         col.row(
             Row::new()
@@ -277,17 +319,23 @@ pub fn shell<'a>(
                     brand.styled_text(" VISOR", TextStyle::new().fg(accent).bold());
                 });
                 header.column(Column::new().size(Size::Fill), move |title| {
-                    title.text(&format!("{}  ·  {space}", current.label()));
-                    if !short {
-                        title.styled_text(
-                            &format!("◀ {period} ▶"),
-                            TextStyle::new().fg(accent).bold(),
-                        );
+                    let label = format!("{} ▾ Telas  ·  {space}", current.label());
+                    if modal_open {
+                        title.text(&label);
+                    } else {
+                        title.sized(Size::Cells(1), move |line| {
+                            line.mouse_button(
+                                ButtonOptions::new(label).variant(ButtonVariant::Ghost),
+                                "nav:picker",
+                                &header_hits,
+                            );
+                        });
                     }
                 });
             },
         );
         col.row(Row::new().size(Size::Fill).gap(1), move |body| {
+            let nav_hits = hits.clone();
             if wide {
                 body.panel(
                     Panel::new()
@@ -296,6 +344,7 @@ pub fn shell<'a>(
                         .size(Size::Cells(26)),
                     move |nav| {
                         for screen in Screen::all() {
+                            let nav_hits = nav_hits.clone();
                             if grouped {
                                 let group = match screen {
                                     Screen::Overview => Some("FINANÇAS"),
@@ -321,19 +370,14 @@ pub fn shell<'a>(
                                 );
                             } else {
                                 nav.sized(Size::Cells(1), move |item| {
-                                    item.table(
-                                        TableOptions {
-                                            columns: vec![TableColumn::new("").width(Size::Fill)],
-                                            rows: vec![TableRow::new([label]).color(if active {
-                                                accent
-                                            } else {
-                                                muted
-                                            })],
-                                            selected: active.then_some(0),
-                                            header: false,
-                                            ..Default::default()
-                                        },
+                                    item.mouse_button(
+                                        ButtonOptions::new(label).variant(if active {
+                                            ButtonVariant::Primary
+                                        } else {
+                                            ButtonVariant::Ghost
+                                        }),
                                         &format!("nav:{}", screen.index()),
+                                        &nav_hits,
                                     );
                                 });
                             }
@@ -341,7 +385,12 @@ pub fn shell<'a>(
                     },
                 );
             }
-            body.column(Column::new().size(Size::Fill), content);
+            body.column(Column::new().size(Size::Fill).gap(0), move |main| {
+                if current.uses_period() {
+                    period_bar(main, period, hits, !modal_open);
+                }
+                main.column(Column::new().size(Size::Fill), content);
+            });
         });
         col.row(Row::new().size(Size::Cells(1)), move |footer| {
             footer.styled_text(&status, TextStyle::new().fg(muted));
@@ -374,6 +423,64 @@ pub fn shell<'a>(
     });
 }
 
+pub fn period_bar(ui: &mut Container<'_>, label: String, hits: Interactions, enabled: bool) {
+    ui.sized(Size::Cells(3), move |ui| {
+        ui.draw(move |surface| {
+            use hqtui::{
+                buffer::{Attrs, Style},
+                surface::TextOptions,
+                unicode::{Align, fit, string_width},
+            };
+            surface.fill(&Style::new().with_bg(surface.theme.surface));
+            let label_width = string_width(&label).min(surface.width().saturating_sub(12));
+            let center_width = label_width + 8;
+            let x = surface.width().saturating_sub(center_width) / 2;
+            let y = surface.height().min(2).saturating_sub(1);
+            let text = format!("◀   {}   ▶", fit(&label, label_width, Align::Center));
+            surface.text(
+                coord(x),
+                coord(y),
+                &text,
+                &TextOptions {
+                    fg: Some(surface.theme.accent),
+                    attrs: Some(Attrs::BOLD),
+                    ..Default::default()
+                },
+            );
+            let shortcuts = "[ ] T p";
+            if x + center_width + 2 + shortcuts.len() <= surface.width() {
+                surface.text(
+                    coord(x + center_width + 2),
+                    coord(y),
+                    shortcuts,
+                    &TextOptions::new().fg(surface.theme.muted),
+                );
+            } else {
+                surface.text(
+                    coord(surface.width().saturating_sub(shortcuts.len()) / 2),
+                    coord(y + 1),
+                    shortcuts,
+                    &TextOptions::new().fg(surface.theme.muted),
+                );
+            }
+            if enabled {
+                hits.add(
+                    &surface.sub(coord(x), coord(y), 3, 1),
+                    Control::Button("period:previous".into()),
+                );
+                hits.add(
+                    &surface.sub(coord(x + 4), coord(y), label_width, 1),
+                    Control::Button("period:picker".into()),
+                );
+                hits.add(
+                    &surface.sub(coord(x + center_width - 3), coord(y), 3, 1),
+                    Control::Button("period:next".into()),
+                );
+            }
+        });
+    });
+}
+
 #[must_use]
 pub fn next_row(selected: Option<usize>, count: usize, direction: i8) -> Option<usize> {
     if count == 0 {
@@ -386,53 +493,63 @@ pub fn next_row(selected: Option<usize>, count: usize, direction: i8) -> Option<
     })
 }
 
-#[must_use]
-pub fn modal_events(
-    events: &[hqtui::input::InputEvent],
-    size: hqtui::terminal::TerminalSize,
-    dialog: Option<&ModalOptions>,
-) -> Vec<hqtui::input::InputEvent> {
-    use hqtui::input::{InputEvent, KeyEvent, MouseAction, MouseButton};
-    let mut result = events.to_vec();
-    let Some(dialog) = dialog else { return result };
-    if dialog.buttons.is_empty() {
-        return result;
-    }
-    let width = dialog
-        .width
-        .unwrap_or(48)
-        .min(size.columns.saturating_sub(2));
-    let lines = dialog.message.as_deref().map_or(0, |message| {
-        hqtui::unicode::wrap(message, width.saturating_sub(4)).len()
-    });
-    let height = dialog
-        .height
-        .unwrap_or(lines + 5)
-        .min(size.rows.saturating_sub(2));
-    let left = size.columns.saturating_sub(width) / 2;
-    let top = size.rows.saturating_sub(height) / 2;
-    let widths: Vec<usize> = dialog
-        .buttons
-        .iter()
-        .map(|button| hqtui::unicode::string_width(&button.label) + 4)
-        .collect();
-    let total = widths.iter().sum::<usize>() + widths.len().saturating_sub(1) * 2;
-    let mut x = left + 1 + width.saturating_sub(2).saturating_sub(total) / 2;
-    let y = top + height.saturating_sub(3);
-    for (index, button_width) in widths.into_iter().enumerate() {
-        if events.iter().any(|event| matches!(event, InputEvent::Mouse(mouse) if mouse.action == MouseAction::Press && mouse.button == MouseButton::Left && mouse.y == y && mouse.x >= x && mouse.x < x + button_width)) {
-            let name = if index == 0 { "escape" } else { "enter" };
-            result.push(InputEvent::Key(KeyEvent { name: name.into(), key: name.into(), raw: String::new(), char: None, ctrl: false, alt: false, shift: false }));
-        }
-        x += button_width + 2;
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use hqtui::testing::render_to_text;
+
+    #[test]
+    fn shared_period_bar_is_centered_above_content_and_uses_rendered_targets() {
+        use crate::interaction::test_support::click_text;
+        for (width, height) in [(120, 40), (80, 24)] {
+            for screen in Screen::all()
+                .into_iter()
+                .filter(|screen| screen.uses_period())
+            {
+                let hits = Interactions::default();
+                let text = render_to_text(width, height, "dark", |ui| {
+                    shell_interactive(
+                        ui,
+                        screen,
+                        "Pessoal".into(),
+                        "Pronto".into(),
+                        "Outubro 2026".into(),
+                        false,
+                        hits.clone(),
+                        |content| {
+                            content.text("Receitas do período");
+                        },
+                    );
+                });
+                let period_row = text
+                    .lines()
+                    .position(|line| line.contains("Outubro 2026"))
+                    .unwrap();
+                let summary_row = text
+                    .lines()
+                    .position(|line| line.contains("Receitas do período"))
+                    .unwrap();
+                assert!(period_row >= 2 && period_row < summary_row, "{text}");
+                let line = text.lines().nth(period_row).unwrap();
+                let label_x =
+                    hqtui::unicode::string_width(&line[..line.find("Outubro 2026").unwrap()]);
+                let content_left = if width >= 110 { 27 } else { 0 };
+                let expected = content_left + (width - content_left) / 2;
+                assert!((label_x + 5).abs_diff(expected) <= 1, "{text}");
+                for (label, action) in [
+                    ("◀", "period:previous"),
+                    ("Outubro 2026", "period:picker"),
+                    ("▶", "period:next"),
+                ] {
+                    assert!(
+                        hits.pressed(&[click_text(&text, label)], action),
+                        "{label}\n{text}"
+                    );
+                }
+                assert!(hits.pressed(&[click_text(&text, "Telas")], "nav:picker"));
+            }
+        }
+    }
 
     #[test]
     fn totals_preserve_cents_and_do_not_invent_missing_money() {
@@ -597,48 +714,6 @@ mod tests {
             format_currency(Some("9999999999999999.99"), None),
             "9.999.999.999.999.999,99 BRL"
         );
-    }
-
-    #[test]
-    fn modal_mouse_buttons_match_the_rendered_cells() {
-        use hqtui::input::{InputEvent, MouseAction, MouseButton, MouseEvent};
-        let options = ModalOptions {
-            title: Some("Confirmar".into()),
-            message: Some("Deseja continuar?".into()),
-            buttons: vec![ModalButton::new("Cancelar"), ModalButton::new("Excluir")],
-            ..Default::default()
-        };
-        let screen = hqtui::testing::render_to_screen(80, 24, "dark", |ui| {
-            ui.modal(options.clone());
-        });
-        for (label, action) in [("Cancelar", "escape"), ("Excluir", "enter")] {
-            let (x, y) = screen.find(label).expect("rendered modal button");
-            let event = InputEvent::Mouse(MouseEvent {
-                action: MouseAction::Press,
-                button: MouseButton::Left,
-                x,
-                y,
-                scroll: 0,
-                ctrl: false,
-                alt: false,
-                shift: false,
-            });
-            let events = modal_events(
-                &[event],
-                hqtui::terminal::TerminalSize {
-                    columns: 80,
-                    rows: 24,
-                },
-                Some(&options),
-            );
-            assert!(
-                events
-                    .iter()
-                    .any(|event| matches!(event, InputEvent::Key(key) if key.name == action)),
-                "{label} at {x},{y}\n{}",
-                screen.text()
-            );
-        }
     }
 
     #[test]

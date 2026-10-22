@@ -1,3 +1,4 @@
+use crate::interaction::{Interactions, Interactive};
 use hqtui::input::InputEvent;
 use hqtui::prelude::*;
 use hqtui::widgets::{
@@ -82,7 +83,7 @@ pub struct GoalsScreen {
     pub delete_target_name: Option<String>,
     pub delete_target_progress: Option<String>,
     pub loaded: bool,
-    dialog: Option<ModalOptions>,
+    interactions: Interactions,
 }
 
 impl GoalsScreen {
@@ -105,7 +106,7 @@ impl GoalsScreen {
             delete_target_name: None,
             delete_target_progress: None,
             loaded: false,
-            dialog: None,
+            interactions: Interactions::default(),
         }
     }
 
@@ -156,16 +157,25 @@ impl GoalsScreen {
         }
     }
 
-    pub fn handle_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
+    pub fn handle_input(&mut self, api: &ApiClient, events: &[InputEvent]) {
         if self.modal_state != GoalModalState::None {
-            let modal_events = crate::presentation::modal_events(
-                events,
-                app.terminal.size(),
-                self.dialog.as_ref(),
-            );
-            self.handle_modal_input(app, api, &modal_events);
+            if let Some(index) = self.interactions.field(events) {
+                self.form_field = [
+                    GoalFormField::Name,
+                    GoalFormField::TargetAmount,
+                    GoalFormField::Kind,
+                    GoalFormField::TargetDate,
+                    GoalFormField::Status,
+                ][index];
+            }
+            let modal_events = self.interactions.modal_events(events);
+            self.handle_modal_input(api, &modal_events);
             return;
         }
+        let mapped_events = self
+            .interactions
+            .list_events(events, &mut self.selected_index);
+        let events = mapped_events.as_slice();
         for event in events {
             if let InputEvent::Key(k) = event {
                 if k.name == "down" || k.name == "j" {
@@ -215,16 +225,16 @@ impl GoalsScreen {
                 }
             }
         }
-        if app.pressed("goals:new") {
+        if self.interactions.pressed(events, "goals:new") {
             self.open_create_modal();
         }
-        if app.pressed("goals:edit")
+        if self.interactions.pressed(events, "goals:edit")
             && let Some(idx) = self.selected_index
             && idx < self.goals.len()
         {
             self.populate_edit_form(idx);
         }
-        if app.pressed("goals:delete")
+        if self.interactions.pressed(events, "goals:delete")
             && let Some(idx) = self.selected_index
             && idx < self.goals.len()
         {
@@ -268,7 +278,7 @@ impl GoalsScreen {
         self.modal_state = GoalModalState::Create;
     }
 
-    fn handle_modal_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
+    fn handle_modal_input(&mut self, api: &ApiClient, events: &[InputEvent]) {
         match self.modal_state {
             GoalModalState::Create | GoalModalState::Edit => {
                 let is_create = self.modal_state == GoalModalState::Create;
@@ -369,10 +379,10 @@ impl GoalsScreen {
                         }
                     }
                 }
-                if app.pressed("goal_form_cancel") {
+                if self.interactions.pressed(events, "goal_form_cancel") {
                     self.modal_state = GoalModalState::None;
                 }
-                if app.pressed("goal_form_save") {
+                if self.interactions.pressed(events, "goal_form_save") {
                     self.submit_form(api);
                 }
             }
@@ -405,13 +415,13 @@ impl GoalsScreen {
                         }
                     }
                 }
-                if app.pressed("goal_delete_cancel") {
+                if self.interactions.pressed(events, "goal_delete_cancel") {
                     self.modal_state = GoalModalState::None;
                     self.delete_target_id = None;
                     self.delete_target_name = None;
                     self.delete_target_progress = None;
                 }
-                if app.pressed("goal_delete_confirm") {
+                if self.interactions.pressed(events, "goal_delete_confirm") {
                     if let Some(ref id) = self.delete_target_id {
                         match api.delete_goal(id) {
                             Ok(()) => {
@@ -528,6 +538,8 @@ fn goal_kind(kind: Option<&str>) -> &str {
 }
 
 pub fn render_with_state(ui: &mut Container<'_>, screen: &mut GoalsScreen, api: &ApiClient) {
+    screen.interactions.clear();
+    let hits = screen.interactions.clone();
     screen.load_initial(api);
 
     let goal_count = screen.goals.len();
@@ -616,102 +628,114 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut GoalsScreen, api: 
             format!("Criada {}", goal.created_at.as_deref().unwrap_or("—")),
         ]
     });
-    ui.column(Column::new().gap(usize::from(show_detail)), move |col| {
-        if show_detail {
-            metric_strip(col, metrics);
-        }
-        col.row(Row::new().size(Size::Cells(1)).gap(1), move |row| {
-            row.button(
-                ButtonOptions::new("Nova meta (n)").variant(ButtonVariant::Primary),
-                "goals:new",
-            );
-            row.button(
-                ButtonOptions::new("Editar (e)").variant(ButtonVariant::Ghost),
-                "goals:edit",
-            );
-            row.button(
-                ButtonOptions::new("Excluir (d)").variant(ButtonVariant::Ghost),
-                "goals:delete",
-            );
-        });
-        col.panel(
-            Panel::new()
-                .title(panel_title)
-                .border(BorderStyle::Rounded)
-                .footer("j/k Selecionar  n Nova  e Editar  d Excluir"),
-            move |panel| {
-                if loading {
-                    panel.label("Carregando suas metas…");
-                } else if let Some(error) = error_msg {
-                    panel.styled_text(&error, TextStyle::new().fg(theme.danger));
-                } else if rows.is_empty() {
-                    panel.text("Dê um destino ao seu dinheiro.");
-                    panel.label("Pressione n para criar sua primeira meta.");
-                } else {
-                    panel.table(
-                        TableOptions {
-                            columns: vec![
-                                TableColumn::new("Meta").width(Size::Fill),
-                                TableColumn::new("Atual")
-                                    .width(Size::Cells(16))
-                                    .align(Align::Right),
-                                TableColumn::new("Alvo")
-                                    .width(Size::Cells(16))
-                                    .align(Align::Right),
-                                TableColumn::new("Progresso")
-                                    .width(Size::Cells(9))
-                                    .align(Align::Right),
-                            ],
-                            rows,
-                            selected,
-                            follow_selection: true,
-                            scrollbar: true,
-                            header_color: Some(theme.muted),
-                            ..Default::default()
-                        },
-                        "goals:table",
+    ui.column(Column::new().gap(usize::from(show_detail)), {
+        let hits = hits.clone();
+        move |col| {
+            if show_detail {
+                metric_strip(col, metrics);
+            }
+            col.row(Row::new().size(Size::Cells(1)).gap(1), {
+                let hits = hits.clone();
+                move |row| {
+                    row.mouse_button(
+                        ButtonOptions::new("Nova meta (n)").variant(ButtonVariant::Primary),
+                        "goals:new",
+                        &hits,
+                    );
+                    row.mouse_button(
+                        ButtonOptions::new("Editar (e)").variant(ButtonVariant::Ghost),
+                        "goals:edit",
+                        &hits,
+                    );
+                    row.mouse_button(
+                        ButtonOptions::new("Excluir (d)").variant(ButtonVariant::Ghost),
+                        "goals:delete",
+                        &hits,
                     );
                 }
-            },
-        );
-        if show_detail && let Some(goal) = selected_goal {
+            });
             col.panel(
                 Panel::new()
-                    .title(goal.name.clone())
+                    .title(panel_title)
                     .border(BorderStyle::Rounded)
-                    .size(Size::Cells(5)),
-                move |panel| {
-                    if let Some(progress) = goal_progress(&goal) {
-                        panel.meter(MeterOptions {
-                            value: progress / 100.0,
-                            text: Some(format!("{progress:.0}%")),
-                            color: Some(theme.success),
-                            ..Default::default()
-                        });
-                    } else {
-                        panel.label("Progresso indisponível");
+                    .footer("j/k Selecionar  n Nova  e Editar  d Excluir"),
+                {
+                    let hits = hits.clone();
+                    move |panel| {
+                        if loading {
+                            panel.label("Carregando suas metas…");
+                        } else if let Some(error) = error_msg {
+                            panel.styled_text(&error, TextStyle::new().fg(theme.danger));
+                        } else if rows.is_empty() {
+                            panel.text("Dê um destino ao seu dinheiro.");
+                            panel.label("Pressione n para criar sua primeira meta.");
+                        } else {
+                            panel.mouse_table(
+                                TableOptions {
+                                    columns: vec![
+                                        TableColumn::new("Meta").width(Size::Fill),
+                                        TableColumn::new("Atual")
+                                            .width(Size::Cells(16))
+                                            .align(Align::Right),
+                                        TableColumn::new("Alvo")
+                                            .width(Size::Cells(16))
+                                            .align(Align::Right),
+                                        TableColumn::new("Progresso")
+                                            .width(Size::Cells(9))
+                                            .align(Align::Right),
+                                    ],
+                                    rows,
+                                    selected,
+                                    follow_selection: true,
+                                    scrollbar: true,
+                                    header_color: Some(theme.muted),
+                                    ..Default::default()
+                                },
+                                &hits,
+                            );
+                        }
                     }
-                    panel.label(&format!(
-                        "{} · {} · Prazo {}",
-                        status_badge(goal.status.as_deref()),
-                        goal_kind(goal.kind.as_deref()),
-                        goal.target_date.as_deref().unwrap_or("não definido")
-                    ));
-                    panel.label(&format!(
-                        "Criada {}",
-                        goal.created_at.as_deref().unwrap_or("—")
-                    ));
                 },
             );
-        }
-        if !show_detail && let Some(lines) = compact_detail {
-            col.sized(Size::Cells(2), move |details| {
-                details.column(Column::new(), move |body| {
-                    for line in lines {
-                        body.label(&line);
-                    }
+            if show_detail && let Some(goal) = selected_goal {
+                col.panel(
+                    Panel::new()
+                        .title(goal.name.clone())
+                        .border(BorderStyle::Rounded)
+                        .size(Size::Cells(5)),
+                    move |panel| {
+                        if let Some(progress) = goal_progress(&goal) {
+                            panel.meter(MeterOptions {
+                                value: progress / 100.0,
+                                text: Some(format!("{progress:.0}%")),
+                                color: Some(theme.success),
+                                ..Default::default()
+                            });
+                        } else {
+                            panel.label("Progresso indisponível");
+                        }
+                        panel.label(&format!(
+                            "{} · {} · Prazo {}",
+                            status_badge(goal.status.as_deref()),
+                            goal_kind(goal.kind.as_deref()),
+                            goal.target_date.as_deref().unwrap_or("não definido")
+                        ));
+                        panel.label(&format!(
+                            "Criada {}",
+                            goal.created_at.as_deref().unwrap_or("—")
+                        ));
+                    },
+                );
+            }
+            if !show_detail && let Some(lines) = compact_detail {
+                col.sized(Size::Cells(2), move |details| {
+                    details.column(Column::new(), move |body| {
+                        for line in lines {
+                            body.label(&line);
+                        }
+                    });
                 });
-            });
+            }
         }
     });
 
@@ -755,8 +779,17 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut GoalsScreen, api: 
                 align: Some(Align::Left),
                 ..Default::default()
             };
-            screen.dialog = Some(options.clone());
-            ui.modal(options);
+            ui.mouse_modal(
+                options,
+                &[
+                    "Nome:",
+                    "Valor alvo:",
+                    "Tipo:",
+                    "Data alvo (YYYY-MM-DD):",
+                    "Status:",
+                ],
+                &screen.interactions,
+            );
         }
         GoalModalState::Edit => {
             let name_display = if form_field == GoalFormField::Name {
@@ -796,8 +829,17 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut GoalsScreen, api: 
                 align: Some(Align::Left),
                 ..Default::default()
             };
-            screen.dialog = Some(options.clone());
-            ui.modal(options);
+            ui.mouse_modal(
+                options,
+                &[
+                    "Nome:",
+                    "Valor alvo:",
+                    "Tipo:",
+                    "Data alvo (YYYY-MM-DD):",
+                    "Status:",
+                ],
+                &screen.interactions,
+            );
         }
         GoalModalState::DeleteConfirm => {
             let target = delete_target_name.unwrap_or_default();
@@ -812,8 +854,17 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut GoalsScreen, api: 
                 align: Some(Align::Left),
                 ..Default::default()
             };
-            screen.dialog = Some(options.clone());
-            ui.modal(options);
+            ui.mouse_modal(
+                options,
+                &[
+                    "Nome:",
+                    "Valor alvo:",
+                    "Tipo:",
+                    "Data alvo (YYYY-MM-DD):",
+                    "Status:",
+                ],
+                &screen.interactions,
+            );
         }
         GoalModalState::None => {}
     }

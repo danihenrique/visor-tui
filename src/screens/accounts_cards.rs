@@ -1,3 +1,4 @@
+use crate::interaction::{Control, Interactive, region};
 use hqtui::prelude::*;
 use hqtui::unicode::Align;
 
@@ -141,6 +142,8 @@ fn render_content(
     show_hidden: bool,
     selection: &mut TableSelection,
 ) {
+    selection.hits.clear();
+    let hits = selection.hits.clone();
     selection.set_row_count(accounts.len() + cards.len());
     let selected = selection.selected();
     let selected_card = selected.and_then(|index| index.checked_sub(accounts.len()));
@@ -282,74 +285,102 @@ fn render_content(
                     .unwrap_or("Instituição não informada")
             )
         });
-    ui.column(Column::new().gap(0), move |col| {
-        if !compact {
-            metric_strip(col, metrics);
-        }
-        if height >= 9 {
-            col.row(Row::new().size(Size::Cells(1)), move |row| {
-                row.checkbox(
-                    CheckboxOptions::new("Mostrar contas ocultas (h)", show_hidden),
-                    "toggle_hidden",
-                );
-            });
-        }
-        if show_accounts {
-            let size = if both_sections {
-                Size::Cells(
-                    i64::try_from((account_count + 3).min((height - 6) / 2)).unwrap_or(i64::MAX),
-                )
-            } else {
-                Size::Fill
-            };
-            col.panel(
-                Panel {
-                    footer: account_detail,
-                    ..Panel::new()
-                        .title(format!("Contas · {account_count}"))
-                        .border(BorderStyle::Rounded)
-                        .size(size)
-                },
-                move |panel| {
-                    panel.table(
-                        TableOptions {
-                            columns,
-                            rows,
-                            selected: selected.filter(|index| *index < account_count),
-                            follow_selection: true,
-                            zebra: true,
-                            scrollbar: true,
-                            ..Default::default()
-                        },
-                        "accounts_table",
-                    );
-                    if narrow && let Some(institution) = institution {
-                        panel.label(&format!("Instituição · {institution}"));
+    ui.column(Column::new().gap(0), {
+        let hits = hits.clone();
+        move |col| {
+            if !compact {
+                metric_strip(col, metrics);
+            }
+            if height >= 9 {
+                col.row(Row::new().size(Size::Cells(1)), {
+                    let hits = hits.clone();
+                    move |row| {
+                        row.mouse_button(
+                            ButtonOptions::new(if show_hidden {
+                                "[x] Mostrar contas ocultas (h)"
+                            } else {
+                                "[ ] Mostrar contas ocultas (h)"
+                            }),
+                            "toggle_hidden",
+                            &hits,
+                        );
                     }
-                },
-            );
-        }
-        if show_cards {
-            col.column(Column::new().size(Size::Fill).gap(0), move |grid| {
-                for chunk in visible_cards.chunks(card_columns) {
-                    let cards = chunk.to_vec();
-                    grid.row(Row::new().size(Size::Fill).gap(1), move |row| {
-                        for (index, card) in cards {
-                            card_panel(row, card, selected_card == Some(index));
+                });
+            }
+            if show_accounts {
+                let size = if both_sections {
+                    Size::Cells(
+                        i64::try_from((account_count + 3).min((height - 6) / 2))
+                            .unwrap_or(i64::MAX),
+                    )
+                } else {
+                    Size::Fill
+                };
+                col.panel(
+                    Panel {
+                        footer: account_detail,
+                        ..Panel::new()
+                            .title(format!("Contas · {account_count}"))
+                            .border(BorderStyle::Rounded)
+                            .size(size)
+                    },
+                    {
+                        let hits = hits.clone();
+                        move |panel| {
+                            panel.mouse_table(
+                                TableOptions {
+                                    columns,
+                                    rows,
+                                    selected: selected.filter(|index| *index < account_count),
+                                    follow_selection: true,
+                                    zebra: true,
+                                    scrollbar: true,
+                                    ..Default::default()
+                                },
+                                &hits,
+                            );
+                            if narrow && let Some(institution) = institution {
+                                panel.label(&format!("Instituição · {institution}"));
+                            }
                         }
-                    });
-                }
-            });
-        }
-        if count == 0 {
-            col.text("Nenhuma conta ou cartão encontrado.");
-        }
-        col.row(Row::new().size(Size::Cells(1)), move |footer| {
-            footer.label(&format!(
+                    },
+                );
+            }
+            if show_cards {
+                col.column(Column::new().size(Size::Fill).gap(0), {
+                    let hits = hits.clone();
+                    move |grid| {
+                        for chunk in visible_cards.chunks(card_columns) {
+                            let cards = chunk.to_vec();
+                            grid.row(Row::new().size(Size::Fill).gap(1), {
+                                let hits = hits.clone();
+                                move |row| {
+                                    for (index, card) in cards {
+                                        region(
+                                            row,
+                                            hits.clone(),
+                                            Control::Row(account_count + index),
+                                            move |cell| {
+                                                card_panel(cell, card, selected_card == Some(index));
+                                            },
+                                        );
+                                    }
+                                }
+                            });
+                        }
+                    }
+                });
+            }
+            if count == 0 {
+                col.text("Nenhuma conta ou cartão encontrado.");
+            }
+            col.row(Row::new().size(Size::Cells(1)), move |footer| {
+                footer.label(&format!(
                 "j/k Selecionar · {} de {count} · {account_count} contas · {card_count} cartões",
                 selected.map_or(0, |index| index + 1)
             ));
-        });
+            });
+        }
     });
 }
 

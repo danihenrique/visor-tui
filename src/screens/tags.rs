@@ -1,3 +1,4 @@
+use crate::interaction::{Interactions, Interactive};
 use hqtui::color::Color;
 use hqtui::input::InputEvent;
 use hqtui::prelude::*;
@@ -51,7 +52,7 @@ pub struct TagsScreen {
     pub delete_target_id: Option<String>,
     pub delete_target_name: Option<String>,
     pub loaded: bool,
-    dialog: Option<ModalOptions>,
+    interactions: Interactions,
 }
 
 impl TagsScreen {
@@ -70,7 +71,7 @@ impl TagsScreen {
             delete_target_id: None,
             delete_target_name: None,
             loaded: false,
-            dialog: None,
+            interactions: Interactions::default(),
         }
     }
 
@@ -119,16 +120,19 @@ impl TagsScreen {
         }
     }
 
-    pub fn handle_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
+    pub fn handle_input(&mut self, api: &ApiClient, events: &[InputEvent]) {
         if self.modal_state != TagModalState::None {
-            let modal_events = crate::presentation::modal_events(
-                events,
-                app.terminal.size(),
-                self.dialog.as_ref(),
-            );
-            self.handle_modal_input(app, api, &modal_events);
+            if let Some(index) = self.interactions.field(events) {
+                self.form_field = [TagFormField::Name, TagFormField::Color][index];
+            }
+            let modal_events = self.interactions.modal_events(events);
+            self.handle_modal_input(api, &modal_events);
             return;
         }
+        let mapped_events = self
+            .interactions
+            .list_events(events, &mut self.selected_index);
+        let events = mapped_events.as_slice();
 
         // Navigation within tag list
         for event in events {
@@ -186,10 +190,10 @@ impl TagsScreen {
         }
 
         // Button presses
-        if app.pressed("tags:new") {
+        if self.interactions.pressed(events, "tags:new") {
             self.open_create_modal();
         }
-        if app.pressed("tags:edit")
+        if self.interactions.pressed(events, "tags:edit")
             && let Some(idx) = self.selected_index
             && idx < self.tags.len()
         {
@@ -201,7 +205,7 @@ impl TagsScreen {
             self.form_error = None;
             self.modal_state = TagModalState::Edit;
         }
-        if app.pressed("tags:delete")
+        if self.interactions.pressed(events, "tags:delete")
             && let Some(idx) = self.selected_index
             && idx < self.tags.len()
         {
@@ -220,7 +224,7 @@ impl TagsScreen {
         self.modal_state = TagModalState::Create;
     }
 
-    fn handle_modal_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
+    fn handle_modal_input(&mut self, api: &ApiClient, events: &[InputEvent]) {
         match self.modal_state {
             TagModalState::Create | TagModalState::Edit => {
                 for event in events {
@@ -306,12 +310,12 @@ impl TagsScreen {
                         }
                     }
                 }
-                if app.pressed("tag_delete_cancel") {
+                if self.interactions.pressed(events, "tag_delete_cancel") {
                     self.modal_state = TagModalState::None;
                     self.delete_target_id = None;
                     self.delete_target_name = None;
                 }
-                if app.pressed("tag_delete_confirm") {
+                if self.interactions.pressed(events, "tag_delete_confirm") {
                     if let Some(ref id) = self.delete_target_id {
                         match api.delete_tag(id) {
                             Ok(()) => {
@@ -405,6 +409,8 @@ fn tag_row(tag: &Tag, theme: &Theme) -> TableRow {
 }
 
 pub fn render_with_state(ui: &mut Container<'_>, screen: &mut TagsScreen, api: &ApiClient) {
+    screen.interactions.clear();
+    let hits = screen.interactions.clone();
     screen.load_initial(api);
 
     let theme = ui.theme().clone();
@@ -447,51 +453,63 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut TagsScreen, api: &
     let form_error = screen.form_error.clone();
     let delete_target_name = screen.delete_target_name.clone();
 
-    ui.column(Column::new().gap(1), move |col| {
-        metric_strip(col, metrics);
-        col.row(Row::new().size(Size::Cells(1)).gap(1), move |row| {
-            row.button(
-                ButtonOptions::new("Nova tag (n)").variant(ButtonVariant::Primary),
-                "tags:new",
-            );
-            row.button(
-                ButtonOptions::new("Editar (e)").variant(ButtonVariant::Ghost),
-                "tags:edit",
-            );
-            row.button(
-                ButtonOptions::new("Excluir (d)").variant(ButtonVariant::Ghost),
-                "tags:delete",
-            );
-        });
-        col.panel(
-            Panel::new()
-                .title(panel_title)
-                .border(BorderStyle::Rounded)
-                .footer("j/k Selecionar  n Nova  e Editar  d Excluir"),
-            move |panel| {
-                if loading {
-                    panel.label("Carregando suas tags…");
-                } else if let Some(error) = error_msg {
-                    panel.styled_text(&error, TextStyle::new().fg(theme.danger));
-                } else if has_rows {
-                    panel.table(
-                        TableOptions {
-                            columns,
-                            rows: table_rows,
-                            selected,
-                            follow_selection: true,
-                            scrollbar: true,
-                            header_color: Some(theme.muted),
-                            ..Default::default()
-                        },
-                        "tags:table",
+    ui.column(Column::new().gap(1), {
+        let hits = hits.clone();
+        move |col| {
+            metric_strip(col, metrics);
+            col.row(Row::new().size(Size::Cells(1)).gap(1), {
+                let hits = hits.clone();
+                move |row| {
+                    row.mouse_button(
+                        ButtonOptions::new("Nova tag (n)").variant(ButtonVariant::Primary),
+                        "tags:new",
+                        &hits,
                     );
-                } else {
-                    panel.text("Marque lançamentos para encontrá-los depois.");
-                    panel.label("Pressione n para criar sua primeira tag.");
+                    row.mouse_button(
+                        ButtonOptions::new("Editar (e)").variant(ButtonVariant::Ghost),
+                        "tags:edit",
+                        &hits,
+                    );
+                    row.mouse_button(
+                        ButtonOptions::new("Excluir (d)").variant(ButtonVariant::Ghost),
+                        "tags:delete",
+                        &hits,
+                    );
                 }
-            },
-        );
+            });
+            col.panel(
+                Panel::new()
+                    .title(panel_title)
+                    .border(BorderStyle::Rounded)
+                    .footer("j/k Selecionar  n Nova  e Editar  d Excluir"),
+                {
+                    let hits = hits.clone();
+                    move |panel| {
+                        if loading {
+                            panel.label("Carregando suas tags…");
+                        } else if let Some(error) = error_msg {
+                            panel.styled_text(&error, TextStyle::new().fg(theme.danger));
+                        } else if has_rows {
+                            panel.mouse_table(
+                                TableOptions {
+                                    columns,
+                                    rows: table_rows,
+                                    selected,
+                                    follow_selection: true,
+                                    scrollbar: true,
+                                    header_color: Some(theme.muted),
+                                    ..Default::default()
+                                },
+                                &hits,
+                            );
+                        } else {
+                            panel.text("Marque lançamentos para encontrá-los depois.");
+                            panel.label("Pressione n para criar sua primeira tag.");
+                        }
+                    }
+                },
+            );
+        }
     });
 
     // Draw modals
@@ -520,8 +538,7 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut TagsScreen, api: &
                 align: Some(Align::Left),
                 ..Default::default()
             };
-            screen.dialog = Some(options.clone());
-            ui.modal(options);
+            ui.mouse_modal(options, &["Nome:", "Cor (hex):"], &screen.interactions);
         }
         TagModalState::Edit => {
             let name_display = if form_field == TagFormField::Name {
@@ -547,8 +564,7 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut TagsScreen, api: &
                 align: Some(Align::Left),
                 ..Default::default()
             };
-            screen.dialog = Some(options.clone());
-            ui.modal(options);
+            ui.mouse_modal(options, &["Nome:", "Cor (hex):"], &screen.interactions);
         }
         TagModalState::DeleteConfirm => {
             let target = delete_target_name.unwrap_or_default();
@@ -562,8 +578,7 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut TagsScreen, api: &
                 align: Some(Align::Left),
                 ..Default::default()
             };
-            screen.dialog = Some(options.clone());
-            ui.modal(options);
+            ui.mouse_modal(options, &["Nome:", "Cor (hex):"], &screen.interactions);
         }
         TagModalState::None => {}
     }
@@ -572,6 +587,48 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut TagsScreen, api: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mouse_focus_submit_cancel_and_outside_click_stay_in_the_tag_modal() {
+        use crate::interaction::{key_event, test_support::click_text};
+        let api = ApiClient::for_test(
+            "http://127.0.0.1:1",
+            crate::auth::Credential::PersonalToken {
+                token: "test-only".into(),
+            },
+            "s",
+        )
+        .unwrap();
+        let mut screen = TagsScreen {
+            loaded: true,
+            ..TagsScreen::new()
+        };
+        for (width, height) in [(120, 40), (80, 24)] {
+            screen.handle_input(&api, &[key_event("n")]);
+            let text = hqtui::testing::render_to_text(width, height, "dark", |ui| {
+                render_with_state(ui, &mut screen, &api);
+            });
+            screen.handle_input(&api, &[click_text(&text, "Cor (hex):")]);
+            assert_eq!(screen.form_field, TagFormField::Color);
+            screen.paste_text("#123456");
+            screen.handle_input(&api, &[click_text(&text, "Salvar")]);
+            assert!(
+                screen
+                    .form_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("obrigat")),
+                "{text}"
+            );
+            assert_eq!(screen.form_color, "#123456");
+            screen.handle_input(&api, &[crate::interaction::test_support::click(0, 0)]);
+            assert_eq!(screen.modal_state, TagModalState::Create);
+            let text = hqtui::testing::render_to_text(width, height, "dark", |ui| {
+                render_with_state(ui, &mut screen, &api);
+            });
+            screen.handle_input(&api, &[click_text(&text, "Cancelar")]);
+            assert_eq!(screen.modal_state, TagModalState::None);
+        }
+    }
 
     #[test]
     fn tag_colors_are_native_cells_without_escape_sequences() {

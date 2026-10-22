@@ -1,3 +1,4 @@
+use crate::interaction::{Interactions, Interactive};
 use hqtui::input::InputEvent;
 use hqtui::prelude::*;
 use hqtui::unicode::Align;
@@ -69,7 +70,7 @@ pub struct CategoriesScreen {
     pub include_hidden: bool,
     pub loaded: bool,
     pub reload_requested: bool,
-    dialog: Option<ModalOptions>,
+    interactions: Interactions,
 }
 
 impl CategoriesScreen {
@@ -93,7 +94,7 @@ impl CategoriesScreen {
             include_hidden: false,
             loaded: false,
             reload_requested: false,
-            dialog: None,
+            interactions: Interactions::default(),
         }
     }
 
@@ -145,16 +146,25 @@ impl CategoriesScreen {
         }
     }
 
-    pub fn handle_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
+    pub fn handle_input(&mut self, api: &ApiClient, events: &[InputEvent]) {
         if self.modal_state != CategoryModalState::None {
-            let modal_events = crate::presentation::modal_events(
-                events,
-                app.terminal.size(),
-                self.dialog.as_ref(),
-            );
-            self.handle_modal_input(app, api, &modal_events);
+            if let Some(index) = self.interactions.field(events) {
+                self.form_field = [
+                    CategoryFormField::Name,
+                    CategoryFormField::Type,
+                    CategoryFormField::Parent,
+                    CategoryFormField::Kind,
+                    CategoryFormField::Hidden,
+                ][index];
+            }
+            let modal_events = self.interactions.modal_events(events);
+            self.handle_modal_input(api, &modal_events);
             return;
         }
+        let mapped_events = self
+            .interactions
+            .list_events(events, &mut self.selected_index);
+        let events = mapped_events.as_slice();
 
         for event in events {
             if let InputEvent::Key(k) = event {
@@ -199,13 +209,13 @@ impl CategoriesScreen {
         }
 
         // Button presses
-        if app.pressed("categories:new") {
+        if self.interactions.pressed(events, "categories:new") {
             self.open_create_modal();
         }
-        if app.pressed("categories:edit") {
+        if self.interactions.pressed(events, "categories:edit") {
             self.open_edit_modal();
         }
-        if app.pressed("categories:delete") {
+        if self.interactions.pressed(events, "categories:delete") {
             self.open_delete_confirm();
         }
     }
@@ -251,7 +261,7 @@ impl CategoriesScreen {
         }
     }
 
-    fn handle_modal_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
+    fn handle_modal_input(&mut self, api: &ApiClient, events: &[InputEvent]) {
         match self.modal_state {
             CategoryModalState::Create | CategoryModalState::Edit => {
                 for event in events {
@@ -361,12 +371,12 @@ impl CategoriesScreen {
                         }
                     }
                 }
-                if app.pressed("cat_delete_cancel") {
+                if self.interactions.pressed(events, "cat_delete_cancel") {
                     self.modal_state = CategoryModalState::None;
                     self.delete_target_id = None;
                     self.delete_target_name = None;
                 }
-                if app.pressed("cat_delete_confirm") {
+                if self.interactions.pressed(events, "cat_delete_confirm") {
                     self.execute_delete(api);
                 }
             }
@@ -555,6 +565,8 @@ pub fn render_with_period(
     screen: &mut CategoriesScreen,
     transactions: &Result<std::sync::Arc<[crate::models::Transaction]>, String>,
 ) {
+    screen.interactions.clear();
+    let hits = screen.interactions.clone();
     let summary = transactions
         .as_ref()
         .map(|rows| crate::period::summarize(rows));
@@ -637,70 +649,82 @@ pub fn render_with_period(
     let form_error = screen.form_error.clone();
     let delete_target_name = screen.delete_target_name.clone();
 
-    ui.column(Column::new().gap(1), move |col| {
-        if let Some(summary) = &period_summary {
-            crate::presentation::period_summary(col, summary, transaction_count);
-        }
-        if let Some(error) = &period_error {
-            col.label(&format!("Período indisponível. {error}"));
-        }
-        col.row(Row::new().size(Size::Cells(1)).gap(1), move |row| {
-            row.button(
-                ButtonOptions::new("Nova categoria (n)").variant(ButtonVariant::Primary),
-                "categories:new",
-            );
-            row.button(
-                ButtonOptions::new("Editar (e)").variant(ButtonVariant::Ghost),
-                "categories:edit",
-            );
-            row.button(
-                ButtonOptions::new("Excluir (d)").variant(ButtonVariant::Ghost),
-                "categories:delete",
-            );
-        });
-        col.panel(
-            Panel::new()
-                .title(panel_title)
-                .border(BorderStyle::Rounded)
-                .footer("j/k Selecionar  n Nova  e Editar  d Excluir"),
-            move |panel| {
-                if loading {
-                    panel.label("Carregando suas categorias…");
-                } else if let Some(error) = error_msg {
-                    panel.styled_text(&error, TextStyle::new().fg(theme.danger));
-                } else if has_rows {
-                    panel.table(
-                        TableOptions {
-                            columns,
-                            rows: table_rows,
-                            selected,
-                            follow_selection: true,
-                            scrollbar: true,
-                            header_color: Some(theme.muted),
-                            ..Default::default()
-                        },
-                        "categories:table",
+    ui.column(Column::new().gap(1), {
+        let hits = hits.clone();
+        move |col| {
+            if let Some(summary) = &period_summary {
+                crate::presentation::period_summary(col, summary, transaction_count);
+            }
+            if let Some(error) = &period_error {
+                col.label(&format!("Período indisponível. {error}"));
+            }
+            col.row(Row::new().size(Size::Cells(1)).gap(1), {
+                let hits = hits.clone();
+                move |row| {
+                    row.mouse_button(
+                        ButtonOptions::new("Nova categoria (n)").variant(ButtonVariant::Primary),
+                        "categories:new",
+                        &hits,
                     );
-                } else {
-                    panel.text("Organize seus lançamentos por categoria.");
-                    panel.label("Pressione n para criar sua primeira categoria.");
+                    row.mouse_button(
+                        ButtonOptions::new("Editar (e)").variant(ButtonVariant::Ghost),
+                        "categories:edit",
+                        &hits,
+                    );
+                    row.mouse_button(
+                        ButtonOptions::new("Excluir (d)").variant(ButtonVariant::Ghost),
+                        "categories:delete",
+                        &hits,
+                    );
                 }
-            },
-        );
-        if let Some((name, values)) = selected_spending
-            && !values.is_empty()
-        {
-            col.sized(
-                Size::Cells(i64::try_from(values.len() + 1).unwrap_or(i64::MAX)),
-                move |detail| {
-                    detail.column(Column::new(), move |body| {
-                        body.label(&format!("Gastos diretos · {name}"));
-                        for value in values {
-                            body.text(&value);
+            });
+            col.panel(
+                Panel::new()
+                    .title(panel_title)
+                    .border(BorderStyle::Rounded)
+                    .footer("j/k Selecionar  n Nova  e Editar  d Excluir"),
+                {
+                    let hits = hits.clone();
+                    move |panel| {
+                        if loading {
+                            panel.label("Carregando suas categorias…");
+                        } else if let Some(error) = error_msg {
+                            panel.styled_text(&error, TextStyle::new().fg(theme.danger));
+                        } else if has_rows {
+                            panel.mouse_table(
+                                TableOptions {
+                                    columns,
+                                    rows: table_rows,
+                                    selected,
+                                    follow_selection: true,
+                                    scrollbar: true,
+                                    header_color: Some(theme.muted),
+                                    ..Default::default()
+                                },
+                                &hits,
+                            );
+                        } else {
+                            panel.text("Organize seus lançamentos por categoria.");
+                            panel.label("Pressione n para criar sua primeira categoria.");
                         }
-                    });
+                    }
                 },
             );
+            if let Some((name, values)) = selected_spending
+                && !values.is_empty()
+            {
+                col.sized(
+                    Size::Cells(i64::try_from(values.len() + 1).unwrap_or(i64::MAX)),
+                    move |detail| {
+                        detail.column(Column::new(), move |body| {
+                            body.label(&format!("Gastos diretos · {name}"));
+                            for value in values {
+                                body.text(&value);
+                            }
+                        });
+                    },
+                );
+            }
         }
     });
 
@@ -763,8 +787,11 @@ pub fn render_with_period(
                 align: Some(Align::Left),
                 ..Default::default()
             };
-            screen.dialog = Some(options.clone());
-            ui.modal(options);
+            ui.mouse_modal(
+                options,
+                &["Nome:", "Tipo:", "Pai (ID):", "Kind:", "Oculta:"],
+                &screen.interactions,
+            );
         }
         CategoryModalState::DeleteConfirm => {
             let target = delete_target_name.unwrap_or_default();
@@ -778,8 +805,11 @@ pub fn render_with_period(
                 align: Some(Align::Left),
                 ..Default::default()
             };
-            screen.dialog = Some(options.clone());
-            ui.modal(options);
+            ui.mouse_modal(
+                options,
+                &["Nome:", "Tipo:", "Pai (ID):", "Kind:", "Oculta:"],
+                &screen.interactions,
+            );
         }
         CategoryModalState::None => {}
     }

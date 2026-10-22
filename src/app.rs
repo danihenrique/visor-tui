@@ -1,3 +1,4 @@
+use crate::interaction::{Control, Interactions, Interactive, key_event};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -16,9 +17,12 @@ use crate::screens::period_picker::{PeriodPicker, PickerOutcome};
 #[allow(clippy::struct_excessive_bools)]
 pub struct VisorApp {
     app: App,
+    hits: Interactions,
+    rendered_size: Option<(usize, usize)>,
     screen: Screen,
     api: Option<Rc<ApiClient>>,
     show_help: bool,
+    screen_selector: Option<usize>,
     login_token_input: String,
     login_error: Option<String>,
     space_selector_visible: bool,
@@ -75,6 +79,14 @@ fn parse_env_token(contents: &str) -> Option<auth::Credential> {
 impl VisorApp {
     pub fn new() -> std::io::Result<Self> {
         let mut app = App::with_options(AppOptions {
+            terminal: hqtui::terminal::TerminalOptions {
+                mouse: Some(true),
+                capabilities: hqtui::capabilities::CapabilityOverrides {
+                    mouse: Some(true),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             quit_keys: vec!["ctrl+c".into()],
             focus_navigation: false,
             ..AppOptions::default()
@@ -116,9 +128,12 @@ impl VisorApp {
 
         Ok(Self {
             app,
+            hits: Interactions::default(),
+            rendered_size: None,
             screen: Screen::Overview,
             api,
             show_help: false,
+            screen_selector: None,
             login_token_input: String::new(),
             login_error: None,
             space_selector_visible,
@@ -155,7 +170,15 @@ impl VisorApp {
     pub fn run(&mut self) -> std::io::Result<()> {
         while self.app.running() {
             let events = self.app.poll()?;
-            self.handle_input(&events);
+            let size = self.app.terminal.size();
+            if self.rendered_size != Some((size.columns, size.rows)) {
+                self.transactions_screen.borrow_mut().invalidate_mouse();
+                self.draw()?;
+            }
+            for event in events {
+                self.handle_input(std::slice::from_ref(&event));
+                self.draw()?;
+            }
             self.draw()?;
         }
         Ok(())
@@ -163,6 +186,47 @@ impl VisorApp {
 
     fn handle_input(&mut self, events: &[InputEvent]) {
         for event in events {
+            if let Some(selected) = self.screen_selector {
+                match event {
+                    InputEvent::Key(key) => match key.name.as_str() {
+                        "escape" => self.screen_selector = None,
+                        "enter" => {
+                            self.screen_selector = None;
+                            if let Some(screen) = Screen::from_index(selected) {
+                                self.enter_screen(screen);
+                            }
+                        }
+                        "down" | "j" => {
+                            self.screen_selector = Some((selected + 1).min(Screen::all().len() - 1));
+                        }
+                        "up" | "k" => self.screen_selector = Some(selected.saturating_sub(1)),
+                        _ => {}
+                    },
+                    InputEvent::Mouse(mouse) => match self.hits.click(event) {
+                        Some(Control::Field(index)) => {
+                            self.screen_selector = None;
+                            if let Some(screen) = Screen::from_index(index) {
+                                self.enter_screen(screen);
+                            }
+                        }
+                        Some(Control::Button(_)) => self.screen_selector = None,
+                        _ if mouse.action == hqtui::input::MouseAction::Scroll => {
+                            self.screen_selector = Some(
+                                selected
+                                    .saturating_add_signed(if mouse.scroll > 0 { 1 } else { -1 })
+                                    .min(Screen::all().len() - 1),
+                            );
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                }
+                continue;
+            }
+            if matches!(event, InputEvent::Mouse(_)) && self.period_picker.is_none() {
+                self.handle_mouse(event);
+                continue;
+            }
             if let Some(picker) = &mut self.period_picker {
                 match picker.handle_input(std::slice::from_ref(event)) {
                     PickerOutcome::Editing => {}
@@ -197,6 +261,7 @@ impl VisorApp {
                 continue;
             }
             if let InputEvent::Key(key) = event {
+                self.transactions_screen.borrow_mut().reset_click_sequence();
                 if self.show_help {
                     if matches!(key.name.as_str(), "escape" | "enter" | "q" | "?") {
                         self.show_help = false;
@@ -257,41 +322,71 @@ impl VisorApp {
                 }
             }
         }
-        let mouse_events: Vec<_> = events
-            .iter()
-            .filter(|event| matches!(event, InputEvent::Mouse(_)))
-            .cloned()
-            .collect();
-        if mouse_events.is_empty() {
-            return;
-        }
-        if self.period_picker.is_some() {
-            return;
-        }
+    }
+
+    fn handle_mouse(&mut self, event: &InputEvent) {
+        let events = std::slice::from_ref(event);
         if self.show_help {
-            if mouse_events.iter().any(|event| matches!(event, InputEvent::Mouse(mouse) if mouse.action == hqtui::input::MouseAction::Press)) { self.show_help = false; }
-        } else if self.space_selector_visible {
-            for index in 0..self.spaces.len() {
-                if self.app.pressed(&format!("space:{index}")) {
-                    self.select_space(index);
-                    break;
-                }
+            if self.hits.pressed(events, "enter") || self.hits.pressed(events, "escape") {
+                self.show_help = false;
             }
-        } else if self.modal_open() {
-            self.dispatch_screen(&mouse_events);
-        } else if self.api.is_some() {
-            for screen in Screen::all() {
-                if self.app.pressed(&format!("nav:{}", screen.index())) {
-                    self.enter_screen(screen);
-                    return;
-                }
-            }
-            self.dispatch_screen(&mouse_events);
+            return;
         }
+        if self.space_selector_visible {
+            if let Some(Control::Button(id)) = self.hits.click(event)
+                && let Some(index) = id
+                    .strip_prefix("space:")
+                    .and_then(|index| index.parse().ok())
+            {
+                self.select_space(index);
+            }
+            if let InputEvent::Mouse(mouse) = event
+                && mouse.action == hqtui::input::MouseAction::Scroll
+            {
+                self.selected_space = self
+                    .selected_space
+                    .saturating_add_signed(if mouse.scroll > 0 { 1 } else { -1 })
+                    .min(self.spaces.len().saturating_sub(1));
+            }
+            return;
+        }
+        if self.api.is_none() {
+            if self.hits.pressed(events, "login")
+                && let InputEvent::Key(key) = key_event("enter")
+            {
+                self.handle_login_key(&key);
+            }
+            return;
+        }
+        if self.modal_open() {
+            self.dispatch_screen(events);
+            return;
+        }
+        if let Some(Control::Button(id)) = self.hits.click(event) {
+            self.transactions_screen.borrow_mut().reset_click_sequence();
+            match id.as_str() {
+                "nav:picker" => self.screen_selector = Some(self.screen.index()),
+                "period:previous" => self.set_period(self.period.previous_month()),
+                "period:next" => self.set_period(self.period.next_month()),
+                "period:picker" => self.period_picker = Some(PeriodPicker::new(&self.period)),
+                _ => {
+                    if let Some(screen) = id
+                        .strip_prefix("nav:")
+                        .and_then(|index| index.parse().ok())
+                        .and_then(Screen::from_index)
+                    {
+                        self.enter_screen(screen);
+                    }
+                }
+            }
+            return;
+        }
+        self.dispatch_screen(events);
     }
 
     fn set_period(&mut self, period: Period) {
         if self.period != period {
+            self.transactions_screen.borrow_mut().invalidate_mouse();
             self.period = period;
             self.period_transactions = Err("Carregando…".into());
             self.summary_selection = presentation::TableSelection::default();
@@ -303,6 +398,7 @@ impl VisorApp {
 
     fn enter_screen(&mut self, screen: Screen) {
         if self.screen != screen {
+            self.transactions_screen.borrow_mut().invalidate_mouse();
             self.screen = screen;
             self.summary_selection = presentation::TableSelection::default();
             self.enter_pending = true;
@@ -310,7 +406,7 @@ impl VisorApp {
     }
 
     fn modal_open(&self) -> bool {
-        if self.period_picker.is_some() {
+        if self.period_picker.is_some() || self.screen_selector.is_some() {
             return true;
         }
         match self.screen {
@@ -348,6 +444,7 @@ impl VisorApp {
                 | Screen::Settings
         ) && !self.modal_open()
         {
+            self.summary_selection.handle_mouse(events);
             if pressed_key(events, "j") || pressed_key(events, "down") {
                 self.summary_selection.move_by(1);
             }
@@ -359,35 +456,32 @@ impl VisorApp {
             Screen::Transactions => self
                 .transactions_screen
                 .borrow_mut()
-                .handle_input(&self.app, &api, events),
-            Screen::Tags => self
-                .tags_screen
-                .borrow_mut()
-                .handle_input(&self.app, &api, events),
-            Screen::Goals => self
-                .goals_screen
-                .borrow_mut()
-                .handle_input(&self.app, &api, events),
+                .handle_input(&api, events),
+            Screen::Tags => self.tags_screen.borrow_mut().handle_input(&api, events),
+            Screen::Goals => self.goals_screen.borrow_mut().handle_input(&api, events),
             Screen::Categories => self
                 .categories_screen
                 .borrow_mut()
-                .handle_input(&self.app, &api, events),
+                .handle_input(&api, events),
             Screen::Recurring => self
                 .recurring_screen
                 .borrow_mut()
-                .handle_input(&self.app, &api, events),
+                .handle_input(&api, events),
             Screen::Notifications => self
                 .notifications_screen
                 .borrow_mut()
-                .handle_input(&self.app, &api, events),
+                .handle_input(&api, events),
             Screen::Connections => self
                 .connections_screen
                 .borrow_mut()
-                .handle_input(&self.app, &api, events),
-            Screen::Bills => self.bills_screen.handle_input(&self.app, events),
-            Screen::Payables => self.payables_screen.handle_input(&self.app, events),
+                .handle_input(&api, events),
+            Screen::Bills => self.bills_screen.handle_input(events),
+            Screen::Payables => self.payables_screen.handle_input(events),
             Screen::AccountsCards => {
-                if pressed_key(events, "h") || self.app.pressed("toggle_hidden") {
+                self.account_selection.handle_mouse(events);
+                if pressed_key(events, "h")
+                    || self.account_selection.hits.pressed(events, "toggle_hidden")
+                {
                     self.show_hidden_accounts = !self.show_hidden_accounts;
                     self.enter_pending = true;
                 }
@@ -399,7 +493,7 @@ impl VisorApp {
                 }
             }
             Screen::Doctor => {
-                if self.app.pressed("doctor_rerun") {
+                if self.summary_selection.hits.pressed(events, "doctor_rerun") {
                     self.enter_pending = true;
                 }
             }
@@ -416,30 +510,34 @@ impl VisorApp {
     }
 
     fn handle_settings(&mut self, events: &[InputEvent]) {
-        let modal_events = presentation::modal_events(
-            events,
-            self.app.terminal.size(),
-            Some(&screens::settings::logout_dialog()),
-        );
-        let events = modal_events.as_slice();
+        let modal_events;
+        let events = if self.settings_modal == screens::settings::SettingsModal::LogoutConfirm {
+            modal_events = self.summary_selection.hits.modal_events(events);
+            modal_events.as_slice()
+        } else {
+            events
+        };
         match self.settings_modal {
             screens::settings::SettingsModal::None => {
-                if pressed_key(events, "l") || self.app.pressed("logout") {
+                if pressed_key(events, "l") || self.summary_selection.hits.pressed(events, "logout")
+                {
                     self.settings_modal = screens::settings::SettingsModal::LogoutConfirm;
                 }
-                if pressed_key(events, "s") || self.app.pressed("change_space") {
+                if pressed_key(events, "s")
+                    || self.summary_selection.hits.pressed(events, "change_space")
+                {
                     self.space_selector_visible = true;
                 }
             }
             screens::settings::SettingsModal::LogoutConfirm => {
                 if pressed_key(events, "escape")
                     || pressed_key(events, "n")
-                    || self.app.pressed("Cancelar")
+                    || self.summary_selection.hits.pressed(events, "Cancelar")
                 {
                     self.settings_modal = screens::settings::SettingsModal::None;
                 } else if pressed_key(events, "enter")
                     || pressed_key(events, "y")
-                    || self.app.pressed("Sair")
+                    || self.summary_selection.hits.pressed(events, "Sair")
                 {
                     let _ = auth::clear_credential();
                     self.api = None;
@@ -618,6 +716,9 @@ impl VisorApp {
     }
 
     fn draw(&mut self) -> std::io::Result<()> {
+        self.hits.clear();
+        let size = self.app.terminal.size();
+        self.rendered_size = Some((size.columns, size.rows));
         if self.api.is_none() {
             return self.draw_login_screen();
         }
@@ -643,12 +744,16 @@ impl VisorApp {
             self.load_screen();
         }
 
+        let hits = self.hits.clone();
+        let help_hits = self.hits.clone();
         let current = self.screen;
         let period = self.period;
         let period_picker = self.period_picker.clone();
         let period_transactions = self.period_transactions.clone();
         let overview = self.overview.clone();
         let show_help = self.show_help;
+        let screen_selector = self.screen_selector;
+        let menu_hits = self.hits.clone();
         let modal_open = self.modal_open() || show_help;
         let api = Rc::clone(self.api.as_ref().expect("authenticated screen"));
         let api_after_draw = Rc::clone(&api);
@@ -674,39 +779,51 @@ impl VisorApp {
         let show_hidden = self.show_hidden_accounts;
         let account_selection = &mut self.account_selection;
         let summary_selection = &mut self.summary_selection;
+        account_selection.hits.clear();
+        summary_selection.hits.clear();
         let bills_screen = &self.bills_screen;
         let payables_screen = &mut self.payables_screen;
         self.app.draw(move |frame| {
-            presentation::shell(frame.ui, current, space, status, period.label(), modal_open, move |panel| {
+            presentation::shell_interactive(frame.ui, current, space, status, period.label(), modal_open, hits, move |panel| {
                 match current {
-                    Screen::Overview => screens::overview::draw_selected_period(panel, &overview, &period_transactions, summary_selection),
+                    Screen::Overview => crate::interaction::region(panel, summary_selection.hits.clone(), Control::Scroll, move |panel| screens::overview::draw_selected_period(panel, &overview, &period_transactions, summary_selection)),
                     Screen::Transactions => screens::transactions::render_with_state(panel, &mut tx_screen.borrow_mut(), &api),
                     Screen::Recurring => screens::recurring::render_with_state(panel, &mut recurring_screen.borrow_mut(), &api),
-                    Screen::CashFlow => screens::cash_flow::render_selected_period(panel, &overview, &period_transactions, summary_selection),
-                    Screen::AccountsCards => screens::accounts_cards::render_scrolled(panel, &api, show_hidden, account_selection),
+                    Screen::CashFlow => crate::interaction::region(panel, summary_selection.hits.clone(), Control::Scroll, move |panel| screens::cash_flow::render_selected_period(panel, &overview, &period_transactions, summary_selection)),
+                    Screen::AccountsCards => crate::interaction::region(panel, account_selection.hits.clone(), Control::Scroll, move |panel| screens::accounts_cards::render_scrolled(panel, &api, show_hidden, account_selection)),
                     Screen::Categories => screens::categories::render_with_period(panel, &mut categories_screen.borrow_mut(), &period_transactions),
                     Screen::Goals => screens::goals::render_with_state(panel, &mut goals_screen.borrow_mut(), &api),
-                    Screen::Projection => screens::projection::render_scrolled(panel, &api, summary_selection),
-                    Screen::NetWorth => screens::net_worth::render_scrolled(panel, &api, summary_selection),
+                    Screen::Projection => crate::interaction::region(panel, summary_selection.hits.clone(), Control::Scroll, move |panel| screens::projection::render_scrolled(panel, &api, summary_selection)),
+                    Screen::NetWorth => crate::interaction::region(panel, summary_selection.hits.clone(), Control::Scroll, move |panel| screens::net_worth::render_scrolled(panel, &api, summary_selection)),
                     Screen::Bills => screens::bills::render_with_state(panel, bills_screen),
                     Screen::Payables => screens::payables::render_with_state(panel, payables_screen),
                     Screen::Tags => screens::tags::render_with_state(panel, &mut tags_screen.borrow_mut(), &api),
                     Screen::Notifications => screens::notifications::render_with_state(panel, &mut notifications_screen.borrow_mut(), &api),
                     Screen::Connections => screens::connections::render_with_state(panel, &mut connections_screen.borrow_mut(), &api),
-                    Screen::Settings => screens::settings::render_scrolled(panel, &api, settings_modal, summary_selection),
-                    Screen::Doctor => screens::doctor::render(panel, &doctor_state),
+                    Screen::Settings => {
+                        if settings_modal == screens::settings::SettingsModal::None {
+                            crate::interaction::region(panel, summary_selection.hits.clone(), Control::Scroll, move |panel| screens::settings::render_scrolled(panel, &api, settings_modal, summary_selection));
+                        } else { screens::settings::render_scrolled(panel, &api, settings_modal, summary_selection); }
+                    },
+                    Screen::Doctor => screens::doctor::render_interactive(panel, &doctor_state, &summary_selection.hits),
                 }
             });
             if let Some(picker) = period_picker { picker.render(frame.ui); }
+            if let Some(selected) = screen_selector {
+                let screens = Screen::all();
+                let labels: Vec<_> = screens.iter().map(|screen| screen.label()).collect();
+                let message = screens.iter().enumerate().map(|(index, screen)| format!("{} {}", if index == selected { "›" } else { " " }, screen.label())).collect::<Vec<_>>().join("\n");
+                frame.ui.mouse_modal(ModalOptions { title: Some("Telas".into()), message: Some(message), width: Some(50), align: Some(Align::Left), buttons: vec![ModalButton::new("Cancelar")], ..Default::default() }, &labels, &menu_hits);
+            }
             if show_help {
-                frame.ui.modal(ModalOptions {
+                frame.ui.mouse_modal(ModalOptions {
                     title: Some(format!("Ajuda · {}", current.label())),
                     width: Some(80),
                     align: Some(hqtui::unicode::Align::Left),
                     message: Some(format!("{}\n\nTab / Shift+Tab  Próxima / anterior tela\n1–9,0,-,t,N,x,=,D  Ir para tela\nr Atualizar  ? Ajuda  q Sair\n[ / ] Mês anterior / seguinte  T Mês atual\np Período: Mês, Semana, Trimestre, Ano, Personalizado\n←/→ ou h/l mudam o mês quando não usados pela tela\nTotais separados por moeda original; sem conversão cambial.\nIgnorados não entram nos totais. R receitas / D despesas.\n\nFormulários: Tab / Shift+Tab campos\nEnter / Ctrl+S salvar  Esc voltar\n\nEsc ou Enter para fechar", current.help())),
-                    buttons: vec![],
+                    buttons: vec![ModalButton::new("Fechar")],
                     ..Default::default()
-                });
+                }, &[], &help_hits);
             }
         })?;
         api_after_draw.set_fetch_allowed(false);
@@ -717,6 +834,7 @@ impl VisorApp {
     fn draw_login_screen(&mut self) -> std::io::Result<()> {
         let token_display = "*".repeat(self.login_token_input.len());
         let error_msg = self.login_error.clone();
+        let hits = self.hits.clone();
 
         self.app.draw(move |f| {
             f.ui.column(Column::new().gap(1), move |col| {
@@ -727,6 +845,9 @@ impl VisorApp {
                         p.styled_text(err, TextStyle::new().fg(Color::rgb(239, 68, 68)));
                     }
                     p.divider(DividerOptions::default());
+                    p.sized(Size::Cells(1), move |button| {
+                        button.mouse_button(ButtonOptions::new("Entrar · Enter"), "login", &hits);
+                    });
                     p.text("Enter para validar | Ctrl+C para sair");
                     p.text("O token ser\u{e1} salvo em ~/.config/visor/credentials.json");
                 });
@@ -736,6 +857,7 @@ impl VisorApp {
     }
 
     fn draw_space_selector(&mut self) -> std::io::Result<()> {
+        let hits = self.hits.clone();
         let spaces = self.spaces.clone();
         let selected_space = self.selected_space;
         let error = self.login_error.clone();
@@ -762,14 +884,19 @@ impl VisorApp {
                         .take(visible_rows)
                     {
                         let id = format!("space:{i}");
-                        p.button(
-                            ButtonOptions::new(item).variant(if i == selected_space {
-                                ButtonVariant::Primary
-                            } else {
-                                ButtonVariant::Ghost
-                            }),
-                            &id,
-                        );
+                        let item = item.clone();
+                        let hits = hits.clone();
+                        p.sized(Size::Cells(1), move |button| {
+                            button.mouse_button(
+                                ButtonOptions::new(item).variant(if i == selected_space {
+                                    ButtonVariant::Primary
+                                } else {
+                                    ButtonVariant::Ghost
+                                }),
+                                &id,
+                                &hits,
+                            );
+                        });
                     }
                     p.divider(DividerOptions::default());
                     p.text("↑/↓ Selecionar | Enter Abrir | Esc Voltar");

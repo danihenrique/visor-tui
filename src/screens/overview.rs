@@ -1,3 +1,4 @@
+use crate::interaction::{Interactions, Interactive};
 use std::sync::Arc;
 
 use hqtui::prelude::*;
@@ -13,6 +14,8 @@ pub fn draw_selected_period(
     transactions: &Result<Arc<[Transaction]>, String>,
     selection: &mut TableSelection,
 ) {
+    selection.hits.clear();
+    let hits = selection.hits.clone();
     selection.set_row_count(
         overview
             .as_ref()
@@ -21,95 +24,119 @@ pub fn draw_selected_period(
     let selected = selection.selected().unwrap_or_default();
     let overview = overview.clone();
     let transactions = transactions.clone();
-    ui.column(Column::new().gap(0), move |col| {
-        match transactions {
-            Ok(rows) => crate::presentation::period_summary(col, &summarize(&rows), rows.len()),
-            Err(error) => {
-                col.text(&format!("Movimento do período indisponível: {error}"));
+    ui.column(Column::new().gap(0), {
+        let hits = hits.clone();
+        move |col| {
+            match transactions {
+                Ok(rows) => crate::presentation::period_summary(col, &summarize(&rows), rows.len()),
+                Err(error) => {
+                    col.text(&format!("Movimento do período indisponível: {error}"));
+                }
             }
-        }
-        match overview {
-            Ok(data) => draw_current_snapshot(col, &data, selected),
-            Err(error) => {
-                col.text(&format!("Posição atual indisponível: {error}"));
+            match overview {
+                Ok(data) => draw_current_snapshot(col, &data, selected, &hits),
+                Err(error) => {
+                    col.text(&format!("Posição atual indisponível: {error}"));
+                }
             }
         }
     });
 }
 
-fn draw_current_snapshot(ui: &mut Container<'_>, data: &Overview, selected: usize) {
+fn draw_current_snapshot(
+    ui: &mut Container<'_>,
+    data: &Overview,
+    selected: usize,
+    hits: &Interactions,
+) {
     let sections = 3 + data.upcoming_bills.len().max(1);
     let data = data.clone();
     let full = ui.height() >= 24;
-    ui.column(Column::new().gap(0), move |col| {
-        let currency = data.currency_code.clone().unwrap_or_else(|| "BRL".into());
-        col.label("Posição atual das contas");
-        col.label(&format!(
-            "Previsão atual · {} a {}",
-            data.period_start.as_deref().unwrap_or("Sem início"),
-            data.period_end.as_deref().unwrap_or("Sem fim")
-        ));
-        if full {
-            metric_strip(col, snapshot_metrics(&data, &currency));
-            let projection = data.projection.clone();
-            let projection_currency = currency.clone();
-            col.row(Row::new().size(Size::Cells(8)).gap(1), move |row| {
-                let outflows = projection.clone();
-                let outflow_currency = projection_currency.clone();
-                row.panel(
-                    Panel::new().title("Próximo saldo").focused(selected == 1),
-                    move |panel| {
-                        overview_projection(panel, projection.as_ref(), &projection_currency);
+    ui.column(Column::new().gap(0), {
+        let hits = hits.clone();
+        move |col| {
+            let currency = data.currency_code.clone().unwrap_or_else(|| "BRL".into());
+            col.label("Posição atual das contas");
+            col.label(&format!(
+                "Previsão atual · {} a {}",
+                data.period_start.as_deref().unwrap_or("Sem início"),
+                data.period_end.as_deref().unwrap_or("Sem fim")
+            ));
+            if full {
+                metric_strip(col, snapshot_metrics(&data, &currency));
+                let projection = data.projection.clone();
+                let projection_currency = currency.clone();
+                col.row(Row::new().size(Size::Cells(8)).gap(1), move |row| {
+                    let outflows = projection.clone();
+                    let outflow_currency = projection_currency.clone();
+                    row.panel(
+                        Panel::new().title("Próximo saldo").focused(selected == 1),
+                        move |panel| {
+                            overview_projection(panel, projection.as_ref(), &projection_currency);
+                        },
+                    );
+                    row.panel(
+                        Panel::new()
+                            .title("Saídas previstas")
+                            .focused(selected == 2),
+                        move |panel| overview_outflows(panel, outflows.as_ref(), &outflow_currency),
+                    );
+                });
+                col.panel(
+                    Panel::new()
+                        .title("Próximas faturas")
+                        .focused(selected >= 3),
+                    {
+                        let hits = hits.clone();
+                        move |panel| {
+                            upcoming_bills(
+                                panel,
+                                &data.upcoming_bills,
+                                &currency,
+                                selected.saturating_sub(3),
+                                &hits,
+                            );
+                        }
                     },
                 );
-                row.panel(
-                    Panel::new()
-                        .title("Saídas previstas")
-                        .focused(selected == 2),
-                    move |panel| overview_outflows(panel, outflows.as_ref(), &outflow_currency),
-                );
-            });
-            col.panel(
-                Panel::new()
-                    .title("Próximas faturas")
-                    .focused(selected >= 3),
-                move |panel| {
-                    upcoming_bills(
-                        panel,
-                        &data.upcoming_bills,
-                        &currency,
-                        selected.saturating_sub(3),
-                    );
-                },
-            );
-        } else {
-            match selected {
-                0 => {
-                    let mut metrics = snapshot_metrics(&data, &currency).into_iter();
-                    metric_strip(col, metrics.by_ref().take(2).collect());
-                    metric_strip(col, metrics.collect());
-                }
-                1 => {
-                    col.panel(Panel::new().title("Próximo saldo"), move |panel| {
-                        overview_projection(panel, data.projection.as_ref(), &currency);
-                    });
-                }
-                2 => {
-                    col.panel(Panel::new().title("Saídas previstas"), move |panel| {
-                        overview_outflows(panel, data.projection.as_ref(), &currency);
-                    });
-                }
-                _ => {
-                    col.panel(Panel::new().title("Próximas faturas"), move |panel| {
-                        upcoming_bills(panel, &data.upcoming_bills, &currency, selected - 3);
-                    });
+            } else {
+                match selected {
+                    0 => {
+                        let mut metrics = snapshot_metrics(&data, &currency).into_iter();
+                        metric_strip(col, metrics.by_ref().take(2).collect());
+                        metric_strip(col, metrics.collect());
+                    }
+                    1 => {
+                        col.panel(Panel::new().title("Próximo saldo"), move |panel| {
+                            overview_projection(panel, data.projection.as_ref(), &currency);
+                        });
+                    }
+                    2 => {
+                        col.panel(Panel::new().title("Saídas previstas"), move |panel| {
+                            overview_outflows(panel, data.projection.as_ref(), &currency);
+                        });
+                    }
+                    _ => {
+                        col.panel(Panel::new().title("Próximas faturas"), {
+                            let hits = hits.clone();
+                            move |panel| {
+                                upcoming_bills(
+                                    panel,
+                                    &data.upcoming_bills,
+                                    &currency,
+                                    selected - 3,
+                                    &hits,
+                                );
+                            }
+                        });
+                    }
                 }
             }
+            col.label(&format!(
+                "j/k Posição atual e faturas · {}/{sections}",
+                selected + 1
+            ));
         }
-        col.label(&format!(
-            "j/k Posição atual e faturas · {}/{sections}",
-            selected + 1
-        ));
     });
 }
 
@@ -254,6 +281,7 @@ fn upcoming_bills(
     bills: &[crate::models::OverviewUpcomingBill],
     currency: &str,
     selected: usize,
+    hits: &Interactions,
 ) {
     if bills.is_empty() {
         ui.label("Nenhuma fatura prevista para este período.");
@@ -275,7 +303,7 @@ fn upcoming_bills(
             row
         })
         .collect();
-    ui.table(
+    ui.mouse_table_from(
         TableOptions {
             columns: vec![
                 TableColumn::new("Vencimento").width(Size::Cells(10)),
@@ -291,7 +319,8 @@ fn upcoming_bills(
             scrollbar: true,
             ..Default::default()
         },
-        "overview:upcoming",
+        3,
+        hits,
     );
     if let Some(bill) = bills.get(selected) {
         ui.label(bill.description.as_deref().unwrap_or("Fatura"));
@@ -385,7 +414,12 @@ mod tests {
                 seen.push_str(&render_to_text(width, height, "dark", |ui| {
                     let sections = 3 + data.upcoming_bills.len().max(1);
                     selection.set_row_count(sections);
-                    draw_current_snapshot(ui, &data, selection.selected().unwrap_or_default());
+                    draw_current_snapshot(
+                        ui,
+                        &data,
+                        selection.selected().unwrap_or_default(),
+                        &selection.hits,
+                    );
                 }));
                 selection.move_by(1);
             }

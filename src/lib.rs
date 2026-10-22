@@ -11,3 +11,5 @@ pub mod models;
 pub mod period;
 pub mod presentation;
 pub mod screens;
+
+pub mod interaction;

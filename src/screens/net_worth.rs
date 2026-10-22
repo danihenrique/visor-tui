@@ -1,3 +1,4 @@
+use crate::interaction::{Interactions, Interactive};
 use hqtui::prelude::*;
 use hqtui::unicode::Align;
 use std::collections::BTreeMap;
@@ -41,6 +42,8 @@ fn render_net_worth_data(
     summary: Option<&InvestmentSummary>,
     selection: &mut TableSelection,
 ) {
+    selection.hits.clear();
+    let hits = selection.hits.clone();
     let total = portfolio_total(investments, summary);
     let count = summary
         .and_then(|s| s.count)
@@ -68,8 +71,8 @@ fn render_net_worth_data(
         Metric::new("Investimentos", total.clone(), Tone::Accent),
         Metric::new("Posições", count, Tone::Neutral),
     ];
-    ui.column(
-        Column::new().gap(usize::from(tiles && !dense)),
+    ui.column(Column::new().gap(usize::from(tiles && !dense)), {
+        let hits = hits.clone();
         move |col| {
             if tiles {
                 metric_strip(col, metrics);
@@ -96,8 +99,17 @@ fn render_net_worth_data(
                     Panel::new()
                         .title("Posições")
                         .focused(selected >= allocation_pages),
-                    move |panel| {
-                        investment_table(panel, &investments, selected_investment);
+                    {
+                        let hits = hits.clone();
+                        move |panel| {
+                            investment_table(
+                                panel,
+                                &investments,
+                                selected_investment,
+                                allocation_pages,
+                                &hits,
+                            );
+                        }
                     },
                 );
                 col.panel(
@@ -115,8 +127,17 @@ fn render_net_worth_data(
                 );
             } else {
                 let detail = investments[selected_investment].clone();
-                col.panel(Panel::new().title("Posições"), move |panel| {
-                    investment_table(panel, &investments, selected_investment);
+                col.panel(Panel::new().title("Posições"), {
+                    let hits = hits.clone();
+                    move |panel| {
+                        investment_table(
+                            panel,
+                            &investments,
+                            selected_investment,
+                            allocation_pages,
+                            &hits,
+                        );
+                    }
                 });
                 if tiles {
                     col.panel(
@@ -134,8 +155,8 @@ fn render_net_worth_data(
                 selected + 1,
                 section_count
             ));
-        },
-    );
+        }
+    });
 }
 
 fn portfolio_total(investments: &[Investment], summary: Option<&InvestmentSummary>) -> String {
@@ -230,7 +251,13 @@ fn allocation_bars(ui: &mut Container<'_>, allocation: Option<&[(String, f64)]>,
     }
 }
 
-fn investment_table(ui: &mut Container<'_>, investments: &[Investment], selected: usize) {
+fn investment_table(
+    ui: &mut Container<'_>,
+    investments: &[Investment],
+    selected: usize,
+    base: usize,
+    hits: &Interactions,
+) {
     let wide = ui.width() >= 70;
     let theme = ui.theme().clone();
     let mut columns = vec![
@@ -275,7 +302,7 @@ fn investment_table(ui: &mut Container<'_>, investments: &[Investment], selected
             row
         })
         .collect();
-    ui.table(
+    ui.mouse_table_from(
         TableOptions {
             rows,
             columns,
@@ -285,7 +312,8 @@ fn investment_table(ui: &mut Container<'_>, investments: &[Investment], selected
             scrollbar: true,
             ..Default::default()
         },
-        "net_worth:positions",
+        base,
+        hits,
     );
 }
 

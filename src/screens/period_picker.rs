@@ -1,3 +1,4 @@
+use crate::interaction::{Control, Interactions, Interactive};
 use chrono::NaiveDate;
 use hqtui::{input::InputEvent, prelude::*};
 
@@ -20,6 +21,7 @@ enum PickerMode {
 
 #[derive(Debug, Clone)]
 pub struct PeriodPicker {
+    hits: Interactions,
     anchor: NaiveDate,
     mode: PickerMode,
     dates: [String; 2],
@@ -41,6 +43,7 @@ impl PeriodPicker {
         .position(|preset| preset == period)
         .unwrap_or(4);
         Self {
+            hits: Interactions::default(),
             anchor,
             mode: PickerMode::Presets(selected),
             dates: [
@@ -53,6 +56,29 @@ impl PeriodPicker {
 
     pub fn handle_input(&mut self, events: &[InputEvent]) -> PickerOutcome {
         for event in events {
+            let mapped;
+            let event = if let Some(control) = self.hits.click(event) {
+                match control {
+                    Control::Field(index) => match self.mode {
+                        PickerMode::Presets(_) => {
+                            self.mode = PickerMode::Presets(index);
+                            mapped = crate::interaction::key_event("enter");
+                            &mapped
+                        }
+                        PickerMode::Custom(_) => {
+                            self.mode = PickerMode::Custom(index);
+                            continue;
+                        }
+                    },
+                    Control::Button(key) => {
+                        mapped = crate::interaction::key_event(&key);
+                        &mapped
+                    }
+                    _ => continue,
+                }
+            } else {
+                event
+            };
             let key = match event {
                 InputEvent::Key(key) => key,
                 InputEvent::Paste(paste) => {
@@ -166,19 +192,28 @@ impl PeriodPicker {
                 lines.join("\n")
             }
         };
-        ui.modal(ModalOptions {
-            title: Some(
-                match self.mode {
-                    PickerMode::Presets(_) => "Selecionar período",
-                    PickerMode::Custom(_) => "Período personalizado",
-                }
-                .into(),
-            ),
-            message: Some(message),
-            width: Some(58),
-            align: Some(Align::Left),
-            ..Default::default()
-        });
+        let fields: &[&str] = match self.mode {
+            PickerMode::Presets(_) => &PRESETS,
+            PickerMode::Custom(_) => &["Início:", "Fim:"],
+        };
+        ui.mouse_modal(
+            ModalOptions {
+                title: Some(
+                    match self.mode {
+                        PickerMode::Presets(_) => "Selecionar período",
+                        PickerMode::Custom(_) => "Período personalizado",
+                    }
+                    .into(),
+                ),
+                message: Some(message),
+                buttons: vec![ModalButton::new("Cancelar"), ModalButton::new("Aplicar")],
+                width: Some(58),
+                align: Some(Align::Left),
+                ..Default::default()
+            },
+            fields,
+            &self.hits,
+        );
     }
 }
 

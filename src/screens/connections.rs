@@ -1,3 +1,5 @@
+use crate::interaction::{Interactions, Interactive};
+use crate::presentation::{Metric, Tone, metric_strip};
 use hqtui::color::Color;
 use hqtui::input::InputEvent;
 use hqtui::prelude::*;
@@ -13,6 +15,7 @@ const COLOR_SUCCESS: Color = Color::rgb(34, 197, 94);
 const COLOR_WARNING: Color = Color::rgb(234, 179, 8);
 
 pub struct ConnectionsScreen {
+    interactions: Interactions,
     pub connections: Vec<Connection>,
     pub selected_index: Option<usize>,
     pub scroll_offset: usize,
@@ -25,6 +28,7 @@ impl ConnectionsScreen {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            interactions: Interactions::default(),
             connections: Vec::new(),
             selected_index: None,
             scroll_offset: 0,
@@ -68,7 +72,11 @@ impl ConnectionsScreen {
         }
     }
 
-    pub fn handle_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
+    pub fn handle_input(&mut self, api: &ApiClient, events: &[InputEvent]) {
+        let mapped_events = self
+            .interactions
+            .list_events(events, &mut self.selected_index);
+        let events = mapped_events.as_slice();
         for event in events {
             if let InputEvent::Key(k) = event {
                 if k.name == "down" || k.name == "j" {
@@ -98,7 +106,7 @@ impl ConnectionsScreen {
             }
         }
 
-        if app.pressed("connections:refresh") {
+        if self.interactions.pressed(events, "connections:refresh") {
             api.invalidate_cache();
             self.fetch(api);
         }
@@ -143,7 +151,8 @@ fn status_display(status: Option<&str>, paused: bool, requires_reauth: bool) -> 
 }
 
 pub fn render_with_state(ui: &mut Container<'_>, screen: &mut ConnectionsScreen, api: &ApiClient) {
-    use crate::presentation::{Metric, Tone, metric_strip};
+    screen.interactions.clear();
+    let hits = screen.interactions.clone();
     screen.load(api);
     let wide = ui.width() >= 95;
     let show_metrics = ui.height() >= 15;
@@ -230,66 +239,73 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut ConnectionsScreen,
     let error = screen.error.clone();
     let loading = screen.loading;
     let muted = ui.theme().muted;
-    ui.column(Column::new().gap(1), move |col| {
-        if show_metrics {
-            metric_strip(
-                col,
-                vec![
-                    Metric::new("Ativas", format!("{active} de {total}"), Tone::Positive),
-                    Metric::new(
-                        "Precisam de atenção",
-                        attention.to_string(),
-                        if attention > 0 {
-                            Tone::Warning
-                        } else {
-                            Tone::Neutral
-                        },
-                    ),
-                    Metric::new("Contas vinculadas", accounts.to_string(), Tone::Accent),
-                ],
-            );
-        }
-        col.panel(
-            Panel::new().title("Instituições conectadas"),
-            move |panel| {
-                if loading {
-                    panel.label("Atualizando conexões…");
-                } else if let Some(error) = error {
-                    panel.styled_text(&error, TextStyle::new().fg(COLOR_NEGATIVE));
-                } else if rows.is_empty() {
-                    panel.text("Nenhuma instituição conectada.");
-                    panel.label("Conecte uma conta pelo Visor e pressione r para atualizar.");
-                } else {
-                    panel.table(
-                        TableOptions {
-                            columns,
-                            rows,
-                            selected,
-                            follow_selection: true,
-                            scrollbar: true,
-                            zebra: true,
-                            ..Default::default()
-                        },
-                        "connections:table",
+    ui.column(Column::new().gap(1), {
+        let hits = hits.clone();
+        move |col| {
+            if show_metrics {
+                metric_strip(
+                    col,
+                    vec![
+                        Metric::new("Ativas", format!("{active} de {total}"), Tone::Positive),
+                        Metric::new(
+                            "Precisam de atenção",
+                            attention.to_string(),
+                            if attention > 0 {
+                                Tone::Warning
+                            } else {
+                                Tone::Neutral
+                            },
+                        ),
+                        Metric::new("Contas vinculadas", accounts.to_string(), Tone::Accent),
+                    ],
+                );
+            }
+            col.panel(Panel::new().title("Instituições conectadas"), {
+                let hits = hits.clone();
+                move |panel| {
+                    if loading {
+                        panel.label("Atualizando conexões…");
+                    } else if let Some(error) = error {
+                        panel.styled_text(&error, TextStyle::new().fg(COLOR_NEGATIVE));
+                    } else if rows.is_empty() {
+                        panel.text("Nenhuma instituição conectada.");
+                        panel.label("Conecte uma conta pelo Visor e pressione r para atualizar.");
+                    } else {
+                        panel.mouse_table(
+                            TableOptions {
+                                columns,
+                                rows,
+                                selected,
+                                follow_selection: true,
+                                scrollbar: true,
+                                zebra: true,
+                                ..Default::default()
+                            },
+                            &hits,
+                        );
+                    }
+                }
+            });
+            if let Some((provider, action, next)) = detail {
+                col.panel(
+                    Panel::new().title(provider).size(Size::Cells(4)),
+                    move |panel| {
+                        panel.styled_text(&action, TextStyle::new().fg(muted));
+                        panel.styled_text(&next, TextStyle::new().fg(muted));
+                    },
+                );
+            }
+            col.row(Row::new().size(Size::Cells(1)), {
+                let hits = hits.clone();
+                move |row| {
+                    row.label("j/k Selecionar");
+                    row.mouse_button(
+                        ButtonOptions::new("r Atualizar").variant(ButtonVariant::Ghost),
+                        "connections:refresh",
+                        &hits,
                     );
                 }
-            },
-        );
-        if let Some((provider, action, next)) = detail {
-            col.panel(
-                Panel::new().title(provider).size(Size::Cells(4)),
-                move |panel| {
-                    panel.styled_text(&action, TextStyle::new().fg(muted));
-                    panel.styled_text(&next, TextStyle::new().fg(muted));
-                },
-            );
+            });
         }
-        col.row(Row::new().size(Size::Cells(1)), move |row| {
-            row.label("j/k Selecionar");
-            row.button(
-                ButtonOptions::new("r Atualizar").variant(ButtonVariant::Ghost),
-                "connections:refresh",
-            );
-        });
     });
 }

@@ -1,3 +1,4 @@
+use crate::interaction::{Interactions, Interactive};
 use std::sync::Arc;
 
 use hqtui::prelude::*;
@@ -17,6 +18,8 @@ pub fn render_selected_period(
     transactions: &Result<Arc<[Transaction]>, String>,
     selection: &mut TableSelection,
 ) {
+    selection.hits.clear();
+    let hits = selection.hits.clone();
     let Ok(transactions) = transactions else {
         selection.set_row_count(0);
         if let Err(error) = transactions {
@@ -32,52 +35,55 @@ pub fn render_selected_period(
     let day_count = days.len().max(1);
     selection.set_row_count(day_count + 2);
     let selected = selection.selected().unwrap_or_default();
-    ui.column(Column::new().gap(0), move |col| {
-        crate::presentation::period_summary(col, &summary, count);
-        if selected < day_count {
-            col.panel(
-                Panel::new().title("Fluxo diário do período"),
-                move |panel| {
-                    daily_flow_table(panel, &days, selected);
-                },
-            );
-        } else {
-            match overview {
-                Ok(data) => {
-                    if show_scope_dates {
-                        col.label(&format!(
-                            "Previsão atual · {} a {}",
-                            data.period_start.as_deref().unwrap_or("Sem início"),
-                            data.period_end.as_deref().unwrap_or("Sem fim")
-                        ));
+    ui.column(Column::new().gap(0), {
+        let hits = hits.clone();
+        move |col| {
+            crate::presentation::period_summary(col, &summary, count);
+            if selected < day_count {
+                col.panel(Panel::new().title("Fluxo diário do período"), {
+                    let hits = hits.clone();
+                    move |panel| {
+                        daily_flow_table(panel, &days, selected, &hits);
                     }
-                    let currency = data.currency_code.clone().unwrap_or_else(|| "BRL".into());
-                    let outflows = selected == day_count + 1;
-                    col.panel(
-                        Panel::new().title(if outflows {
-                            "Saídas previstas · atual"
-                        } else {
-                            "Próximo saldo · atual"
-                        }),
-                        move |panel| {
-                            if outflows {
-                                outflow_bars(panel, data.projection.as_ref(), &currency);
+                });
+            } else {
+                match overview {
+                    Ok(data) => {
+                        if show_scope_dates {
+                            col.label(&format!(
+                                "Previsão atual · {} a {}",
+                                data.period_start.as_deref().unwrap_or("Sem início"),
+                                data.period_end.as_deref().unwrap_or("Sem fim")
+                            ));
+                        }
+                        let currency = data.currency_code.clone().unwrap_or_else(|| "BRL".into());
+                        let outflows = selected == day_count + 1;
+                        col.panel(
+                            Panel::new().title(if outflows {
+                                "Saídas previstas · atual"
                             } else {
-                                projection_bars(panel, data.projection.as_ref(), &currency);
-                            }
-                        },
-                    );
-                }
-                Err(error) => {
-                    col.text(&format!("Previsão atual indisponível: {error}"));
+                                "Próximo saldo · atual"
+                            }),
+                            move |panel| {
+                                if outflows {
+                                    outflow_bars(panel, data.projection.as_ref(), &currency);
+                                } else {
+                                    projection_bars(panel, data.projection.as_ref(), &currency);
+                                }
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        col.text(&format!("Previsão atual indisponível: {error}"));
+                    }
                 }
             }
+            col.label(&format!(
+                "j/k Dias e previsão atual · {}/{}",
+                selected + 1,
+                day_count + 2
+            ));
         }
-        col.label(&format!(
-            "j/k Dias e previsão atual · {}/{}",
-            selected + 1,
-            day_count + 2
-        ));
     });
 }
 
@@ -110,7 +116,12 @@ fn daily_flows(transactions: &[Transaction]) -> Vec<DailyFlow> {
         .collect()
 }
 
-fn daily_flow_table(ui: &mut Container<'_>, days: &[DailyFlow], selected: usize) {
+fn daily_flow_table(
+    ui: &mut Container<'_>,
+    days: &[DailyFlow],
+    selected: usize,
+    hits: &Interactions,
+) {
     if days.is_empty() {
         ui.label("Nenhum lançamento no período selecionado.");
         return;
@@ -137,7 +148,7 @@ fn daily_flow_table(ui: &mut Container<'_>, days: &[DailyFlow], selected: usize)
             row
         })
         .collect();
-    ui.table(
+    ui.mouse_table(
         TableOptions {
             columns: vec![
                 TableColumn::new("Dia").width(Size::Cells(10)),
@@ -158,7 +169,7 @@ fn daily_flow_table(ui: &mut Container<'_>, days: &[DailyFlow], selected: usize)
             scrollbar: true,
             ..Default::default()
         },
-        "cash-flow:days",
+        hits,
     );
     if let Some(day) = days.get(selected) {
         ui.label(&format!(

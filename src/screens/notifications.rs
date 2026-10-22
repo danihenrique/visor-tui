@@ -1,3 +1,5 @@
+use crate::interaction::{Interactions, Interactive};
+use crate::presentation::{Metric, Tone, metric_strip};
 use hqtui::color::Color;
 use hqtui::input::InputEvent;
 use hqtui::prelude::*;
@@ -9,6 +11,7 @@ use crate::models::Notification;
 const COLOR_NEGATIVE: Color = Color::rgb(239, 68, 68);
 
 pub struct NotificationsScreen {
+    interactions: Interactions,
     pub notifications: Vec<Notification>,
     pub selected_index: Option<usize>,
     pub scroll_offset: usize,
@@ -22,6 +25,7 @@ impl NotificationsScreen {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            interactions: Interactions::default(),
             notifications: Vec::new(),
             selected_index: None,
             scroll_offset: 0,
@@ -62,7 +66,11 @@ impl NotificationsScreen {
         }
     }
 
-    pub fn handle_input(&mut self, app: &App, api: &ApiClient, events: &[InputEvent]) {
+    pub fn handle_input(&mut self, api: &ApiClient, events: &[InputEvent]) {
+        let mapped_events = self
+            .interactions
+            .list_events(events, &mut self.selected_index);
+        let events = mapped_events.as_slice();
         for event in events {
             if let InputEvent::Key(k) = event {
                 if k.name == "down" || k.name == "j" {
@@ -114,7 +122,7 @@ impl NotificationsScreen {
         }
 
         // Button press for refresh
-        if app.pressed("notifications:refresh") {
+        if self.interactions.pressed(events, "notifications:refresh") {
             api.invalidate_cache();
             self.fetch(api);
         }
@@ -157,7 +165,8 @@ pub fn render_with_state(
     screen: &mut NotificationsScreen,
     api: &ApiClient,
 ) {
-    use crate::presentation::{Metric, Tone, metric_strip};
+    screen.interactions.clear();
+    let hits = screen.interactions.clone();
     screen.load(api);
     let width = ui.width();
     let show_metrics = ui.height() >= 15;
@@ -221,78 +230,88 @@ pub fn render_with_state(
     let error = screen.error.clone();
     let loading = screen.loading;
     let unread_filter = screen.unread_filter;
-    ui.column(Column::new().gap(1), move |col| {
-        if show_metrics {
-            metric_strip(
-                col,
-                vec![
-                    Metric::new("Não lidas", unread.to_string(), Tone::Accent),
-                    Metric::new("Nesta lista", count.to_string(), Tone::Neutral),
-                    Metric::new(
-                        "Filtro",
-                        if unread_filter { "Não lidas" } else { "Todas" },
-                        Tone::Neutral,
-                    ),
-                ],
-            );
-        }
-        col.panel(
-            Panel::new().title(if unread_filter {
-                "Caixa de entrada · não lidas"
-            } else {
-                "Caixa de entrada"
-            }),
-            move |panel| {
-                if loading {
-                    panel.label("Carregando notificações…");
-                } else if let Some(error) = error {
-                    panel.styled_text(&error, TextStyle::new().fg(COLOR_NEGATIVE));
-                } else if rows.is_empty() {
-                    panel.text(if unread_filter {
-                        "Tudo em dia. Nenhuma mensagem não lida."
-                    } else {
-                        "Sua caixa de entrada está vazia."
-                    });
-                    panel.label("u Alternar filtro  ·  r Atualizar");
-                } else {
-                    panel.table(
-                        TableOptions {
-                            columns,
-                            rows,
-                            selected,
-                            follow_selection: true,
-                            scrollbar: true,
-                            zebra: true,
-                            ..Default::default()
-                        },
-                        "notifications:table",
-                    );
-                }
-            },
-        );
-        if let Some((title, body, topic)) = detail {
+    ui.column(Column::new().gap(1), {
+        let hits = hits.clone();
+        move |col| {
+            if show_metrics {
+                metric_strip(
+                    col,
+                    vec![
+                        Metric::new("Não lidas", unread.to_string(), Tone::Accent),
+                        Metric::new("Nesta lista", count.to_string(), Tone::Neutral),
+                        Metric::new(
+                            "Filtro",
+                            if unread_filter { "Não lidas" } else { "Todas" },
+                            Tone::Neutral,
+                        ),
+                    ],
+                );
+            }
             col.panel(
-                Panel::new().title(title).footer(topic).size(Size::Cells(5)),
-                move |panel| {
-                    for line in hqtui::unicode::wrap(&body, panel.width())
-                        .into_iter()
-                        .take(3)
-                    {
-                        panel.styled_text(&line, TextStyle::new().fg(muted));
+                Panel::new().title(if unread_filter {
+                    "Caixa de entrada · não lidas"
+                } else {
+                    "Caixa de entrada"
+                }),
+                {
+                    let hits = hits.clone();
+                    move |panel| {
+                        if loading {
+                            panel.label("Carregando notificações…");
+                        } else if let Some(error) = error {
+                            panel.styled_text(&error, TextStyle::new().fg(COLOR_NEGATIVE));
+                        } else if rows.is_empty() {
+                            panel.text(if unread_filter {
+                                "Tudo em dia. Nenhuma mensagem não lida."
+                            } else {
+                                "Sua caixa de entrada está vazia."
+                            });
+                            panel.label("u Alternar filtro  ·  r Atualizar");
+                        } else {
+                            panel.mouse_table(
+                                TableOptions {
+                                    columns,
+                                    rows,
+                                    selected,
+                                    follow_selection: true,
+                                    scrollbar: true,
+                                    zebra: true,
+                                    ..Default::default()
+                                },
+                                &hits,
+                            );
+                        }
                     }
                 },
             );
-        }
-        col.row(Row::new().size(Size::Cells(1)), move |row| {
-            row.sized(Size::Fill, |hint| {
-                hint.label("j/k Selecionar  m/Enter Lida  u Filtrar");
-            });
-            row.sized(Size::Cells(13), |button| {
-                button.button(
-                    ButtonOptions::new("r Atualizar").variant(ButtonVariant::Ghost),
-                    "notifications:refresh",
+            if let Some((title, body, topic)) = detail {
+                col.panel(
+                    Panel::new().title(title).footer(topic).size(Size::Cells(5)),
+                    move |panel| {
+                        for line in hqtui::unicode::wrap(&body, panel.width())
+                            .into_iter()
+                            .take(3)
+                        {
+                            panel.styled_text(&line, TextStyle::new().fg(muted));
+                        }
+                    },
                 );
+            }
+            col.row(Row::new().size(Size::Cells(1)), {
+                let hits = hits.clone();
+                move |row| {
+                    row.sized(Size::Fill, |hint| {
+                        hint.label("j/k Selecionar  m/Enter Lida  u Filtrar");
+                    });
+                    row.sized(Size::Cells(13), move |button| {
+                        button.mouse_button(
+                            ButtonOptions::new("r Atualizar").variant(ButtonVariant::Ghost),
+                            "notifications:refresh",
+                            &hits,
+                        );
+                    });
+                }
             });
-        });
+        }
     });
 }

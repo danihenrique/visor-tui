@@ -1,3 +1,4 @@
+use crate::interaction::{Interactions, Interactive};
 use hqtui::prelude::*;
 
 use crate::api::ApiClient;
@@ -75,6 +76,7 @@ fn status_label(plan: &InstallmentPlan) -> &str {
 
 #[derive(Default)]
 pub struct PayablesScreen {
+    interactions: Interactions,
     tab: Tab,
     selection: TableSelection,
     plans: Vec<InstallmentPlan>,
@@ -105,7 +107,8 @@ impl PayablesScreen {
         }
     }
 
-    pub fn handle_input(&mut self, app: &App, events: &[hqtui::input::InputEvent]) {
+    pub fn handle_input(&mut self, events: &[hqtui::input::InputEvent]) {
+        self.selection.handle_mouse(events);
         for event in events {
             if let hqtui::input::InputEvent::Key(key) = event {
                 match key.name.as_str() {
@@ -128,7 +131,7 @@ impl PayablesScreen {
             (Tab::Active, "tab_active"),
             (Tab::Completed, "tab_completed"),
         ] {
-            if app.pressed(id) {
+            if self.interactions.pressed(events, id) {
                 self.tab = tab;
                 self.selection = TableSelection::default();
             }
@@ -143,6 +146,9 @@ pub fn render(ui: &mut Container<'_>, api: &ApiClient) {
 }
 
 pub fn render_with_state(ui: &mut Container<'_>, screen: &mut PayablesScreen) {
+    screen.interactions.clear();
+    let hits = screen.interactions.clone();
+    screen.selection.hits = hits.clone();
     let theme = ui.theme().clone();
     if let Some(error) = &screen.error {
         ui.text(&format!(
@@ -227,7 +233,7 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut PayablesScreen) {
         })
         .collect::<Vec<_>>();
     let active_tab = screen.tab;
-    let show_detail = ui.height() >= 16;
+    let show_detail = ui.height() >= 22;
     let compact_detail = detail.as_ref().map(|plan| {
         [
             format!(
@@ -244,119 +250,129 @@ pub fn render_with_state(ui: &mut Container<'_>, screen: &mut PayablesScreen) {
             ),
         ]
     });
-    ui.column(Column::new().gap(usize::from(show_detail)), move |col| {
-        col.label(&format!(
-            "Próximo vencimento no período · {missing_dates} sem data válida"
-        ));
-        if show_detail {
-            metric_strip(col, metrics);
-        }
-        col.row(Row::new().size(Size::Cells(1)).gap(1), move |row| {
-            for (tab, id, label) in [
-                (Tab::All, "tab_all", format!("Todos {all_count}")),
-                (Tab::Active, "tab_active", format!("Ativos {active_count}")),
-                (
-                    Tab::Completed,
-                    "tab_completed",
-                    format!("Concluídos {completed_count}"),
-                ),
-            ] {
-                row.button(
-                    ButtonOptions::new(label).variant(if active_tab == tab {
-                        ButtonVariant::Primary
-                    } else {
-                        ButtonVariant::Ghost
-                    }),
-                    id,
-                );
+    ui.column(Column::new().gap(usize::from(show_detail)), {
+        let hits = hits.clone();
+        move |col| {
+            col.label(&format!(
+                "Próximo vencimento no período · {missing_dates} sem data válida"
+            ));
+            if show_detail {
+                metric_strip(col, metrics);
             }
-        });
-        col.panel(
-            Panel::new()
-                .title("Contas a pagar")
-                .border(BorderStyle::Rounded)
-                .footer("←/→ Status  j/k Selecionar  r Atualizar"),
-            move |panel| {
-                if rows.is_empty() {
-                    panel.text("Nenhum parcelamento neste filtro.");
-                    panel.label("Use ←/→ para consultar outros status.");
-                } else {
-                    let mut columns = vec![
-                        TableColumn::new("Descrição").width(Size::Fill),
-                        TableColumn::new("Pagas")
-                            .width(Size::Cells(7))
-                            .align(Align::Center),
-                        TableColumn::new("Restante")
-                            .width(Size::Cells(17))
-                            .align(Align::Right),
-                        TableColumn::new("Próxima").width(Size::Cells(10)),
-                    ];
-                    if !compact {
-                        columns.push(TableColumn::new("Status").width(Size::Cells(10)));
+            col.row(Row::new().size(Size::Cells(1)).gap(1), {
+                let hits = hits.clone();
+                move |row| {
+                    for (tab, id, label) in [
+                        (Tab::All, "tab_all", format!("Todos {all_count}")),
+                        (Tab::Active, "tab_active", format!("Ativos {active_count}")),
+                        (
+                            Tab::Completed,
+                            "tab_completed",
+                            format!("Concluídos {completed_count}"),
+                        ),
+                    ] {
+                        row.mouse_button(
+                            ButtonOptions::new(label).variant(if active_tab == tab {
+                                ButtonVariant::Primary
+                            } else {
+                                ButtonVariant::Ghost
+                            }),
+                            id,
+                            &hits,
+                        );
                     }
-                    panel.table(
-                        TableOptions {
-                            columns,
-                            rows,
-                            selected,
-                            follow_selection: true,
-                            scrollbar: true,
-                            header_color: Some(theme.muted),
-                            ..Default::default()
-                        },
-                        "payables:table",
-                    );
                 }
-            },
-        );
-        if show_detail && let Some(plan) = detail {
+            });
             col.panel(
                 Panel::new()
-                    .title(
-                        plan.description
-                            .clone()
-                            .unwrap_or_else(|| "Parcelamento selecionado".into()),
-                    )
+                    .title("Contas a pagar")
                     .border(BorderStyle::Rounded)
-                    .size(Size::Cells(4)),
-                move |panel| {
-                    if let (Some(paid), Some(total)) =
-                        (plan.paid_installments, plan.total_installments)
-                        && total > 0
-                    {
-                        panel.meter(MeterOptions {
-                            value: f64::from(paid) / f64::from(total),
-                            label: Some("Pagas".into()),
-                            text: Some(progress(&plan)),
-                            color: Some(theme.success),
-                            ..Default::default()
-                        });
-                    } else {
-                        panel.label("Progresso indisponível");
+                    .footer("←/→ Status  j/k Selecionar  r Atualizar"),
+                {
+                    let hits = hits.clone();
+                    move |panel| {
+                        if rows.is_empty() {
+                            panel.text("Nenhum parcelamento neste filtro.");
+                            panel.label("Use ←/→ para consultar outros status.");
+                        } else {
+                            let mut columns = vec![
+                                TableColumn::new("Descrição").width(Size::Fill),
+                                TableColumn::new("Pagas")
+                                    .width(Size::Cells(7))
+                                    .align(Align::Center),
+                                TableColumn::new("Restante")
+                                    .width(Size::Cells(17))
+                                    .align(Align::Right),
+                                TableColumn::new("Próxima").width(Size::Cells(10)),
+                            ];
+                            if !compact {
+                                columns.push(TableColumn::new("Status").width(Size::Cells(10)));
+                            }
+                            panel.mouse_table(
+                                TableOptions {
+                                    columns,
+                                    rows,
+                                    selected,
+                                    follow_selection: true,
+                                    scrollbar: true,
+                                    header_color: Some(theme.muted),
+                                    ..Default::default()
+                                },
+                                &hits,
+                            );
+                        }
                     }
-                    panel.label(&format!(
-                        "Parcela {} · Total {} · {}",
-                        format_currency(
-                            plan.installment_amount.as_deref(),
-                            plan.currency_code.as_deref()
-                        ),
-                        format_currency(
-                            plan.total_amount.as_deref(),
-                            plan.currency_code.as_deref()
-                        ),
-                        status_label(&plan)
-                    ));
                 },
             );
-        }
-        if !show_detail && let Some(lines) = compact_detail {
-            col.sized(Size::Cells(2), move |details| {
-                details.column(Column::new(), move |body| {
-                    for line in lines {
-                        body.label(&line);
-                    }
+            if show_detail && let Some(plan) = detail {
+                col.panel(
+                    Panel::new()
+                        .title(
+                            plan.description
+                                .clone()
+                                .unwrap_or_else(|| "Parcelamento selecionado".into()),
+                        )
+                        .border(BorderStyle::Rounded)
+                        .size(Size::Cells(4)),
+                    move |panel| {
+                        if let (Some(paid), Some(total)) =
+                            (plan.paid_installments, plan.total_installments)
+                            && total > 0
+                        {
+                            panel.meter(MeterOptions {
+                                value: f64::from(paid) / f64::from(total),
+                                label: Some("Pagas".into()),
+                                text: Some(progress(&plan)),
+                                color: Some(theme.success),
+                                ..Default::default()
+                            });
+                        } else {
+                            panel.label("Progresso indisponível");
+                        }
+                        panel.label(&format!(
+                            "Parcela {} · Total {} · {}",
+                            format_currency(
+                                plan.installment_amount.as_deref(),
+                                plan.currency_code.as_deref()
+                            ),
+                            format_currency(
+                                plan.total_amount.as_deref(),
+                                plan.currency_code.as_deref()
+                            ),
+                            status_label(&plan)
+                        ));
+                    },
+                );
+            }
+            if !show_detail && let Some(lines) = compact_detail {
+                col.sized(Size::Cells(2), move |details| {
+                    details.column(Column::new(), move |body| {
+                        for line in lines {
+                            body.label(&line);
+                        }
+                    });
                 });
-            });
+            }
         }
     });
 }

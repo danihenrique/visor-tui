@@ -21,26 +21,12 @@ const RED: Color = Color::rgb(255, 119, 134);
 
 #[derive(Clone)]
 pub(super) enum Action {
+    Scroll,
     Key(String),
     Row(usize),
     Field(FormField),
     Filter(FilterField),
     Choice(Choice),
-}
-
-#[derive(Clone)]
-pub(super) struct Hitbox {
-    rect: Rect,
-    pub action: Action,
-}
-
-impl Hitbox {
-    pub fn contains(&self, x: usize, y: usize) -> bool {
-        let (Ok(x), Ok(y)) = (isize::try_from(x), isize::try_from(y)) else {
-            return false;
-        };
-        self.rect.contains(x, y)
-    }
 }
 
 fn coord(value: usize) -> isize {
@@ -66,15 +52,17 @@ fn hit(
     y: usize,
     width: usize,
     action: Action,
-    hits: &mut Vec<Hitbox>,
+    hits: &crate::interaction::HitMap<Action>,
 ) {
-    hits.push(Hitbox {
-        rect: surface.sub(coord(x), coord(y), width, 1).hit_rect(),
-        action,
-    });
+    hits.add(&surface.sub(coord(x), coord(y), width, 1), action);
 }
 
-fn buttons(surface: &Surface, y: usize, items: &[(&str, &str)], hits: &mut Vec<Hitbox>) {
+fn buttons(
+    surface: &Surface,
+    y: usize,
+    items: &[(&str, &str)],
+    hits: &crate::interaction::HitMap<Action>,
+) {
     let mut x = 1;
     for (label, key) in items {
         let width = string_width(label) + 2;
@@ -93,16 +81,20 @@ fn buttons(surface: &Surface, y: usize, items: &[(&str, &str)], hits: &mut Vec<H
 }
 
 pub(super) fn draw(surface: &Surface, state: &TransactionsScreen) {
-    let mut hits = Vec::new();
-    draw_list(surface, state, &mut hits);
+    let hits = state.hitboxes.clone();
+    hits.clear();
+    draw_list(surface, state, &hits);
     if state.is_modal_open() {
         hits.clear();
-        draw_overlay(surface, state, &mut hits);
+        draw_overlay(surface, state, &hits);
     }
-    *state.hitboxes.borrow_mut() = hits;
 }
 
-fn draw_list(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hitbox>) {
+fn draw_list(
+    surface: &Surface,
+    state: &TransactionsScreen,
+    hits: &crate::interaction::HitMap<Action>,
+) {
     let width = surface.width();
     let height = surface.height();
     if width < 30 || height < 9 {
@@ -187,6 +179,7 @@ fn draw_list(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hitbo
                 })
                 .border(BorderStyle::Rounded),
         );
+    hits.add(&table, Action::Scroll);
     let width = table.width();
     let rows_visible = table.height().saturating_sub(1);
     let amount_width = if width >= 75 { 18 } else { 16 };
@@ -539,7 +532,11 @@ fn form_value(state: &TransactionsScreen, form: &TransactionForm, field: FormFie
     }
 }
 
-fn draw_overlay(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hitbox>) {
+fn draw_overlay(
+    surface: &Surface,
+    state: &TransactionsScreen,
+    hits: &crate::interaction::HitMap<Action>,
+) {
     if let Some(picker) = state.picker() {
         let title = match picker.kind {
             PickerKind::Account => "Selecionar conta",
@@ -561,6 +558,7 @@ fn draw_overlay(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hi
             &format!("Buscar: {}▏", picker.query),
             inner.theme.accent,
         );
+        hits.add(&inner, Action::Scroll);
         let choices = state.choices(picker);
         let visible = inner.height().saturating_sub(3);
         let offset = picker.selected.saturating_sub(visible.saturating_sub(1));
@@ -641,6 +639,7 @@ fn draw_overlay(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hi
             };
             text(&inner, 0, hint, inner.theme.muted);
             let reserved = if form.pending_create.is_some() { 5 } else { 4 };
+            hits.add(&inner, Action::Scroll);
             let visible = inner.height().saturating_sub(reserved) / 2;
             let focused_index = FormField::ALL
                 .iter()
@@ -717,6 +716,7 @@ fn draw_overlay(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hi
                     ..Default::default()
                 },
             );
+            hits.add(&inner, Action::Scroll);
             let visible = inner.height().saturating_sub(4) / 2;
             let selected = FilterField::ALL
                 .iter()
