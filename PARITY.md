@@ -33,18 +33,18 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 
 | CLI Command | TUI Screen / Action | Status |
 |---|---|---|
-| `visor transactions list` | Transações screen: scrollable table with filters | ⬜ |
-| `--from` / `--to` | Date range filter controls | ⬜ |
-| `--account` | Account filter dropdown (name-or-ID resolution) | ⬜ |
-| `--category` | Category filter dropdown (name/key/ID resolution) | ⬜ |
-| `--tag` | Tag filter multi-select | ⬜ |
-| `--type` (debit\|credit) | Type filter toggle | ⬜ |
+| `visor transactions list` | Transações screen: scrollable table with filters | ✅ |
+| `--from` / `--to` | Date range filter controls | ✅ |
+| `--account` | Account filter dropdown (name-or-ID resolution) | ✅ |
+| `--category` | Category filter dropdown (name/key/ID resolution) | ✅ |
+| `--tag` | Tag filter multi-select | ✅ |
+| `--type` (debit\|credit) | Type filter toggle | ✅ |
 | `--ignored` | Show/hide ignored toggle | ⬜ |
-| `--search` | Search input field | ⬜ |
-| `--limit` / `--after` / `--all` | Pagination controls (load more / infinite scroll) | ⬜ |
+| `--search` | Search input field | ✅ |
+| `--limit` / `--after` / `--all` | Pagination controls (load more / infinite scroll) | ✅ |
 | `--csv` | Export action: download/save CSV | ⬜ |
-| `visor transactions get <id>` | Transaction detail modal/screen | ⬜ |
-| `visor transactions add` | New transaction form (all fields) | ⬜ |
+| `visor transactions get <id>` | Transaction detail modal/screen | ✅ |
+| `visor transactions add` | New transaction form (all fields) | 🚧 |
 | `--amount` | Amount input (decimal, accepts BR grouping) | ⬜ |
 | `-d/--description` | Description text input | ⬜ |
 | `-c/--category` | Category selector (hierarchical list) | ⬜ |
@@ -69,44 +69,44 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 
 | CLI Command | TUI Screen / Action | Status |
 |---|---|---|
-| `visor accounts list` | Contas e Cartões screen: accounts table | ⬜ |
-| `--include-hidden` | Show/hide hidden toggle | ⬜ |
-| `visor cards list` | Contas e Cartões screen: cards section | ⬜ |
-| `visor cards bills <card>` | Faturas screen: bills table for selected card | ⬜ |
+| `visor accounts list` | Contas e Cartões screen: accounts table | ✅ |
+| `--include-hidden` | Show/hide hidden toggle | ✅ |
+| `visor cards list` | Contas e Cartões screen: cards section | ✅ |
+| `visor cards bills <card>` | Faturas screen: bills table for selected card | ✅ |
 | `--from` / `--to` | Date range filter for bills | ⬜ |
 
 ### Categories & Tags
 
 | CLI Command | TUI Screen / Action | Status |
 |---|---|---|
-| `visor categories list` | Categorias screen: hierarchical tree view | ⬜ |
-| `--include-hidden` | Show/hide hidden toggle | ⬜ |
+| `visor categories list` | Categorias screen: hierarchical tree view | ✅ |
+| `--include-hidden` | Show/hide hidden toggle | ✅ |
 | `visor tags list` | Tags management screen: list with color indicators | ⬜ |
 
 ### Recurring Expenses
 
 | CLI Command | TUI Screen / Action | Status |
 |---|---|---|
-| `visor subscriptions list` | Recorrentes screen: subscriptions tab | ⬜ |
-| `visor fixed-bills list` | Recorrentes screen: fixed bills tab | ⬜ |
-| `visor installments list` | Contas a pagar screen: installment plans | ⬜ |
-| `--status` (active\|completed) | Status filter tabs/toggle | ⬜ |
+| `visor subscriptions list` | Recorrentes screen: subscriptions tab | ✅ |
+| `visor fixed-bills list` | Recorrentes screen: fixed bills tab | ✅ |
+| `visor installments list` | Contas a pagar screen: installment plans | ✅ |
+| `--status` (active\|completed) | Status filter tabs/toggle | ✅ |
 
 ### Goals & Investments
 
 | CLI Command | TUI Screen / Action | Status |
 |---|---|---|
-| `visor goals list` | Metas screen: goals list with progress bars | ⬜ |
+| `visor goals list` | Metas screen: goals list with progress bars | ✅ |
 | `--status` (active\|archived\|completed) | Status filter | ⬜ |
-| `visor investments list` | Patrimônio screen: investments table + summary footer | ⬜ |
+| `visor investments list` | Patrimônio screen: investments table + summary footer | ✅ |
 
 ### Overview & Projections
 
 | CLI Command | TUI Screen / Action | Status |
 |---|---|---|
-| `visor overview` | Visão Geral screen: balances, month so far, projection | ⬜ |
-| Fluxo de Caixa | Cash flow section within Visão Geral or separate screen | ⬜ |
-| Projeção | Projeção screen or section: projected balance, committed outflows | ⬜ |
+| `visor overview` | Visão Geral screen: balances, month so far, projection | ✅ |
+| Fluxo de Caixa | Cash flow section within Visão Geral or separate screen | ✅ |
+| Projeção | Projeção screen or section: projected balance, committed outflows | ✅ |
 
 ### Connections & Notifications
 
@@ -131,34 +131,34 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 
 | Method | Path | TUI Screen / Action | Status |
 |---|---|---|---|
-| GET | `/v1/me` | Sidebar user info, Profile screen, Auth status | ⬜ |
+| GET | `/v1/me` | Sidebar user info, Profile screen, Auth status | ✅ |
 | GET | `/v1/notifications` | Notifications screen with pagination | ⬜ |
-| GET | `/v1/spaces` | Space selector, space resolution | ⬜ |
+| GET | `/v1/spaces` | Space selector, space resolution | ✅ |
 
 ### Space-Scoped Reads
 
 | Method | Path | TUI Screen / Action | Status |
 |---|---|---|---|
-| GET | `/v1/spaces/{id}/accounts` | Contas e Cartões, account filter dropdowns | ⬜ |
-| GET | `/v1/spaces/{id}/cards` | Contas e Cartões cards section | ⬜ |
-| GET | `/v1/spaces/{id}/cards/{id}/bills` | Faturas screen | ⬜ |
-| GET | `/v1/spaces/{id}/categories` | Categorias screen, category filter dropdowns | ⬜ |
+| GET | `/v1/spaces/{id}/accounts` | Contas e Cartões, account filter dropdowns | ✅ |
+| GET | `/v1/spaces/{id}/cards` | Contas e Cartões cards section | ✅ |
+| GET | `/v1/spaces/{id}/cards/{id}/bills` | Faturas screen | ✅ |
+| GET | `/v1/spaces/{id}/categories` | Categorias screen, category filter dropdowns | ✅ |
 | GET | `/v1/spaces/{id}/connections` | Connections screen | ⬜ |
-| GET | `/v1/spaces/{id}/fixed-bills` | Recorrentes > Contas fixas | ⬜ |
-| GET | `/v1/spaces/{id}/goals` | Metas screen | ⬜ |
-| GET | `/v1/spaces/{id}/installment-plans` | Contas a pagar screen | ⬜ |
-| GET | `/v1/spaces/{id}/investments` | Patrimônio screen | ⬜ |
-| GET | `/v1/spaces/{id}/overview` | Visão Geral screen | ⬜ |
-| GET | `/v1/spaces/{id}/subscriptions` | Recorrentes > Assinaturas | ⬜ |
-| GET | `/v1/spaces/{id}/tags` | Tag filter dropdowns, tag management | ⬜ |
+| GET | `/v1/spaces/{id}/fixed-bills` | Recorrentes > Contas fixas | ✅ |
+| GET | `/v1/spaces/{id}/goals` | Metas screen | ✅ |
+| GET | `/v1/spaces/{id}/installment-plans` | Contas a pagar screen | ✅ |
+| GET | `/v1/spaces/{id}/investments` | Patrimônio screen | ✅ |
+| GET | `/v1/spaces/{id}/overview` | Visão Geral screen | ✅ |
+| GET | `/v1/spaces/{id}/subscriptions` | Recorrentes > Assinaturas | ✅ |
+| GET | `/v1/spaces/{id}/tags` | Tag filter dropdowns, tag management | ✅ |
 
 ### Transactions CRUD
 
 | Method | Path | TUI Screen / Action | Status |
 |---|---|---|---|
-| GET | `/v1/spaces/{id}/transactions` | Transações list with filters + pagination | ⬜ |
+| GET | `/v1/spaces/{id}/transactions` | Transações list with filters + pagination | ✅ |
 | POST | `/v1/spaces/{id}/transactions` | New transaction form submit (with Idempotency-Key) | ⬜ |
-| GET | `/v1/spaces/{id}/transactions/{id}` | Transaction detail view | ⬜ |
+| GET | `/v1/spaces/{id}/transactions/{id}` | Transaction detail view | ✅ |
 | PATCH | `/v1/spaces/{id}/transactions/{id}` | Edit transaction form submit | ⬜ |
 | DELETE | `/v1/spaces/{id}/transactions/{id}` | Delete with confirmation modal | ⬜ |
 
@@ -277,17 +277,17 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 
 | Dashboard Section | TUI Screen | Key Endpoints | Status |
 |---|---|---|---|
-| Visão Geral | Overview screen | `/overview` | ⬜ |
-| Transações | Transactions screen | `/transactions` (list, CRUD) | ⬜ |
-| Recorrentes | Recurring screen (tabs) | `/subscriptions`, `/fixed-bills` | ⬜ |
-| Fluxo de Caixa | Cash flow section/screen | `/overview` (period data) | ⬜ |
-| Contas e Cartões | Accounts & Cards screen | `/accounts`, `/cards` | ⬜ |
-| Categorias | Categories screen | `/categories` | ⬜ |
-| Metas | Goals screen | `/goals` | ⬜ |
-| Projeção | Projection screen | `/overview` (projection data) | ⬜ |
-| Patrimônio | Net Worth / Investments screen | `/investments` | ⬜ |
-| Faturas | Bills screen | `/cards/{id}/bills` | ⬜ |
-| Contas a pagar | Bills to pay screen | `/installment-plans` | ⬜ |
+| Visão Geral | Overview screen | `/overview` | ✅ |
+| Transações | Transactions screen | `/transactions` (list, CRUD) | 🚧 |
+| Recorrentes | Recurring screen (tabs) | `/subscriptions`, `/fixed-bills` | ✅ |
+| Fluxo de Caixa | Cash flow section/screen | `/overview` (period data) | ✅ |
+| Contas e Cartões | Accounts & Cards screen | `/accounts`, `/cards` | ✅ |
+| Categorias | Categories screen | `/categories` | ✅ |
+| Metas | Goals screen | `/goals` | ✅ |
+| Projeção | Projection screen | `/overview` (projection data) | ✅ |
+| Patrimônio | Net Worth / Investments screen | `/investments` | ✅ |
+| Faturas | Bills screen | `/cards/{id}/bills` | ✅ |
+| Contas a pagar | Bills to pay screen | `/installment-plans` | ✅ |
 
 ---
 
@@ -295,12 +295,12 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 
 | Category | Total Items | Done | In Progress | Not Started |
 |---|---|---|---|---|
-| Commands → Screens | 62 | 0 | 0 | 62 |
-| API Endpoints | 19 | 0 | 0 | 19 |
+| Commands → Screens | 62 | 17 | 1 | 44 |
+| API Endpoints | 19 | 14 | 0 | 5 |
 | Auth Flow | 16 | 0 | 0 | 16 |
 | Config & State | 9 | 0 | 0 | 9 |
 | Output & Display | 12 | 0 | 0 | 12 |
 | Other Features | 13 | 0 | 0 | 13 |
 | Exit Codes & Errors | 16 | 0 | 0 | 16 |
-| Dashboard Screens | 11 | 0 | 0 | 11 |
-| **Total** | **158** | **0** | **0** | **158** |
+| Dashboard Screens | 11 | 10 | 1 | 0 |
+| **Total** | **158** | **41** | **2** | **115** |
