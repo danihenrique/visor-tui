@@ -592,7 +592,7 @@ fn table_amounts_fit_without_a_trailing_ellipsis() {
             })
             .expect("amount missing");
         assert!(
-            row.trim_end().ends_with("R$ 12,34"),
+            row.trim_end_matches([' ', '│']).ends_with("R$ 12,34"),
             "amount clipped at {width}: {row}"
         );
     }
@@ -631,5 +631,103 @@ fn active_filter_chips_wrap_and_keep_all_dimensions_visible() {
         "Ignorados",
     ] {
         assert!(text.contains(chip), "missing chip {chip}");
+    }
+}
+
+fn transaction_lines(state: &TransactionsScreen, width: usize, height: usize) -> Vec<String> {
+    let buffer = Rc::new(RefCell::new(FrameBuffer::new(width, height)));
+    let surface = Surface::root(buffer.clone(), Rc::new(hqtui::theme::dark()));
+    view::draw(&surface, state);
+    buffer
+        .borrow()
+        .chars
+        .chunks(width)
+        .map(|row| {
+            row.iter()
+                .filter_map(|cell| char::from_u32(*cell))
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn loaded_totals_and_category_spending_exclude_ignored_and_income() {
+    let mut state = screen();
+    let mut expense = transaction();
+    expense.amount = "30.00".into();
+    let mut other = expense.clone();
+    other.category_id = None;
+    other.amount = "10.00".into();
+    let mut income = expense.clone();
+    income.tx_type = "CREDIT".into();
+    income.amount = "200.00".into();
+    let mut ignored = expense.clone();
+    ignored.ignored = true;
+    ignored.amount = "900.00".into();
+    state.transactions = vec![expense, other, income, ignored];
+    state.next_cursor = Some("more".into());
+    let lines = transaction_lines(&state, 120, 40);
+    let summary = lines[..6].join("\n");
+    assert!(summary.contains("4 lançamentos"));
+    assert!(summary.contains("200,00 BRL"));
+    assert!(summary.contains("40,00 BRL"));
+    assert!(summary.contains("Parcial"));
+    assert!(summary.contains("Sem ignorados"));
+    let chart = lines[lines
+        .iter()
+        .position(|line| line.contains("Gastos por categoria"))
+        .unwrap()..]
+        .join("\n");
+    assert!(chart.contains("Alimentação"));
+    assert!(chart.contains("30,00 BRL   75%"));
+    assert!(chart.contains("10,00 BRL   25%"));
+    assert!(!chart.contains("900,00"));
+    assert!(!chart.contains("200,00"));
+}
+
+#[test]
+fn transactions_keep_foreign_currency_labels_and_skip_mixed_currency_charts() {
+    let mut state = screen();
+    let mut foreign = transaction();
+    foreign.amount = "5.00".into();
+    foreign.currency_code = Some("USD".into());
+    state.transactions.push(foreign);
+    let lines = transaction_lines(&state, 120, 40);
+    assert!(lines[..6].join("\n").contains("Várias moedas"));
+    let rendered = lines.join("\n");
+    assert!(rendered.contains("-USD 5,00"));
+    assert!(!rendered.contains("Gastos por categoria"));
+}
+
+#[test]
+fn selected_transaction_has_a_marker_highlight_and_click_target() {
+    for (width, height) in [(95, 36), (78, 20), (58, 14)] {
+        let state = screen();
+        let buffer = Rc::new(RefCell::new(FrameBuffer::new(width, height)));
+        let theme = Rc::new(hqtui::theme::dark());
+        let surface = Surface::root(buffer.clone(), theme.clone());
+        view::draw(&surface, &state);
+        let buffer = buffer.borrow();
+        let selected = buffer
+            .chars
+            .iter()
+            .position(|cell| *cell == u32::from('▸'))
+            .expect("selection marker");
+        let y = selected / width;
+        assert_eq!(buffer.bg[selected + 1], theme.selection);
+        assert!(
+            state.hitboxes.borrow().iter().any(
+                |hitbox| hitbox.contains(3, y) && matches!(hitbox.action, view::Action::Row(0))
+            )
+        );
+        if width >= 65 {
+            assert!(buffer.chars.chunks(width).any(|cells| {
+                cells
+                    .iter()
+                    .filter_map(|cell| char::from_u32(*cell))
+                    .collect::<String>()
+                    .contains("CATEGORIA")
+            }));
+        }
     }
 }

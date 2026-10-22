@@ -1,18 +1,20 @@
 use hqtui::{
     buffer::{Attrs, Style},
     color::Color,
+    graphics::{BarOptions, bar},
     prelude::*,
-    surface::TextOptions,
+    surface::{BoxOptions, TextOptions},
     unicode::{Align, fit, string_width, wrap},
     widgets::{ModalOptions, draw_modal},
 };
+
+use crate::{models::Transaction, presentation::money_total};
 
 use super::{
     TransactionMode, TransactionsScreen,
     model::{Choice, FilterField, FormField, PickerKind, TransactionForm, format_amount},
 };
 
-const GREEN: Color = Color::rgb(83, 211, 160);
 const RED: Color = Color::rgb(255, 119, 134);
 
 #[derive(Clone)]
@@ -105,15 +107,17 @@ fn draw_list(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hitbo
         text(surface, 0, "Amplie o terminal para ver transações.", RED);
         return;
     }
-    text(
-        surface,
-        0,
-        &format!("TRANSAÇÕES  ·  {} carregadas", state.transactions.len()),
-        surface.theme.accent,
-    );
+    text(surface, 0, "TRANSAÇÕES", surface.theme.accent);
+    let show_summary = width >= 65 && height >= 20;
+    let controls_y = if show_summary {
+        draw_summary(&surface.sub(0, 2, width, 4), state);
+        7
+    } else {
+        1
+    };
     buttons(
         surface,
-        1,
+        controls_y,
         &[
             ("n Nova", "n"),
             ("f Filtros", "f"),
@@ -130,25 +134,25 @@ fn draw_list(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hitbo
         chips.join("  ")
     };
     let mut chip_lines = wrap(&chip_text, width.saturating_sub(2));
-    let max_chip_lines = height.saturating_sub(9).max(1);
+    let max_chip_lines = height.saturating_sub(controls_y + 7).max(1);
     if chip_lines.len() > max_chip_lines {
         chip_lines.truncate(max_chip_lines);
         chip_lines[max_chip_lines - 1] = "Mais filtros ativos · f para ver todos".into();
     }
     for (index, line) in chip_lines.iter().enumerate() {
-        text(surface, 2 + index, line, surface.theme.muted);
+        text(surface, controls_y + 1 + index, line, surface.theme.muted);
         if !chips.is_empty() {
             hit(
                 surface,
                 1,
-                2 + index,
+                controls_y + 1 + index,
                 width.saturating_sub(2),
                 Action::Key("f".into()),
                 hits,
             );
         }
     }
-    let actions_y = 2 + chip_lines.len();
+    let actions_y = controls_y + 1 + chip_lines.len();
     if let Some(error) = &state.error {
         text(surface, actions_y, error, RED);
     } else {
@@ -164,14 +168,33 @@ fn draw_list(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hitbo
             hits,
         );
     }
-    let table_y = actions_y + 2;
-    let rows_visible = height.saturating_sub(table_y + 2);
+    let table_y = actions_y + 1;
+    let spending = category_spending(state);
+    let chart_height =
+        if width >= 75 && height.saturating_sub(table_y) >= 19 && !spending.is_empty() {
+            6
+        } else {
+            0
+        };
+    let table_height = height.saturating_sub(table_y + chart_height + 1);
+    let table = surface
+        .sub(0, coord(table_y), width, table_height)
+        .draw_box(
+            &BoxOptions::new()
+                .title(format!(
+                    "Lançamentos · {} carregados",
+                    state.transactions.len()
+                ))
+                .border(BorderStyle::Rounded),
+        );
+    let width = table.width();
+    let rows_visible = table.height().saturating_sub(2);
     let selected = state.selected_index.unwrap_or(0);
     let offset = selected.saturating_sub(rows_visible.saturating_sub(1));
-    let amount_width = if width >= 65 { 20 } else { 15 };
-    let date_width = if width >= 48 { 11 } else { 0 };
-    let category_width = if width >= 100 { 18 } else { 0 };
-    let account_width = if width >= 120 { 18 } else { 0 };
+    let amount_width = if width >= 65 { 18 } else { 15 };
+    let date_width = if width >= 48 { 10 } else { 0 };
+    let category_width = if width >= 65 { 16 } else { 0 };
+    let account_width = if width >= 125 { 18 } else { 0 };
     let gaps = [date_width, category_width, account_width]
         .iter()
         .filter(|width| **width > 0)
@@ -179,38 +202,27 @@ fn draw_list(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hitbo
         + 1;
     let description_width =
         width.saturating_sub(amount_width + date_width + category_width + account_width + 2 + gaps);
-    let header = row_text(
-        "DATA",
-        "DESCRIÇÃO",
-        "CATEGORIA",
-        "CONTA",
-        "VALOR",
-        [
-            date_width,
-            description_width,
-            category_width,
-            account_width,
-            amount_width,
-        ],
-    );
-    text(surface, table_y - 1, &header, surface.theme.muted);
+    let widths = [
+        date_width,
+        description_width,
+        category_width,
+        account_width,
+        amount_width,
+    ];
+    let header = row_text("DATA", "DESCRIÇÃO", "CATEGORIA", "CONTA", "VALOR", widths);
+    text(&table, 0, &header, surface.theme.muted);
     if state.loading {
-        text(
-            surface,
-            table_y + 1,
-            "Carregando transações…",
-            surface.theme.muted,
-        );
+        text(&table, 2, "Carregando transações…", surface.theme.muted);
     } else if state.transactions.is_empty() {
         text(
-            surface,
-            table_y + 1,
+            &table,
+            2,
             "Nenhuma transação encontrada.",
             surface.theme.foreground,
         );
         text(
-            surface,
-            table_y + 2,
+            &table,
+            3,
             "n para criar · f para ajustar filtros · c para limpar",
             surface.theme.muted,
         );
@@ -222,17 +234,24 @@ fn draw_list(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hitbo
         .skip(offset)
         .take(rows_visible)
     {
-        let y = table_y + index - offset;
-        if Some(index) == state.selected_index {
-            surface.style_rect(
+        let y = 2 + index - offset;
+        let selected = Some(index) == state.selected_index;
+        if selected {
+            table.style_rect(
                 0,
                 coord(y),
                 width,
                 1,
                 &Style::new().with_bg(surface.theme.selection),
             );
+            table.text(
+                0,
+                coord(y),
+                "▸",
+                &TextOptions::new().fg(surface.theme.accent),
+            );
         }
-        let amount = format_amount(&tx.amount, &tx.tx_type);
+        let amount = transaction_amount(tx);
         let description = tx
             .description
             .as_deref()
@@ -260,32 +279,74 @@ fn draw_list(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hitbo
             .split('T')
             .next()
             .unwrap_or("—");
-        let row = row_text(
-            date,
-            &description,
-            category,
-            account,
-            "",
-            [
-                date_width,
-                description_width,
-                category_width,
-                account_width,
-                amount_width,
-            ],
+        let row = row_text(date, &description, category, account, "", widths);
+        text(
+            &table,
+            y,
+            &row,
+            if tx.ignored {
+                surface.theme.muted
+            } else {
+                surface.theme.foreground
+            },
         );
-        text(surface, y, &row, surface.theme.foreground);
-        surface.text(
+        table.text(
             coord(width.saturating_sub(amount_width + 1)),
             coord(y),
             &fit(&amount, amount_width, Align::Right),
-            &TextOptions::new().fg(if tx.tx_type.eq_ignore_ascii_case("credit") {
-                GREEN
+            &TextOptions::new().fg(if tx.ignored {
+                surface.theme.muted
+            } else if tx.tx_type.eq_ignore_ascii_case("credit") {
+                surface.theme.success
             } else {
-                RED
+                surface.theme.danger
             }),
         );
-        hit(surface, 0, y, width, Action::Row(index), hits);
+        hit(&table, 0, y, width, Action::Row(index), hits);
+    }
+    if chart_height > 0 {
+        let chart = surface
+            .sub(
+                0,
+                coord(table_y + table_height),
+                surface.width(),
+                chart_height,
+            )
+            .draw_box(
+                &BoxOptions::new()
+                    .title("Gastos por categoria · carregados, sem ignorados")
+                    .border(BorderStyle::Rounded),
+            );
+        let label_width = 22;
+        let value_width = 23;
+        let bar_width = chart.width().saturating_sub(label_width + value_width + 6);
+        for (y, category) in spending.iter().take(3).enumerate() {
+            text(
+                &chart,
+                y,
+                &fit(&category.name, label_width, Align::Left),
+                surface.theme.foreground,
+            );
+            bar(
+                &chart.sub(coord(label_width + 2), coord(y), bar_width, 1),
+                &BarOptions {
+                    value: category.share,
+                    color: Some(surface.theme.accent),
+                    track: Some(surface.theme.border),
+                    ..Default::default()
+                },
+            );
+            chart.text(
+                coord(chart.width().saturating_sub(value_width + 1)),
+                coord(y),
+                &fit(
+                    &format!("{}  {:>3.0}%", category.formatted, category.share * 100.0),
+                    value_width,
+                    Align::Right,
+                ),
+                &TextOptions::new().fg(surface.theme.muted),
+            );
+        }
     }
     let footer = if state.next_cursor.is_some() {
         "j/k mover · m carregar mais · ? atalhos"
@@ -294,8 +355,150 @@ fn draw_list(surface: &Surface, state: &TransactionsScreen, hits: &mut Vec<Hitbo
     };
     text(surface, height - 1, footer, surface.theme.muted);
     if state.next_cursor.is_some() {
-        hit(surface, 0, height - 1, width, Action::Key("m".into()), hits);
+        hit(
+            surface,
+            0,
+            height - 1,
+            surface.width(),
+            Action::Key("m".into()),
+            hits,
+        );
     }
+}
+
+fn transaction_amount(tx: &Transaction) -> String {
+    let amount = format_amount(&tx.amount, &tx.tx_type);
+    match tx.currency_code.as_deref().filter(|code| !code.is_empty()) {
+        Some(code) if code != "BRL" => amount.replacen("R$", code, 1),
+        _ => amount,
+    }
+}
+
+fn draw_summary(surface: &Surface, state: &TransactionsScreen) {
+    let total = |tx_type: &str| {
+        let transactions: Vec<_> = state
+            .transactions
+            .iter()
+            .filter(|tx| !tx.ignored && tx.tx_type.eq_ignore_ascii_case(tx_type))
+            .collect();
+        if transactions.is_empty() {
+            "Nenhuma".into()
+        } else {
+            money_total(transactions.iter().map(|tx| {
+                (
+                    Some(tx.amount.trim().trim_start_matches(['-', '+'])),
+                    tx.currency_code.as_deref(),
+                )
+            }))
+        }
+    };
+    let loaded = format!("{} lançamentos", state.transactions.len());
+    let coverage = if state.next_cursor.is_some() {
+        "Parcial · m carrega mais"
+    } else {
+        "Resultado dos filtros"
+    };
+    let summaries = [
+        ("Carregados", loaded, coverage, surface.theme.accent),
+        (
+            "Receitas na lista",
+            total("credit"),
+            "Sem ignorados",
+            surface.theme.success,
+        ),
+        (
+            "Despesas na lista",
+            total("debit"),
+            "Sem ignorados",
+            surface.theme.danger,
+        ),
+    ];
+    let card_width = surface.width().saturating_sub(2) / 3;
+    for (index, (label, value, detail, color)) in summaries.into_iter().enumerate() {
+        let x = index * (card_width + 1);
+        let width = if index == 2 {
+            surface.width().saturating_sub(x)
+        } else {
+            card_width
+        };
+        let card = surface
+            .sub(coord(x), 0, width, 4)
+            .draw_box(&BoxOptions::new().title(label).border(BorderStyle::Rounded));
+        card.text(
+            1,
+            0,
+            &value,
+            &TextOptions::new()
+                .fg(color)
+                .attrs(Attrs::BOLD)
+                .max_width(card.width().saturating_sub(2)),
+        );
+        text(&card, 1, detail, surface.theme.muted);
+    }
+}
+
+struct CategorySpending {
+    name: String,
+    formatted: String,
+    share: f64,
+}
+
+fn category_spending(state: &TransactionsScreen) -> Vec<CategorySpending> {
+    let mut groups = std::collections::BTreeMap::<Option<&str>, Vec<&Transaction>>::new();
+    let mut currency = None;
+    let mut total = 0.0;
+    for tx in state
+        .transactions
+        .iter()
+        .filter(|tx| !tx.ignored && tx.tx_type.eq_ignore_ascii_case("debit"))
+    {
+        let code = tx
+            .currency_code
+            .as_deref()
+            .filter(|code| !code.is_empty())
+            .unwrap_or("BRL");
+        if currency.is_some_and(|previous| previous != code) {
+            return Vec::new();
+        }
+        currency = Some(code);
+        let Some(amount) = crate::presentation::amount(Some(&tx.amount)) else {
+            return Vec::new();
+        };
+        total += amount.abs();
+        groups
+            .entry(tx.category_id.as_deref())
+            .or_default()
+            .push(tx);
+    }
+    if total <= 0.0 || !total.is_finite() {
+        return Vec::new();
+    }
+    let mut spending: Vec<_> = groups
+        .into_iter()
+        .map(|(id, transactions)| {
+            let amount: f64 = transactions
+                .iter()
+                .filter_map(|tx| crate::presentation::amount(Some(&tx.amount)))
+                .map(f64::abs)
+                .sum();
+            CategorySpending {
+                name: state
+                    .categories
+                    .iter()
+                    .find(|category| Some(category.id.as_str()) == id)
+                    .map_or_else(|| "Sem categoria".into(), |category| category.name.clone()),
+                formatted: money_total(transactions.iter().map(|tx| {
+                    (
+                        Some(tx.amount.trim().trim_start_matches(['-', '+'])),
+                        tx.currency_code.as_deref(),
+                    )
+                })),
+                share: amount / total,
+            }
+        })
+        .collect();
+    spending.sort_by(|a, b| b.share.total_cmp(&a.share));
+    spending
 }
 
 fn row_text(
@@ -309,8 +512,19 @@ fn row_text(
     [date, description, category, account, amount]
         .into_iter()
         .zip(widths)
-        .filter(|(_, width)| *width > 0)
-        .map(|(value, width)| fit(value, width, Align::Left))
+        .enumerate()
+        .filter(|(_, (_, width))| *width > 0)
+        .map(|(index, (value, width))| {
+            fit(
+                value,
+                width,
+                if index == 4 {
+                    Align::Right
+                } else {
+                    Align::Left
+                },
+            )
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
