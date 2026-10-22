@@ -1,3 +1,5 @@
+use std::fmt::Write;
+
 use reqwest::blocking::Client;
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
@@ -17,23 +19,293 @@ pub struct ApiClient {
     space_id: Option<String>,
 }
 
+/// Exit code constants matching the CLI contract.
+pub mod exit {
+    pub const SUCCESS: u8 = 0;
+    pub const FAILURE: u8 = 1;
+    pub const USAGE: u8 = 2;
+    pub const AUTH: u8 = 3;
+    pub const NOT_FOUND: u8 = 4;
+    pub const REJECTED: u8 = 5;
+    pub const UNAVAILABLE: u8 = 6;
+}
+
+/// Inner data for an API error, boxed to keep `ApiError` small.
+#[derive(Debug)]
+pub struct ApiErrorData {
+    pub status: u16,
+    pub code: String,
+    pub message: String,
+    pub details: serde_json::Value,
+    pub request_id: Option<String>,
+    pub display: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
-    #[error("API error {status}: {code} — {message}")]
-    Api {
-        status: u16,
-        code: String,
-        message: String,
-        request_id: Option<String>,
-    },
+    #[error("{}", .0.display)]
+    Api(Box<ApiErrorData>),
     #[error("No credential configured")]
     NoCredential,
     #[error("No active space configured")]
     NoSpace,
     #[error("JSON decode error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+impl ApiError {
+    /// Build an API error from parsed envelope fields, computing the display string.
+    fn api(
+        status: u16,
+        code: String,
+        message: String,
+        details: serde_json::Value,
+        request_id: Option<String>,
+    ) -> Self {
+        let display = format_api_error_display(&code, &message, &details, request_id.as_deref());
+        Self::Api(Box::new(ApiErrorData {
+            status,
+            code,
+            message,
+            details,
+            request_id,
+            display,
+        }))
+    }
+
+    /// Parse an error body into an `ApiError`. A body outside the standard
+    /// envelope still yields an error that carries the HTTP status.
+    fn from_body(status: u16, body: &serde_json::Value) -> Self {
+        if let Some(e) = body
+            .get("errors")
+            .and_then(|e| e.as_array())
+            .and_then(|arr| arr.first())
+        {
+            let code = e
+                .get("code")
+                .and_then(|c| c.as_str())
+                .unwrap_or("UNKNOWN")
+                .to_string();
+            let message = e
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string();
+            let details = e.get("details").cloned().unwrap_or(serde_json::Value::Null);
+            let request_id = e
+                .get("request_id")
+                .and_then(|r| r.as_str())
+                .map(str::to_string);
+            Self::api(status, code, message, details, request_id)
+        } else {
+            let code = format!("HTTP_{status}");
+            let message = format!("the API answered with HTTP {status}");
+            Self::api(status, code, message, serde_json::Value::Null, None)
+        }
+    }
+
+    /// Returns the exit code for this error, matching the CLI's mapping.
+    #[must_use]
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Self::Http(_) => exit::UNAVAILABLE,
+            Self::Api(data) => match data.status {
+                401 | 403 => exit::AUTH,
+                404 => exit::NOT_FOUND,
+                400 | 406 | 409 | 422 => exit::REJECTED,
+                429 | 500.. => exit::UNAVAILABLE,
+                _ => exit::FAILURE,
+            },
+            Self::NoCredential | Self::NoSpace => exit::AUTH,
+            Self::Json(_) => exit::FAILURE,
+        }
+    }
+
+    /// Returns a user-friendly hint for known error codes, or `None`.
+    #[must_use]
+    pub fn hint(&self) -> Option<String> {
+        if let Self::Api(data) = self {
+            return match data.code.as_str() {
+                "INVALID_TOKEN" | "UNAUTHENTICATED" | "TOKEN_EXPIRED" | "TOKEN_REVOKED" => {
+                    Some("Sessão expirada. Faça login novamente.".to_owned())
+                }
+                "INSUFFICIENT_SCOPE" => {
+                    let scope = data
+                        .details
+                        .get("required_scope")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("outro escopo");
+                    Some(format!(
+                        "Esta sessão não possui o escopo `{scope}`. Faça login novamente ou crie um token com esse acesso."
+                    ))
+                }
+                "RATE_LIMITED" => match data
+                    .details
+                    .get("retry_after_seconds")
+                    .and_then(serde_json::Value::as_u64)
+                {
+                    Some(seconds) => Some(format!("Tente novamente em {seconds} segundos.")),
+                    None => Some("Tente novamente em um minuto.".to_owned()),
+                },
+                "IDEMPOTENCY_CONFLICT" => {
+                    Some("Esta operação já foi realizada.".to_owned())
+                }
+                "IMMUTABLE_PROVIDER_FIELD" => Some(
+                    "Este campo não pode ser editado (sincronizado automaticamente).".to_owned(),
+                ),
+                "TRANSACTION_CONFLICT" => {
+                    let dep = data
+                        .details
+                        .get("dependency")
+                        .and_then(|d| d.as_str())
+                        .or_else(|| data.details.get("reason").and_then(|r| r.as_str()));
+                    match dep {
+                        Some(info) => Some(format!("Conflito de dependência: {info}")),
+                        None => {
+                            Some("Conflito de transação. Verifique as dependências.".to_owned())
+                        }
+                    }
+                }
+                "PLAN_REQUIRED" => {
+                    Some("O plano pessoal requer um plano Pro ou Premium ativo.".to_owned())
+                }
+                _ => None,
+            };
+        }
+        None
+    }
+
+    /// Extract field-level validation errors from `VALIDATION_FAILED` details.
+    /// Returns `(field, message)` pairs.
+    #[must_use]
+    pub fn field_errors(&self) -> Vec<(String, String)> {
+        if let Self::Api(data) = self {
+            let mut result = Vec::new();
+            if let Some(errors) = data.details.get("errors").and_then(|e| e.as_array()) {
+                for error in errors {
+                    let field = error
+                        .get("field")
+                        .and_then(|f| f.as_str())
+                        .unwrap_or("body")
+                        .to_string();
+                    let message = error
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("é inválido")
+                        .to_string();
+                    result.push((field, message));
+                }
+            }
+            return result;
+        }
+        Vec::new()
+    }
+
+    /// Returns the API error code if this is an API error.
+    #[must_use]
+    pub fn api_code(&self) -> Option<&str> {
+        if let Self::Api(data) = self {
+            Some(data.code.as_str())
+        } else {
+            None
+        }
+    }
+}
+
+/// Format a user-friendly display string for TUI toast/modal display.
+fn format_api_error_display(
+    code: &str,
+    message: &str,
+    details: &serde_json::Value,
+    request_id: Option<&str>,
+) -> String {
+    let mut out = String::new();
+
+    match code {
+        "INVALID_TOKEN" | "UNAUTHENTICATED" | "TOKEN_EXPIRED" | "TOKEN_REVOKED" => {
+            out.push_str("Sessão expirada. Faça login novamente.");
+        }
+        "INSUFFICIENT_SCOPE" => {
+            let scope = details
+                .get("required_scope")
+                .and_then(|s| s.as_str())
+                .unwrap_or("outro escopo");
+            let _ = write!(
+                out,
+                "Escopo insuficiente: `{scope}` necessário. Faça login novamente."
+            );
+        }
+        "VALIDATION_FAILED" => {
+            out.push_str(message);
+            if let Some(errors) = details.get("errors").and_then(|e| e.as_array()) {
+                for error in errors {
+                    let field = error.get("field").and_then(|f| f.as_str()).unwrap_or("body");
+                    let msg = error.get("message").and_then(|m| m.as_str()).unwrap_or("é inválido");
+                    let _ = write!(out, "\n  {field}: {msg}");
+                }
+            }
+        }
+        "RATE_LIMITED" => {
+            match details
+                .get("retry_after_seconds")
+                .and_then(serde_json::Value::as_u64)
+            {
+                Some(seconds) => {
+                    let _ = write!(
+                        out,
+                        "Limite de requisições atingido. Tente novamente em {seconds} segundos."
+                    );
+                }
+                None => {
+                    out.push_str(
+                        "Limite de requisições atingido. Tente novamente em um minuto.",
+                    );
+                }
+            }
+        }
+        "IDEMPOTENCY_CONFLICT" => {
+            out.push_str("Esta operação já foi realizada.");
+        }
+        "IMMUTABLE_PROVIDER_FIELD" => {
+            out.push_str("Este campo não pode ser editado (sincronizado automaticamente).");
+        }
+        "TRANSACTION_CONFLICT" => {
+            let dep = details
+                .get("dependency")
+                .and_then(|d| d.as_str())
+                .or_else(|| details.get("reason").and_then(|r| r.as_str()));
+            match dep {
+                Some(info) => {
+                    let _ = write!(out, "Conflito de transação: {info}");
+                }
+                None => {
+                    out.push_str("Conflito de transação. Verifique as dependências.");
+                }
+            }
+        }
+        "NOT_FOUND" => {
+            out.push_str("Recurso não encontrado.");
+        }
+        "BAD_REQUEST" => {
+            out.push_str(message);
+            for key in ["field", "parameter", "reason"] {
+                if let Some(value) = details.get(key).and_then(|v| v.as_str()) {
+                    let _ = write!(out, "\n  {key}: {value}");
+                }
+            }
+        }
+        _ => {
+            out.push_str(message);
+        }
+    }
+
+    if let Some(rid) = request_id {
+        let _ = write!(out, "\nRequest ID: {rid}");
+    }
+
+    out
 }
 
 impl ApiClient {
@@ -97,27 +369,7 @@ impl ApiClient {
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let body: serde_json::Value = resp.json().unwrap_or_default();
-            let errors = body.get("errors").and_then(|e| e.as_array());
-            let (code, message) = errors
-                .and_then(|arr| arr.first()).map_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")), |e| {
-                    (
-                        e.get("code").and_then(|c| c.as_str()).unwrap_or("UNKNOWN").to_string(),
-                        e.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string(),
-                    )
-                });
-            let request_id = body
-                .get("errors")
-                .and_then(|e| e.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|e| e.get("request_id"))
-                .and_then(|r| r.as_str())
-                .map(String::from);
-            return Err(ApiError::Api {
-                status,
-                code,
-                message,
-                request_id,
-            });
+            return Err(ApiError::from_body(status, &body));
         }
 
         Ok(resp.json()?)
@@ -330,20 +582,7 @@ impl ApiClient {
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let body: serde_json::Value = resp.json().unwrap_or_default();
-            let errors = body.get("errors").and_then(|e| e.as_array());
-            let (code, message) = errors
-                .and_then(|arr| arr.first()).map_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")), |e| {
-                    (
-                        e.get("code").and_then(|c| c.as_str()).unwrap_or("UNKNOWN").to_string(),
-                        e.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string(),
-                    )
-                });
-            let request_id = errors
-                .and_then(|arr| arr.first())
-                .and_then(|e| e.get("request_id"))
-                .and_then(|r| r.as_str())
-                .map(String::from);
-            return Err(ApiError::Api { status, code, message, request_id });
+            return Err(ApiError::from_body(status, &body));
         }
 
         let text = resp.text()?;
@@ -367,20 +606,7 @@ impl ApiClient {
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let body: serde_json::Value = resp.json().unwrap_or_default();
-            let errors = body.get("errors").and_then(|e| e.as_array());
-            let (code, message) = errors
-                .and_then(|arr| arr.first()).map_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")), |e| {
-                    (
-                        e.get("code").and_then(|c| c.as_str()).unwrap_or("UNKNOWN").to_string(),
-                        e.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string(),
-                    )
-                });
-            let request_id = errors
-                .and_then(|arr| arr.first())
-                .and_then(|e| e.get("request_id"))
-                .and_then(|r| r.as_str())
-                .map(String::from);
-            return Err(ApiError::Api { status, code, message, request_id });
+            return Err(ApiError::from_body(status, &body));
         }
 
         let text = resp.text()?;
@@ -403,20 +629,7 @@ impl ApiClient {
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let body: serde_json::Value = resp.json().unwrap_or_default();
-            let errors = body.get("errors").and_then(|e| e.as_array());
-            let (code, message) = errors
-                .and_then(|arr| arr.first()).map_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")), |e| {
-                    (
-                        e.get("code").and_then(|c| c.as_str()).unwrap_or("UNKNOWN").to_string(),
-                        e.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string(),
-                    )
-                });
-            let request_id = errors
-                .and_then(|arr| arr.first())
-                .and_then(|e| e.get("request_id"))
-                .and_then(|r| r.as_str())
-                .map(String::from);
-            return Err(ApiError::Api { status, code, message, request_id });
+            return Err(ApiError::from_body(status, &body));
         }
 
         Ok(())
@@ -904,20 +1117,7 @@ impl ApiClient {
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let body: serde_json::Value = resp.json().unwrap_or_default();
-            let errors = body.get("errors").and_then(|e| e.as_array());
-            let (code, message) = errors
-                .and_then(|arr| arr.first()).map_or_else(|| ("UNKNOWN".to_string(), format!("HTTP {status}")), |e| {
-                    (
-                        e.get("code").and_then(|c| c.as_str()).unwrap_or("UNKNOWN").to_string(),
-                        e.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string(),
-                    )
-                });
-            let request_id = errors
-                .and_then(|arr| arr.first())
-                .and_then(|e| e.get("request_id"))
-                .and_then(|r| r.as_str())
-                .map(String::from);
-            return Err(ApiError::Api { status, code, message, request_id });
+            return Err(ApiError::from_body(status, &body));
         }
 
         Ok(resp.text()?)
@@ -1140,19 +1340,179 @@ mod tests {
             .create_transaction("", "", "expense", "acc-1", None, &[], None, None, None, false)
             .unwrap_err();
 
-        match err {
-            ApiError::Api {
-                status,
-                code,
-                message,
-                ..
-            } => {
-                assert_eq!(status, 422);
-                assert_eq!(code, "VALIDATION_FAILED");
-                assert_eq!(message, "Amount is required");
+        match &err {
+            ApiError::Api(data) => {
+                assert_eq!(data.status, 422);
+                assert_eq!(data.code, "VALIDATION_FAILED");
+                assert_eq!(data.message, "Amount is required");
             }
             other => panic!("expected ApiError::Api, got: {other:?}"),
         }
+        mock.assert();
+    }
+
+    // ── Structured error handling tests ──
+
+    #[test]
+    fn test_exit_code_mapping() {
+        let make = |status: u16| -> u8 {
+            let body = json!({"errors": [{"code": "TEST", "message": "test"}]});
+            ApiError::from_body(status, &body).exit_code()
+        };
+        assert_eq!(make(401), exit::AUTH);
+        assert_eq!(make(403), exit::AUTH);
+        assert_eq!(make(404), exit::NOT_FOUND);
+        assert_eq!(make(400), exit::REJECTED);
+        assert_eq!(make(409), exit::REJECTED);
+        assert_eq!(make(422), exit::REJECTED);
+        assert_eq!(make(429), exit::UNAVAILABLE);
+        assert_eq!(make(500), exit::UNAVAILABLE);
+        assert_eq!(make(502), exit::UNAVAILABLE);
+        assert_eq!(make(418), exit::FAILURE);
+    }
+
+    #[test]
+    fn test_hint_invalid_token() {
+        let body = json!({"errors": [{"code": "INVALID_TOKEN", "message": "Bad token"}]});
+        let err = ApiError::from_body(401, &body);
+        let hint = err.hint().expect("should have hint");
+        assert!(hint.contains("login"), "{hint}");
+    }
+
+    #[test]
+    fn test_hint_insufficient_scope() {
+        let body = json!({"errors": [{"code": "INSUFFICIENT_SCOPE", "message": "Missing scope", "details": {"required_scope": "pfm:transactions:write"}}]});
+        let err = ApiError::from_body(403, &body);
+        let hint = err.hint().expect("should have hint");
+        assert!(hint.contains("pfm:transactions:write"), "{hint}");
+    }
+
+    #[test]
+    fn test_hint_rate_limited_with_retry() {
+        let body = json!({"errors": [{"code": "RATE_LIMITED", "message": "Too many requests", "details": {"retry_after_seconds": 30}}]});
+        let err = ApiError::from_body(429, &body);
+        let hint = err.hint().expect("should have hint");
+        assert!(hint.contains("30"), "{hint}");
+    }
+
+    #[test]
+    fn test_hint_rate_limited_without_retry() {
+        let body = json!({"errors": [{"code": "RATE_LIMITED", "message": "Too many requests"}]});
+        let err = ApiError::from_body(429, &body);
+        let hint = err.hint().expect("should have hint");
+        assert!(hint.contains("minuto"), "{hint}");
+    }
+
+    #[test]
+    fn test_hint_idempotency_conflict() {
+        let body = json!({"errors": [{"code": "IDEMPOTENCY_CONFLICT", "message": "Duplicate"}]});
+        let err = ApiError::from_body(409, &body);
+        let hint = err.hint().expect("should have hint");
+        assert!(hint.contains("já foi realizada"), "{hint}");
+    }
+
+    #[test]
+    fn test_hint_immutable_provider_field() {
+        let body = json!({"errors": [{"code": "IMMUTABLE_PROVIDER_FIELD", "message": "Cannot edit"}]});
+        let err = ApiError::from_body(409, &body);
+        let hint = err.hint().expect("should have hint");
+        assert!(hint.contains("sincronizado"), "{hint}");
+    }
+
+    #[test]
+    fn test_hint_transaction_conflict() {
+        let body = json!({"errors": [{"code": "TRANSACTION_CONFLICT", "message": "Conflict", "details": {"dependency": "bill-123"}}]});
+        let err = ApiError::from_body(409, &body);
+        let hint = err.hint().expect("should have hint");
+        assert!(hint.contains("bill-123"), "{hint}");
+    }
+
+    #[test]
+    fn test_hint_unknown_code_returns_none() {
+        let body = json!({"errors": [{"code": "SOMETHING_ELSE", "message": "Unknown"}]});
+        let err = ApiError::from_body(500, &body);
+        assert!(err.hint().is_none());
+    }
+
+    #[test]
+    fn test_field_errors_extraction() {
+        let body = json!({"errors": [{"code": "VALIDATION_FAILED", "message": "Invalid", "details": {"errors": [
+            {"field": "amount", "message": "must be positive"},
+            {"field": "description", "message": "is required"}
+        ]}}]});
+        let err = ApiError::from_body(422, &body);
+        let fields = err.field_errors();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0], ("amount".to_string(), "must be positive".to_string()));
+        assert_eq!(fields[1], ("description".to_string(), "is required".to_string()));
+    }
+
+    #[test]
+    fn test_field_errors_empty_for_non_validation() {
+        let body = json!({"errors": [{"code": "NOT_FOUND", "message": "Not found"}]});
+        let err = ApiError::from_body(404, &body);
+        assert!(err.field_errors().is_empty());
+    }
+
+    #[test]
+    fn test_display_includes_request_id() {
+        let body = json!({"errors": [{"code": "NOT_FOUND", "message": "Not found", "request_id": "req-abc-123"}]});
+        let err = ApiError::from_body(404, &body);
+        let display = err.to_string();
+        assert!(display.contains("req-abc-123"), "{display}");
+    }
+
+    #[test]
+    fn test_display_validation_failed_shows_fields() {
+        let body = json!({"errors": [{"code": "VALIDATION_FAILED", "message": "Invalid body", "details": {"errors": [
+            {"field": "amount", "message": "must be positive"}
+        ]}}]});
+        let err = ApiError::from_body(422, &body);
+        let display = err.to_string();
+        assert!(display.contains("amount"), "{display}");
+        assert!(display.contains("must be positive"), "{display}");
+    }
+
+    #[test]
+    fn test_from_body_fallback_for_non_envelope() {
+        let body = json!({"error": "something went wrong"});
+        let err = ApiError::from_body(502, &body);
+        assert_eq!(err.exit_code(), exit::UNAVAILABLE);
+        match &err {
+            ApiError::Api(data) => assert_eq!(data.code, "HTTP_502"),
+            other => panic!("expected Api variant, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_api_code_accessor() {
+        let body = json!({"errors": [{"code": "NOT_FOUND", "message": "Not found"}]});
+        let err = ApiError::from_body(404, &body);
+        assert_eq!(err.api_code(), Some("NOT_FOUND"));
+
+        let http_err = ApiError::NoCredential;
+        assert_eq!(http_err.api_code(), None);
+    }
+
+    #[test]
+    fn test_error_via_mockito_get() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/v1/me")
+            .with_status(401)
+            .with_body(
+                json!({"errors": [{"code": "INVALID_TOKEN", "message": "Token expired", "request_id": "r1"}]})
+                .to_string(),
+            )
+            .create();
+
+        let client = test_client(&server);
+        let err = client.me().unwrap_err();
+        assert_eq!(err.exit_code(), exit::AUTH);
+        assert_eq!(err.api_code(), Some("INVALID_TOKEN"));
+        assert!(err.hint().is_some());
+        let display = err.to_string();
+        assert!(display.contains("r1"), "{display}");
         mock.assert();
     }
 }

@@ -201,7 +201,7 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 | Reactive refresh on TOKEN_EXPIRED | Retry with refreshed token, transparent | ✅ |
 | Multi-process safety (adopt newer credential) | Reload from store on refresh failure | ✅ |
 | Personal API Token input | Masked text input form | ✅ |
-| PAT validation (must start with `visor_pat_`) | Client-side validation before storage | ⬜ |
+| PAT validation (must start with `visor_pat_`) | Client-side validation before storage | ✅ |
 | VISOR_TOKEN env override | Read on startup, takes precedence over store | ✅ |
 | Keyring credential store (default) | Reuse CLI's keyring integration | ✅ |
 | File credential store (`VISOR_CREDENTIAL_STORE=file`) | Read/write `credentials.json` with 0600 perms | ✅ |
@@ -268,25 +268,25 @@ Exhaustive mapping of every CLI command, flag, auth flow, and API endpoint to a 
 
 | Error Code | Meaning | TUI Behavior | Status |
 |---|---|---|---|
-| 0 | Success | Normal operation | ⬜ |
-| 1 | General failure | Error toast/notification | ⬜ |
-| 2 | Invalid usage | Form validation error display | ⬜ |
-| 3 | Not authenticated | Redirect to login screen | ⬜ |
-| 4 | Not found | "Not found" error display | ⬜ |
-| 5 | Request rejected | Validation/conflict error display | ⬜ |
-| 6 | Unavailable | Retry/backoff notification | ⬜ |
+| 0 | Success | Normal operation | ✅ |
+| 1 | General failure | Error toast/notification | ✅ |
+| 2 | Invalid usage | Form validation error display | ✅ |
+| 3 | Not authenticated | Redirect to login screen | ✅ |
+| 4 | Not found | "Not found" error display | ✅ |
+| 5 | Request rejected | Validation/conflict error display | ✅ |
+| 6 | Unavailable | Retry/backoff notification | ✅ |
 
 | Error Code (API) | TUI Handling | Status |
 |---|---|---|
-| `INVALID_TOKEN` (401) | Redirect to login or re-auth prompt | ⬜ |
-| `INSUFFICIENT_SCOPE` (403) | Show scope/plan requirement message | ⬜ |
-| `NOT_FOUND` (404) | Resource not found display | ⬜ |
-| `BAD_REQUEST` (400) | Show parameter/field error | ⬜ |
-| `VALIDATION_FAILED` (422) | Show field-level errors on form | ⬜ |
-| `RATE_LIMITED` (429) | Show retry-after countdown | ⬜ |
-| `IDEMPOTENCY_CONFLICT` (409) | Show conflict error on create | ⬜ |
-| `IMMUTABLE_PROVIDER_FIELD` (409) | Show immutability error on edit | ⬜ |
-| `TRANSACTION_CONFLICT` (409) | Show dependency error on delete/edit | ⬜ |
+| `INVALID_TOKEN` (401) | Redirect to login or re-auth prompt | ✅ |
+| `INSUFFICIENT_SCOPE` (403) | Show scope/plan requirement message | ✅ |
+| `NOT_FOUND` (404) | Resource not found display | ✅ |
+| `BAD_REQUEST` (400) | Show parameter/field error | ✅ |
+| `VALIDATION_FAILED` (422) | Show field-level errors on form | ✅ |
+| `RATE_LIMITED` (429) | Show retry-after countdown | ✅ |
+| `IDEMPOTENCY_CONFLICT` (409) | Show conflict error on create | ✅ |
+| `IMMUTABLE_PROVIDER_FIELD` (409) | Show immutability error on edit | ✅ |
+| `TRANSACTION_CONFLICT` (409) | Show dependency error on delete/edit | ✅ |
 
 ---
 

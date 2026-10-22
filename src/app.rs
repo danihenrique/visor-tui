@@ -270,6 +270,10 @@ impl VisorApp {
                     if k.name == "enter" {
                         if !self.login_token_input.is_empty() {
                             let token = self.login_token_input.trim().to_string();
+                            if let Err(msg) = auth::validate_pat(&token) {
+                                self.login_error = Some(msg);
+                                return;
+                            }
                             let cred = auth::Credential::PersonalToken {
                                 token: token.clone(),
                             };

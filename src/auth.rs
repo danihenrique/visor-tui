@@ -138,6 +138,21 @@ fn credentials_path() -> PathBuf {
     config::config_dir().join("credentials.json")
 }
 
+/// Validate that a personal access token has the expected `visor_pat_` prefix.
+///
+/// Returns `Ok(())` when valid, or an error message describing what's wrong.
+pub fn validate_pat(token: &str) -> Result<(), String> {
+    if token.is_empty() {
+        return Err("O token não pode ser vazio.".to_owned());
+    }
+    if !token.starts_with("visor_pat_") {
+        return Err(
+            "Token inválido: tokens de acesso pessoal devem começar com `visor_pat_`.".to_owned(),
+        );
+    }
+    Ok(())
+}
+
 /// Redact a token for safe display.
 ///
 /// If the token starts with `visor_pat_`, show `visor_pat_{prefix}_…` where
@@ -159,11 +174,18 @@ pub fn redact_token(token: &str) -> String {
 /// Priority: `VISOR_TOKEN` env var > resolved store (keyring or file).
 /// When the store is Keyring and keyring access fails, falls back to file
 /// store with a warning rather than crashing.
+///
+/// Personal access tokens loaded from `VISOR_TOKEN` are validated for the
+/// expected `visor_pat_` prefix; invalid tokens are rejected with a warning.
 #[must_use]
 pub fn load_credential() -> Option<Credential> {
     // Env override takes precedence
     if let Ok(token) = std::env::var("VISOR_TOKEN")
         && !token.is_empty() {
+            if let Err(msg) = validate_pat(&token) {
+                eprintln!("warning: VISOR_TOKEN ignored: {msg}");
+                return None;
+            }
             return Some(Credential::PersonalToken { token });
         }
 
@@ -204,9 +226,13 @@ fn load_from_file() -> Option<Credential> {
 
 /// Save credential to the resolved store.
 ///
-/// When the store is Keyring and keyring access fails, falls back to file
-/// store with a warning rather than crashing.
+/// Personal access tokens are validated for the expected `visor_pat_` prefix
+/// before storage. When the store is Keyring and keyring access fails, falls
+/// back to file store with a warning rather than crashing.
 pub fn save_credential(cred: &Credential) -> std::io::Result<()> {
+    if let Credential::PersonalToken { token } = cred {
+        validate_pat(token).map_err(std::io::Error::other)?;
+    }
     let store = resolve_store();
     save_to_store(&store, cred)
 }
