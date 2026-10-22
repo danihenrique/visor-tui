@@ -63,6 +63,7 @@ visor-tui
 ```
 
 Navigate with arrow keys or Tab. Press `?` for keyboard shortcuts.
+See [UX.md](UX.md) for the full keymap, transaction forms, filters, and mock verification.
 
 ## License
 
