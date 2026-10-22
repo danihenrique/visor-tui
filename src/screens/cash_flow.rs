@@ -1,9 +1,8 @@
 use hqtui::prelude::*;
-use hqtui::widgets::{TableColumn, TableOptions, TableRow};
 
 use crate::api::{ApiClient, ApiError};
 use crate::models::Overview;
-use crate::presentation::TableSelection;
+use crate::presentation::{Metric, TableSelection, Tone, amount, metric_strip};
 
 fn money(value: Option<&str>, currency: &str) -> String {
     crate::presentation::format_currency(value, Some(currency))
@@ -33,103 +32,233 @@ fn render_error(ui: &mut Container<'_>, error: &ApiError) {
 }
 
 fn render_cash_flow_data(ui: &mut Container<'_>, data: &Overview, selection: &mut TableSelection) {
+    let data = data.clone();
     let currency = data.currency_code.as_deref().unwrap_or("BRL");
-    let theme = ui.theme().clone();
-    let mut rows = Vec::new();
-
-    if let Some(start) = &data.period_start {
-        rows.push(TableRow::new(["Início", start]));
-    }
-    if let Some(end) = &data.period_end {
-        rows.push(TableRow::new(["Fim", end]));
-    }
-
-    rows.push(TableRow::new(["RESUMO DO PERÍODO", ""]).color(theme.accent));
-    if let Some(period) = &data.period {
-        rows.push(
-            TableRow::new(["Receitas", &money(period.income.as_deref(), currency)])
-                .color(theme.success),
-        );
-        rows.push(
-            TableRow::new(["Despesas", &money(period.expenses.as_deref(), currency)])
-                .color(theme.danger),
-        );
-        rows.push(
-            TableRow::new(["Resultado", &money(period.result.as_deref(), currency)])
-                .color(amount_color(period.result.as_deref(), &theme)),
-        );
-    } else {
-        rows.push(TableRow::new(["Período", "Sem dados."]));
-    }
-
-    rows.push(TableRow::new(["PROJEÇÃO", ""]).color(theme.accent));
-    if let Some(projection) = &data.projection {
-        rows.push(TableRow::new([
-            "Saldo atual",
-            &money(projection.current_balance.as_deref(), currency),
-        ]));
-        rows.push(
-            TableRow::new([
-                "Receita esperada",
-                &money(projection.expected_income.as_deref(), currency),
-            ])
-            .color(theme.success),
-        );
-        if let Some(outflows) = &projection.committed_outflows {
-            for (label, value) in [
-                ("Faturas", &outflows.bills),
-                ("Parcelas", &outflows.installments),
-                ("Assinaturas", &outflows.subscriptions),
-                ("Agendados", &outflows.scheduled),
-            ] {
-                if let Some(value) = value {
-                    rows.push(
-                        TableRow::new([label, &money(Some(value), currency)]).color(theme.danger),
+    let period = data.period.as_ref();
+    let metrics = vec![
+        Metric::new(
+            "Receitas",
+            money(period.and_then(|p| p.income.as_deref()), currency),
+            Tone::Positive,
+        ),
+        Metric::new(
+            "Despesas",
+            money(period.and_then(|p| p.expenses.as_deref()), currency),
+            Tone::Negative,
+        ),
+        Metric::new(
+            "Resultado",
+            money(period.and_then(|p| p.result.as_deref()), currency),
+            result_tone(period.and_then(|p| p.result.as_deref())),
+        ),
+    ];
+    selection.set_row_count(3);
+    let selected = selection.selected().unwrap_or_default();
+    let full = ui.height() >= 20;
+    let dense = ui.height() < 25;
+    let wide = ui.width() >= 90;
+    let tiles = ui.height() >= 14;
+    ui.column(
+        Column::new().gap(usize::from(tiles && !dense)),
+        move |col| {
+            let currency = data.currency_code.clone().unwrap_or_else(|| "BRL".into());
+            col.label(&format!(
+                "{} a {}",
+                data.period_start.as_deref().unwrap_or("Sem início"),
+                data.period_end.as_deref().unwrap_or("Sem fim")
+            ));
+            if tiles {
+                metric_strip(col, metrics);
+            }
+            if full {
+                let period = data.period.clone();
+                let period_currency = currency.clone();
+                col.panel(
+                    Panel::new()
+                        .title("Movimento do período")
+                        .focused(selected == 0)
+                        .size(Size::Cells(if dense { 5 } else { 7 })),
+                    move |panel| {
+                        period_bars(panel, period.as_ref(), &period_currency);
+                    },
+                );
+                let projection = data.projection.clone();
+                if wide {
+                    col.row(Row::new().gap(1), move |row| {
+                        let second = projection.clone();
+                        let second_currency = currency.clone();
+                        row.panel(
+                            Panel::new().title("Próximo saldo").focused(selected == 1),
+                            move |panel| projection_bars(panel, projection.as_ref(), &currency),
+                        );
+                        row.panel(
+                            Panel::new()
+                                .title("Saídas previstas")
+                                .focused(selected == 2),
+                            move |panel| outflow_bars(panel, second.as_ref(), &second_currency),
+                        );
+                    });
+                } else {
+                    col.panel(
+                        Panel::new()
+                            .title(if selected == 2 {
+                                "Saídas previstas"
+                            } else {
+                                "Próximo saldo"
+                            })
+                            .focused(selected != 0),
+                        move |panel| {
+                            if selected == 2 {
+                                outflow_bars(panel, projection.as_ref(), &currency);
+                            } else {
+                                projection_bars(panel, projection.as_ref(), &currency);
+                            }
+                        },
                     );
                 }
+            } else {
+                let title = ["Movimento do período", "Próximo saldo", "Saídas previstas"][selected];
+                col.panel(Panel::new().title(title), move |panel| match selected {
+                    0 => period_bars(panel, data.period.as_ref(), &currency),
+                    1 => projection_bars(panel, data.projection.as_ref(), &currency),
+                    _ => outflow_bars(panel, data.projection.as_ref(), &currency),
+                });
             }
-        }
-        rows.push(
-            TableRow::new([
-                "Saldo projetado",
-                &money(projection.projected_balance.as_deref(), currency),
-            ])
-            .color(amount_color(
-                projection.projected_balance.as_deref(),
-                &theme,
-            )),
-        );
-    } else {
-        rows.push(TableRow::new(["Projeção", "Sem dados."]));
-    }
-
-    selection.set_row_count(rows.len());
-    let selected = selection.selected();
-    ui.panel(Panel::new().title("Fluxo de Caixa"), move |panel| {
-        panel.table(
-            TableOptions {
-                columns: vec![
-                    TableColumn::new("Campo").width(Size::Cells(20)),
-                    TableColumn::new("Valor").width(Size::Fill),
-                ],
-                selected,
-                rows,
-                header: false,
-                follow_selection: true,
-                scrollbar: true,
-                zebra: true,
-                ..Default::default()
-            },
-            "cash_flow_facts",
-        );
-    });
+            col.label(&format!("j/k Seções  ·  {}/3", selected + 1));
+        },
+    );
 }
 
-fn amount_color(value: Option<&str>, theme: &Theme) -> Color {
-    match value.and_then(|value| value.parse::<f64>().ok()) {
-        Some(amount) if amount > 0.0 => theme.success,
-        Some(amount) if amount < 0.0 => theme.danger,
-        _ => theme.foreground,
+fn result_tone(value: Option<&str>) -> Tone {
+    match amount(value) {
+        Some(value) if value > 0.0 => Tone::Positive,
+        Some(value) if value < 0.0 => Tone::Negative,
+        _ => Tone::Neutral,
+    }
+}
+
+fn period_bars(
+    ui: &mut Container<'_>,
+    period: Option<&crate::models::OverviewPeriod>,
+    currency: &str,
+) {
+    let Some(period) = period else {
+        ui.label("Nenhum movimento disponível neste período.");
+        return;
+    };
+    financial_bars(
+        ui,
+        &[
+            ("Receitas", period.income.as_deref(), Tone::Positive),
+            ("Despesas", period.expenses.as_deref(), Tone::Negative),
+            (
+                "Resultado",
+                period.result.as_deref(),
+                result_tone(period.result.as_deref()),
+            ),
+        ],
+        currency,
+    );
+}
+
+fn projection_bars(
+    ui: &mut Container<'_>,
+    projection: Option<&crate::models::OverviewProjection>,
+    currency: &str,
+) {
+    let Some(projection) = projection else {
+        ui.label("Nenhuma projeção disponível.");
+        return;
+    };
+    financial_bars(
+        ui,
+        &[
+            (
+                "Saldo atual",
+                projection.current_balance.as_deref(),
+                result_tone(projection.current_balance.as_deref()),
+            ),
+            (
+                "A receber",
+                projection.expected_income.as_deref(),
+                Tone::Positive,
+            ),
+            (
+                "Saldo projetado",
+                projection.projected_balance.as_deref(),
+                result_tone(projection.projected_balance.as_deref()),
+            ),
+        ],
+        currency,
+    );
+}
+
+fn outflow_bars(
+    ui: &mut Container<'_>,
+    projection: Option<&crate::models::OverviewProjection>,
+    currency: &str,
+) {
+    let Some(projection) = projection else {
+        ui.label("Nenhuma previsão disponível.");
+        return;
+    };
+    let outflows = projection.committed_outflows.as_ref();
+    financial_bars(
+        ui,
+        &[
+            (
+                "Faturas",
+                outflows.and_then(|o| o.bills.as_deref()),
+                Tone::Negative,
+            ),
+            (
+                "Parcelas",
+                outflows.and_then(|o| o.installments.as_deref()),
+                Tone::Negative,
+            ),
+            (
+                "Assinaturas",
+                outflows.and_then(|o| o.subscriptions.as_deref()),
+                Tone::Negative,
+            ),
+            (
+                "Agendados",
+                outflows.and_then(|o| o.scheduled.as_deref()),
+                Tone::Negative,
+            ),
+            (
+                "Dia a dia",
+                projection.estimated_day_to_day.as_deref(),
+                Tone::Warning,
+            ),
+        ],
+        currency,
+    );
+}
+
+fn financial_bars(ui: &mut Container<'_>, values: &[(&str, Option<&str>, Tone)], currency: &str) {
+    let max = values
+        .iter()
+        .filter_map(|(_, value, _)| amount(*value))
+        .map(f64::abs)
+        .fold(1.0, f64::max);
+    for &(label, raw, tone) in values {
+        let text = money(raw, currency);
+        if let Some(value) = amount(raw) {
+            ui.meter(MeterOptions {
+                value: value.abs(),
+                max: Some(max),
+                label: Some(label.to_string()),
+                label_width: Some(16),
+                text: Some(text),
+                value_width: Some(18),
+                color: Some(tone.color(ui.theme())),
+                heat: Some(false),
+                ..Default::default()
+            });
+        } else {
+            ui.label(&format!("{label}  ·  Indisponível"));
+        }
     }
 }
 
@@ -139,49 +268,37 @@ mod tests {
     use hqtui::testing::render_to_text;
 
     #[test]
-    fn result_and_projected_balance_remain_reachable() {
+    fn every_cash_flow_section_is_reachable_without_flattening_records() {
         let data: Overview = serde_json::from_value(serde_json::json!({
-            "currency_code": "BRL",
-            "period_start": "2026-10-01",
-            "period_end": "2026-10-31",
-            "period": {"income": "5000", "expenses": "1200", "result": "3800"},
-            "projection": {
-                "current_balance": "3800", "expected_income": "500",
-                "committed_outflows": {"bills": "100", "installments": "200", "subscriptions": "30", "scheduled": "40"},
-                "projected_balance": "3930"
-            }
+            "currency_code":"BRL", "period_start":"2026-10-01", "period_end":"2026-10-31",
+            "period":{"income":"5000", "expenses":"1200", "result":"3800"},
+            "projection":{"current_balance":"3800", "expected_income":"500", "projected_balance":"3930",
+                "estimated_day_to_day":"90", "committed_outflows":{"bills":"100", "installments":"200", "subscriptions":"30", "scheduled":"40"}}
         })).unwrap();
-        for (width, height) in [(60, 18), (80, 24)] {
+        for (width, height) in [(56, 10), (60, 18), (80, 24)] {
             let mut selection = TableSelection::default();
-            let first = render_to_text(width, height, "dark", |ui| {
-                crate::presentation::shell(
-                    ui,
-                    crate::keymap::Screen::CashFlow,
-                    "Pessoal".into(),
-                    "Ok".into(),
-                    false,
-                    |content| render_cash_flow_data(content, &data, &mut selection),
+            let mut seen = String::new();
+            for _ in 0..3 {
+                seen.push_str(&render_to_text(width, height, "dark", |ui| {
+                    render_cash_flow_data(ui, &data, &mut selection);
+                }));
+                selection.move_by(1);
+            }
+            for text in [
+                "Resultado",
+                "3.800,00 BRL",
+                "Saldo projetado",
+                "3.930,00 BRL",
+                "Agendados",
+                "Dia a dia",
+            ] {
+                assert!(
+                    seen.contains(text),
+                    "{width}x{height}: missing {text}\n{seen}"
                 );
-            });
-            assert!(
-                first.contains("Resultado") && first.contains("3.800,00 BRL"),
-                "{width}x{height}\n{first}"
-            );
-            selection.move_by(isize::MAX);
-            let last = render_to_text(width, height, "dark", |ui| {
-                crate::presentation::shell(
-                    ui,
-                    crate::keymap::Screen::CashFlow,
-                    "Pessoal".into(),
-                    "Ok".into(),
-                    false,
-                    |content| render_cash_flow_data(content, &data, &mut selection),
-                );
-            });
-            assert!(
-                last.contains("Saldo projetado") && last.contains("3.930,00 BRL"),
-                "{width}x{height}\n{last}"
-            );
+            }
+            assert_eq!(selection.selected(), Some(2));
+            assert!(!seen.contains("Campo"));
         }
     }
 }
