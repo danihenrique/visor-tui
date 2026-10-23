@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/banner.png" alt="Visor TUI — Terminal UI for Visor Finance" width="1280">
+</p>
+
 # visor-tui
 
 Terminal UI for [Visor Finance](https://visorfinance.app) personal API.
