@@ -303,37 +303,14 @@ pub fn shell_interactive<'a>(
     let compact = ui.width() <= 100;
     let wide = ui.width() >= 110 && ui.height() >= 24;
     let grouped = ui.height() >= 30;
-    let short = ui.height() < 14;
     let muted = ui.theme().muted;
     let accent = ui.theme().accent;
     let surface = ui.theme().surface;
     let header_hits = hits.clone();
     ui.column(Column::new().gap(0), move |col| {
-        col.row(
-            Row::new()
-                .size(Size::Cells(if short { 1 } else { 2 }))
-                .gap(2)
-                .background(surface),
-            move |header| {
-                header.column(Column::new().size(Size::Cells(8)), move |brand| {
-                    brand.styled_text(" VISOR", TextStyle::new().fg(accent).bold());
-                });
-                header.column(Column::new().size(Size::Fill), move |title| {
-                    let label = format!("{} ▾ Telas  ·  {space}", current.label());
-                    if modal_open {
-                        title.text(&label);
-                    } else {
-                        title.sized(Size::Cells(1), move |line| {
-                            line.mouse_button(
-                                ButtonOptions::new(label).variant(ButtonVariant::Ghost),
-                                "nav:picker",
-                                &header_hits,
-                            );
-                        });
-                    }
-                });
-            },
-        );
+        col.sized(Size::Cells(1), move |header| {
+            compact_header(header, current, space, period, header_hits, !modal_open);
+        });
         col.row(Row::new().size(Size::Fill).gap(1), move |body| {
             let nav_hits = hits.clone();
             if wide {
@@ -386,9 +363,6 @@ pub fn shell_interactive<'a>(
                 );
             }
             body.column(Column::new().size(Size::Fill).gap(0), move |main| {
-                if current.uses_period() {
-                    period_bar(main, period, hits, !modal_open);
-                }
                 main.column(Column::new().size(Size::Fill), content);
             });
         });
@@ -423,61 +397,83 @@ pub fn shell_interactive<'a>(
     });
 }
 
-pub fn period_bar(ui: &mut Container<'_>, label: String, hits: Interactions, enabled: bool) {
-    ui.sized(Size::Cells(3), move |ui| {
-        ui.draw(move |surface| {
-            use hqtui::{
-                buffer::{Attrs, Style},
-                surface::TextOptions,
-                unicode::{Align, fit, string_width},
-            };
-            surface.fill(&Style::new().with_bg(surface.theme.surface));
-            let label_width = string_width(&label).min(surface.width().saturating_sub(12));
-            let center_width = label_width + 8;
-            let x = surface.width().saturating_sub(center_width) / 2;
-            let y = surface.height().min(2).saturating_sub(1);
-            let text = format!("◀   {}   ▶", fit(&label, label_width, Align::Center));
-            surface.text(
-                coord(x),
-                coord(y),
-                &text,
-                &TextOptions {
-                    fg: Some(surface.theme.accent),
-                    attrs: Some(Attrs::BOLD),
-                    ..Default::default()
-                },
+fn compact_header(
+    ui: &mut Container<'_>,
+    screen: Screen,
+    space: String,
+    period: String,
+    hits: Interactions,
+    enabled: bool,
+) {
+    use hqtui::{
+        buffer::{Attrs, Style},
+        surface::TextOptions,
+        unicode::{Align, fit, string_width},
+    };
+    ui.draw(move |surface| {
+        surface.fill(&Style::new().with_bg(surface.theme.surface));
+        let brand_width = surface.width().min(8);
+        let available = surface.width().saturating_sub(brand_width + 1);
+        let picker = " ▾ Telas";
+        let picker_width = string_width(picker);
+        let nav_width = string_width(screen.label()) + picker_width;
+        let space_min = string_width(&space).min(7) + 3;
+        let period_width = if screen.uses_period() && available >= 4 {
+            (string_width(&period) + 4)
+                .min(available.saturating_sub(nav_width + space_min + 2).max(4))
+                .min(available)
+        } else {
+            0
+        };
+        let identity_width = available
+            .saturating_sub(period_width)
+            .saturating_sub(usize::from(period_width > 0) * 2);
+        let nav_width = nav_width.min(identity_width);
+        let screen_width = nav_width.saturating_sub(picker_width);
+        let nav = format!(
+            "{}{}",
+            fit(screen.label(), screen_width, Align::Left),
+            fit(picker, nav_width - screen_width, Align::Left),
+        );
+        let accent = TextOptions::new()
+            .fg(surface.theme.accent)
+            .attrs(Attrs::BOLD);
+        let draw = |x, width, text: &str, style: &TextOptions, action: Option<&str>| {
+            let drawn = surface.text(coord(x), 0, &fit(text, width, Align::Left), style);
+            if enabled && let Some(action) = action {
+                hits.add(
+                    &surface.sub(coord(x), 0, drawn, 1),
+                    Control::Button(action.into()),
+                );
+            }
+        };
+        draw(0, brand_width, " VISOR  ", &accent, None);
+        draw(
+            brand_width,
+            nav_width,
+            &nav,
+            &TextOptions::new().fg(surface.theme.foreground),
+            Some("nav:picker"),
+        );
+        draw(
+            brand_width + nav_width,
+            identity_width.saturating_sub(nav_width),
+            &format!(" · {space}"),
+            &TextOptions::new().fg(surface.theme.muted),
+            None,
+        );
+        if period_width > 0 {
+            let x = surface.width().saturating_sub(period_width + 1);
+            draw(x, 1, "◀", &accent, Some("period:previous"));
+            draw(
+                x + 2,
+                period_width - 4,
+                &period,
+                &accent,
+                Some("period:picker"),
             );
-            let shortcuts = "[ ] T p";
-            if x + center_width + 2 + shortcuts.len() <= surface.width() {
-                surface.text(
-                    coord(x + center_width + 2),
-                    coord(y),
-                    shortcuts,
-                    &TextOptions::new().fg(surface.theme.muted),
-                );
-            } else {
-                surface.text(
-                    coord(surface.width().saturating_sub(shortcuts.len()) / 2),
-                    coord(y + 1),
-                    shortcuts,
-                    &TextOptions::new().fg(surface.theme.muted),
-                );
-            }
-            if enabled {
-                hits.add(
-                    &surface.sub(coord(x), coord(y), 3, 1),
-                    Control::Button("period:previous".into()),
-                );
-                hits.add(
-                    &surface.sub(coord(x + 4), coord(y), label_width, 1),
-                    Control::Button("period:picker".into()),
-                );
-                hits.add(
-                    &surface.sub(coord(x + center_width - 3), coord(y), 3, 1),
-                    Control::Button("period:next".into()),
-                );
-            }
-        });
+            draw(x + period_width - 1, 1, "▶", &accent, Some("period:next"));
+        }
     });
 }
 
@@ -499,9 +495,9 @@ mod tests {
     use hqtui::testing::render_to_text;
 
     #[test]
-    fn shared_period_bar_is_centered_above_content_and_uses_rendered_targets() {
+    fn period_screens_share_one_header_row_and_rendered_click_targets() {
         use crate::interaction::test_support::click_text;
-        for (width, height) in [(120, 40), (80, 24)] {
+        for (width, height) in [(60, 18), (80, 24), (120, 40)] {
             for screen in Screen::all()
                 .into_iter()
                 .filter(|screen| screen.uses_period())
@@ -521,21 +517,20 @@ mod tests {
                         },
                     );
                 });
-                let period_row = text
-                    .lines()
-                    .position(|line| line.contains("Outubro 2026"))
-                    .unwrap();
-                let summary_row = text
-                    .lines()
-                    .position(|line| line.contains("Receitas do período"))
-                    .unwrap();
-                assert!(period_row >= 2 && period_row < summary_row, "{text}");
-                let line = text.lines().nth(period_row).unwrap();
-                let label_x =
-                    hqtui::unicode::string_width(&line[..line.find("Outubro 2026").unwrap()]);
-                let content_left = if width >= 110 { 27 } else { 0 };
-                let expected = content_left + (width - content_left) / 2;
-                assert!((label_x + 5).abs_diff(expected) <= 1, "{text}");
+                let header = text.lines().next().unwrap();
+                for label in [
+                    "VISOR",
+                    screen.label(),
+                    "Telas",
+                    "Pessoal",
+                    "◀ Outubro 2026 ▶",
+                ] {
+                    assert!(header.contains(label), "{width}x{height}\n{text}");
+                }
+                assert!(
+                    text.lines().nth(1).unwrap().contains("Receitas do período"),
+                    "{text}"
+                );
                 for (label, action) in [
                     ("◀", "period:previous"),
                     ("Outubro 2026", "period:picker"),
@@ -547,7 +542,149 @@ mod tests {
                     );
                 }
                 assert!(hits.pressed(&[click_text(&text, "Telas")], "nav:picker"));
+                assert!(
+                    text.lines()
+                        .last()
+                        .unwrap()
+                        .contains("[ ] Mês  T Hoje  p Período")
+                );
             }
+        }
+    }
+
+    #[test]
+    fn long_unicode_space_and_custom_period_fit_without_overlapping_controls() {
+        use crate::interaction::test_support::click_text;
+        use hqtui::unicode::string_width;
+        let period = "01/09/2026 a 30/09/2026";
+        for (width, height) in [(60, 18), (80, 24), (120, 40)] {
+            for screen in Screen::all()
+                .into_iter()
+                .filter(|screen| screen.uses_period())
+            {
+                let hits = Interactions::default();
+                let text = render_to_text(width, height, "dark", |ui| {
+                    shell_interactive(
+                        ui,
+                        screen,
+                        "家族👨‍👩‍👧‍👦 Cafe\u{301} Pessoal com um nome muito longo".repeat(3),
+                        "Pronto".into(),
+                        period.into(),
+                        false,
+                        hits.clone(),
+                        |content| {
+                            content.text("Conteúdo");
+                        },
+                    );
+                });
+                let header = text.lines().next().unwrap();
+                assert!(string_width(header) <= width, "{text}");
+                for label in ["VISOR", screen.label(), "Telas", "家族", "◀", "▶"] {
+                    assert!(header.contains(label), "{text}");
+                }
+                let (_, period_text) = header.split_once('◀').unwrap();
+                let (period_text, _) = period_text.split_once('▶').unwrap();
+                let period_text = period_text.trim();
+                if width >= 80 {
+                    assert_eq!(period_text, period, "{text}");
+                } else {
+                    assert!(period_text.starts_with("01/09/2026"), "{text}");
+                    assert!(period_text.ends_with('…'), "{text}");
+                }
+                for (label, action) in [
+                    ("Telas", "nav:picker"),
+                    ("◀", "period:previous"),
+                    (period_text, "period:picker"),
+                    ("▶", "period:next"),
+                ] {
+                    assert!(hits.pressed(&[click_text(header, label)], action), "{text}");
+                }
+                assert_eq!(hits.at(width, 0), None);
+                assert!(text.lines().nth(1).unwrap().contains("Conteúdo"), "{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn modal_headers_have_no_targets_and_nonperiod_headers_have_no_period() {
+        for (width, height) in [(60, 18), (80, 24), (120, 40)] {
+            for screen in Screen::all() {
+                for modal_open in [false, true] {
+                    let hits = Interactions::default();
+                    let text = render_to_text(width, height, "dark", |ui| {
+                        shell_interactive(
+                            ui,
+                            screen,
+                            "Pessoal".into(),
+                            "Pronto".into(),
+                            "Outubro 2026".into(),
+                            modal_open,
+                            hits.clone(),
+                            |content| {
+                                content.text("Conteúdo");
+                            },
+                        );
+                    });
+                    let header = text.lines().next().unwrap();
+                    assert!(
+                        header.contains("VISOR") && header.contains("Telas"),
+                        "{text}"
+                    );
+                    assert_eq!(
+                        header.contains("Outubro 2026"),
+                        screen.uses_period(),
+                        "{text}"
+                    );
+                    assert_eq!(header.contains('◀'), screen.uses_period(), "{text}");
+                    assert_eq!(header.contains('▶'), screen.uses_period(), "{text}");
+                    assert!(text.lines().nth(1).unwrap().contains("Conteúdo"), "{text}");
+                    for x in 0..width {
+                        if modal_open {
+                            assert_eq!(hits.at(x, 0), None, "{text}");
+                        } else if !screen.uses_period() {
+                            assert!(
+                                !matches!(hits.at(x, 0), Some(Control::Button(id)) if id.starts_with("period:")),
+                                "{text}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn header_clips_tiny_widths_without_registering_hidden_controls() {
+        use crate::interaction::test_support::click_text;
+        use hqtui::unicode::string_width;
+        for width in 0..60 {
+            let hits = Interactions::default();
+            let text = render_to_text(width, 18, "dark", |ui| {
+                shell_interactive(
+                    ui,
+                    Screen::CashFlow,
+                    "家族 Pessoal".into(),
+                    "Pronto".into(),
+                    "Setembro 2026".into(),
+                    false,
+                    hits.clone(),
+                    |content| {
+                        content.text("Conteúdo");
+                    },
+                );
+            });
+            let header = text.lines().next().unwrap_or_default();
+            assert!(string_width(header) <= width, "{width}\n{text}");
+            for (label, action) in [("◀", "period:previous"), ("▶", "period:next")] {
+                if header.contains(label) {
+                    assert!(
+                        hits.pressed(&[click_text(header, label)], action),
+                        "{width}\n{text}"
+                    );
+                }
+            }
+            assert_eq!(hits.at(width, 0), None, "{width}\n{text}");
+            assert_eq!(hits.at(width.saturating_add(1), 0), None, "{width}\n{text}");
         }
     }
 

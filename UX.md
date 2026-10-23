@@ -17,10 +17,11 @@ The selected calendar period persists across screens and space changes.
 
 ## Calendar periods
 
-The default is the current calendar month in Brasília. A centered, accented period
-bar spans the content area directly above the summaries and records. Click its
-arrows to change month or its label to open the period picker. Muted keyboard hints
-sit beside the label. `[` and `]` select the previous or next calendar month relative
+The default is the current calendar month in Brasília. The accented period control
+sits on the same header row as VISOR, the screen name, Telas and the space. It is
+right-aligned, with summaries and records directly below the header. Click its
+arrows to change month or its label to open the period picker. Keyboard hints
+remain in the footer. `[` and `]` select the previous or next calendar month relative
 to the range's start. `T` returns to the current month. `p` opens the period picker
 with Mês, Semana, Trimestre, Ano and Personalizado. Weeks start on Monday.
 Custom ranges include both endpoints and accept `DD/MM/YYYY` or `YYYY-MM-DD`.
@@ -49,8 +50,10 @@ scope; selected-period movement comes from the complete transaction range.
 The shell uses a restrained blue-gray palette, teal selection, rounded borders,
 and muted secondary text. The wide sidebar groups navigation and highlights only
 the active screen. At 80 columns the sidebar yields its width to the content.
-The header keeps the screen and space names visible. Period-based screens have a
-separate period bar above their content. The footer shows keyboard hints and the
+The shared header occupies one row on every screen. Period-based screens keep
+their arrows and date label on that row, beside the screen and space names, with
+no separate period band. Long space names and date ranges shorten at narrow widths
+without wrapping or hiding the arrows. The footer shows keyboard hints and the
 request status.
 
 | Screen | Layout |
@@ -216,6 +219,8 @@ Delayed responses and failed later pages verify loading, unavailable totals and
 complete recovery on retry.
 Mouse checks at 120×40 and 80×24 cover capture, period controls, rows, double-click,
 wheel scrolling, toolbar actions, form focus, dialog buttons, and modal isolation.
+Header checks cover all six period-based screens and require the arrows, period
+label, VISOR and Telas on the first row, with content immediately below it.
 They also resize a running terminal and repeat clicks using the new layout.
 The 61-second check beyond the cache TTL runs
 at 120×40. No real account is used.

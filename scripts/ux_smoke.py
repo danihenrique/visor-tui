@@ -374,7 +374,7 @@ class Terminal:
     def body_cells(self):
         return tuple(
             self.screen.buffer[row][column]
-            for row in range(2, self.rows - 2)
+            for row in range(1, self.rows - 2)
             for column in range(self.columns)
         )
 
@@ -517,11 +517,23 @@ def october(terminal):
     terminal.expect("Outubro 2026")
 
 
+def check_period_header(terminal, label):
+    label_x, label_y = terminal.position(label)
+    left_x, left_y = terminal.position("◀")
+    right_x, right_y = terminal.position("▶")
+    assert label_y == left_y == right_y == 0, f"Period controls left the top header:\n{terminal.text()}"
+    assert terminal.position("VISOR")[1] == terminal.position("Telas")[1] == 0
+    assert left_x < label_x < right_x, f"Period label is outside its arrows:\n{terminal.text()}"
+    assert terminal.screen.buffer[label_y][label_x].bold, "Period label lost its accent"
+    assert terminal.screen.display[1].strip(), f"Empty band beneath the header:\n{terminal.text()}"
+
+
 def check_periods(terminal, captures):
     today = datetime.now(BRASILIA).date()
     current = (today.replace(day=1).isoformat(), today.replace(day=calendar.monthrange(today.year, today.month)[1]).isoformat())
     expect_last_range(current)
     terminal.expect(f"{MONTHS[today.month - 1]} {today.year}")
+    check_period_header(terminal, f"{MONTHS[today.month - 1]} {today.year}")
     terminal.send("2")
     custom_period(terminal, "01/10/2026", "31/10/2026")
     terminal.wait_until(lambda: "14 lançamentos" in terminal.text(), "Selected period did not load every page")
@@ -601,6 +613,7 @@ def check_periods(terminal, captures):
         terminal.send(key)
         terminal.expect(title)
         terminal.expect("Outubro 2026")
+        check_period_header(terminal, "Outubro 2026")
         terminal.capture(captures, f"period-{name}")
         if name in {"overview", "cash-flow"}:
             for value in ("11.200,00", "4.075,20", "7.124,80"):
@@ -701,28 +714,23 @@ def check_mouse_periods(terminal, captures):
     terminal.click("Aplicar", occurrence=-1)
     terminal.expect("2 lançamentos")
     expect_last_range(("2026-09-01", "2026-09-30"))
+    check_period_header(terminal, "01/09/2026 a 30/09/2026")
+    terminal.click("01/09/2026 a 30/09/2026")
+    terminal.expect("Selecionar período")
+    terminal.click("Cancelar", occurrence=-1)
     october(terminal)
     for name in ("overview", "transactions", "cash-flow", "categories", "bills", "payables"):
         terminal.send(SCREENS[name][0])
-        label_x, label_y = terminal.position("Outubro 2026")
-        left_x, left_y = terminal.position("◀")
-        right_x, right_y = terminal.position("▶")
-        assert left_y == label_y == right_y, f"Period controls are not on the same bar on {name}"
-        assert left_x < label_x < right_x, f"Period label is outside its arrows on {name}"
-        assert label_y >= 3, f"Period bar is crammed into the title on {name}"
-        assert terminal.screen.buffer[label_y][label_x].bold, f"Period label is not prominent on {name}"
-        background = terminal.screen.buffer[label_y][label_x].bg
-        bar_start, bar_end = label_x, label_x
-        while bar_start > 0 and terminal.screen.buffer[label_y][bar_start - 1].bg == background:
-            bar_start -= 1
-        while bar_end + 1 < terminal.columns and terminal.screen.buffer[label_y][bar_end + 1].bg == background:
-            bar_end += 1
-        assert abs(label_x - (bar_start + bar_end) // 2) <= 1, f"Period label is not centered in its rendered bar on {name}"
+        check_period_header(terminal, "Outubro 2026")
+        terminal.click("◀")
+        terminal.expect("Setembro 2026")
+        terminal.click("▶")
+        terminal.expect("Outubro 2026")
         terminal.click("Outubro 2026")
         terminal.expect("Selecionar período")
         terminal.click("Cancelar", occurrence=-1)
         assert "Selecionar período" not in terminal.text(), "Period cancel did not close the picker"
-    terminal.capture(captures, "mouse-period-bar")
+    terminal.capture(captures, "mouse-period-header")
 
 
 def check_mouse_transactions(terminal, config, captures):
@@ -1023,6 +1031,7 @@ def check_mouse(binary, config, server, columns, rows, captures):
         terminal.expect("Setembro 2026")
         terminal.click("▶")
         terminal.expect("Outubro 2026")
+        check_period_header(terminal, "Outubro 2026")
         terminal.click("n Nova")
         terminal.expect("Nova transação")
         terminal.click("Esc Cancelar")
@@ -1032,7 +1041,7 @@ def check_mouse(binary, config, server, columns, rows, captures):
         terminal.process.wait(timeout=3)
         assert terminal.process.returncode == 0
         assert not Fixture.errors, Fixture.errors
-        print(f"PASS {columns}x{rows}: mouse capture, period bar, picker, rows, wheel, toolbar, forms, modals, tabs, spaces, resize", flush=True)
+        print(f"PASS {columns}x{rows}: mouse capture, period header, picker, rows, wheel, toolbar, forms, modals, tabs, spaces, resize", flush=True)
     finally:
         terminal.close()
 
